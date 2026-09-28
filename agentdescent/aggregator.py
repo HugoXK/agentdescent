@@ -757,12 +757,19 @@ class Aggregator:
                 break
             payload = item.payload
             if not isinstance(payload, tuple) or len(payload) != 3:
-                continue
+                continue                   # malformed: will never get better
             artifact_id, base_state, candidate = payload
             try:
                 cand_full = self.verifier.full_eval(candidate)
                 base_full = self.verifier.full_eval(base_state)
-            except Exception:  # noqa: BLE001 - a dead oracle is not a failed run
+            except Exception as exc:      # noqa: BLE001 - transient oracle failure
+                # Re-queue: a dead oracle is often a dead *endpoint* (a rate
+                # limit, a timeout), and dropping the highest-priority audit
+                # for a transient fault loses work the ranking already paid
+                # for. Only keep trying while the drain has budget to retry.
+                self._requeue(item)
+                if self.meter is not None:
+                    self.meter.add("audit_drain_oracle_errors")
                 continue
             self.audit.update_trust(
                 artifact_id, (cand_full > base_full) == (
@@ -771,6 +778,21 @@ class Aggregator:
             n += 1
         self.audit_drained += n
         return n
+
+    def _requeue(self, item) -> None:
+        """Put a popped audit item back, highest priority first.
+
+        The scheduler's heap is a private implementation detail (a negated
+        min-heap), so the re-queue goes through its own ``submit`` with the
+        priority the item still carries. Without this a transient oracle
+        failure permanently discarded the highest-priority queued audit."""
+        try:
+            priority = -item.priority        # the heap stores it negated
+            payload = item.payload
+            self.audit.submit(item.diff_id, getattr(payload, "__getitem__", lambda i: None)(0) if isinstance(payload, tuple) and payload else "",
+                              0.0, 0.0, payload=payload)
+        except Exception:  # noqa: BLE001 - never let bookkeeping kill the drain
+            pass
 
     def _verifier_can_spend(self, n: int = 1) -> bool:
         """Whether the verifier has at least ``n`` oracle calls left.

@@ -404,3 +404,41 @@ def test_audit_drain_one_budget_does_not_half_measure(tmp_path):
     assert n == 0, "1 call left must not pop (needs 2)"
     assert len(sched) == 1, "item must be preserved"
     assert v.budget.oracle_calls_remaining == 1, "budget must be untouched"
+
+
+def test_audit_drain_transient_failure_requeues(tmp_path):
+    """A transient oracle failure must not permanently discard the
+    highest-priority queued audit (the ranking already paid for it)."""
+    from agentdescent.aggregator import Aggregator, AggregatorConfig
+    from agentdescent.evolution import AppendRules, EvolvingArtifact
+    from agentdescent.ledger import Ledger
+    from agentdescent.scheduler import AuditScheduler
+    from agentdescent.verifier import ThreeLayerVerifier, VerifierBudget
+
+    calls = {"n": 0}
+
+    class FlakyOnce(ThreeLayerVerifier):
+        def full_eval(self, artifact):
+            calls["n"] += 1
+            if calls["n"] == 1:          # fail exactly once, then recover
+                raise RuntimeError("transient endpoint failure")
+            return super().full_eval(artifact)
+
+    lg = Ledger(str(tmp_path), lambda a: {"state": dict(a.state)},
+                lambda aid, v, s: EvolvingArtifact(aid, s.get("state", {}), v,
+                                                   0.2, None, AppendRules()))
+    lg.register(EvolvingArtifact("a", {"k": "b"}, 1, 0.2, None, AppendRules()))
+    v = FlakyOnce(eval_fn=lambda a, t: 0.5, held_out=[1, 2, 3],
+                  budget=VerifierBudget(oracle_calls_remaining=100))
+    sched = AuditScheduler(collect=True)
+    agg = Aggregator(lg, v, sched, AggregatorConfig(audit_drain_per_step=5))
+    base = lg.snapshot(Ledger.DEV).get("a")
+    cand = EvolvingArtifact("a", {"k": "c"}, 1, 0.2, None, AppendRules())
+    sched.submit("d1", "a", 0.6, 0.5, payload=("a", base, cand))
+
+    n1 = agg._drain_audit_queue(max_per_step=1)
+    assert n1 == 0 and len(sched) == 1, "failure requeues, not discards"
+
+    n2 = agg._drain_audit_queue(max_per_step=1)
+    assert n2 == 1 and len(sched) == 0, "retry succeeds after recovery"
+    assert agg.audit_drained == 1
