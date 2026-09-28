@@ -323,3 +323,84 @@ def test_audit_drain_updates_trust(tmp_path):
     agg._drain_audit_queue(max_per_step=1)
     # trust should have been updated (not necessarily changed, but update_trust was called)
     assert sched.audits >= 0  # the scheduler tracks force_oracle audits, not drain audits
+
+
+def test_audit_drain_custom_verifier_without_budget(tmp_path):
+    """A verifier that satisfies VerifierProtocol but has no budget attribute
+    must not crash _drain_audit_queue (PR #194 review issue 1)."""
+    from agentdescent.aggregator import Aggregator, AggregatorConfig
+    from agentdescent.evolution import AppendRules, EvolvingArtifact
+    from agentdescent.ledger import Ledger
+    from agentdescent.scheduler import AuditScheduler
+
+    class NoBudgetVerifier:
+        def cheap_eval(self, a): return 0.5
+        def learned_eval(self, a): return (0.5, 0.1)
+        def eval_counts(self, a): return (0.5, 0.1)
+        def full_eval(self, a): return 0.5
+
+    lg = Ledger(str(tmp_path), lambda a: {"state": dict(a.state)},
+                lambda aid, v, s: EvolvingArtifact(aid, s.get("state", {}), v,
+                                                   0.2, None, AppendRules()))
+    lg.register(EvolvingArtifact("a", {"k": "b"}, 1, 0.2, None, AppendRules()))
+    sched = AuditScheduler(collect=True)
+    agg = Aggregator(lg, NoBudgetVerifier(), sched,
+                     AggregatorConfig(audit_drain_per_step=2))
+    base = lg.snapshot(Ledger.DEV).get("a")
+    cand = EvolvingArtifact("a", {"k": "c"}, 1, 0.2, None, AppendRules())
+    sched.submit("d1", "a", 0.6, 0.5, payload=("a", base, cand))
+    n = agg._drain_audit_queue(max_per_step=2)
+    assert n == 1, "a no-budget verifier should drain, not crash"
+
+
+def test_audit_drain_zero_budget_does_not_pop(tmp_path):
+    """With zero oracle budget, _drain_audit_queue must not pop items from the
+    queue (PR #194 review issue 2)."""
+    from agentdescent.aggregator import Aggregator, AggregatorConfig
+    from agentdescent.evolution import AppendRules, EvolvingArtifact
+    from agentdescent.ledger import Ledger
+    from agentdescent.scheduler import AuditScheduler
+    from agentdescent.verifier import ThreeLayerVerifier, VerifierBudget
+
+    lg = Ledger(str(tmp_path), lambda a: {"state": dict(a.state)},
+                lambda aid, v, s: EvolvingArtifact(aid, s.get("state", {}), v,
+                                                   0.2, None, AppendRules()))
+    lg.register(EvolvingArtifact("a", {}, 1, 0.2, None, AppendRules()))
+    v = ThreeLayerVerifier(eval_fn=lambda a, t: 0.5, held_out=[1, 2, 3],
+                           budget=VerifierBudget(oracle_calls_remaining=0))
+    sched = AuditScheduler(collect=True)
+    agg = Aggregator(lg, v, sched, AggregatorConfig(audit_drain_per_step=5))
+    base = lg.snapshot(Ledger.DEV).get("a")
+    cand = EvolvingArtifact("a", {"k": "v"}, 1, 0.2, None, AppendRules())
+    for i in range(3):
+        sched.submit(f"d{i}", "a", 0.6, 0.5, payload=("a", base, cand))
+    n = agg._drain_audit_queue(max_per_step=5)
+    assert n == 0, "zero budget must not drain"
+    assert len(sched) == 3, "queue items must be preserved"
+
+
+def test_audit_drain_one_budget_does_not_half_measure(tmp_path):
+    """With only 1 oracle call left, _drain_audit_queue must not pop — a pair
+    needs 2 calls, and half-measuring would compare different task sets
+    (PR #194 review issue 2)."""
+    from agentdescent.aggregator import Aggregator, AggregatorConfig
+    from agentdescent.evolution import AppendRules, EvolvingArtifact
+    from agentdescent.ledger import Ledger
+    from agentdescent.scheduler import AuditScheduler
+    from agentdescent.verifier import ThreeLayerVerifier, VerifierBudget
+
+    lg = Ledger(str(tmp_path), lambda a: {"state": dict(a.state)},
+                lambda aid, v, s: EvolvingArtifact(aid, s.get("state", {}), v,
+                                                   0.2, None, AppendRules()))
+    lg.register(EvolvingArtifact("a", {}, 1, 0.2, None, AppendRules()))
+    v = ThreeLayerVerifier(eval_fn=lambda a, t: 0.5, held_out=[1, 2, 3],
+                           budget=VerifierBudget(oracle_calls_remaining=1))
+    sched = AuditScheduler(collect=True)
+    agg = Aggregator(lg, v, sched, AggregatorConfig(audit_drain_per_step=5))
+    base = lg.snapshot(Ledger.DEV).get("a")
+    cand = EvolvingArtifact("a", {"k": "v"}, 1, 0.2, None, AppendRules())
+    sched.submit("d0", "a", 0.6, 0.5, payload=("a", base, cand))
+    n = agg._drain_audit_queue(max_per_step=5)
+    assert n == 0, "1 call left must not pop (needs 2)"
+    assert len(sched) == 1, "item must be preserved"
+    assert v.budget.oracle_calls_remaining == 1, "budget must be untouched"

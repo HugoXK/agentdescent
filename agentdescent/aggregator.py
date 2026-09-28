@@ -737,11 +737,21 @@ class Aggregator:
         read. A caller sets it through :class:`AggregatorConfig`.
 
         Returns how many audits it ran. The budget is the verifier's own
-        ``oracle_calls_remaining``; when it is spent the drain stops early."""
+        ``oracle_calls_remaining``; when it is spent the drain stops early.
+
+        Budget is checked **before** pop: popping an item and then discovering
+        the budget is gone discards the highest-priority audit without running
+        it. A pair needs two ``full_eval`` calls (base + candidate); checking
+        ``can_spend(2)`` prevents the half-measured case where the first call
+        consumes the last budget and the second falls back to the cheap layer,
+        making trust compare measurements from different task sets.
+        """
         if max_per_step <= 0 or not getattr(self.audit, "_collect", False):
             return 0
         n = 0
         for _ in range(max_per_step):
+            if not self._verifier_can_spend(2):
+                break
             item = self.audit.pop()
             if item is None:
                 break
@@ -749,8 +759,6 @@ class Aggregator:
             if not isinstance(payload, tuple) or len(payload) != 3:
                 continue
             artifact_id, base_state, candidate = payload
-            if not hasattr(self.verifier, "budget") or not self.verifier.budget.can_spend():
-                break
             try:
                 cand_full = self.verifier.full_eval(candidate)
                 base_full = self.verifier.full_eval(base_state)
@@ -763,6 +771,26 @@ class Aggregator:
             n += 1
         self.audit_drained += n
         return n
+
+    def _verifier_can_spend(self, n: int = 1) -> bool:
+        """Whether the verifier has at least ``n`` oracle calls left.
+
+        Read through ``getattr`` rather than ``hasattr`` + direct access: the
+        shipped :class:`~agentdescent.verifier.ThreeLayerVerifier` exposes
+        ``budget.can_spend()``, but :class:`~agentdescent.policies.
+        VerifierProtocol` does not declare ``budget``, and a custom verifier
+        that satisfies the protocol has no such attribute. ``getattr`` with a
+        default keeps the protocol intact -- a verifier with no budget is one
+        that can always spend, which is the behaviour ``force_oracle`` had
+        before this method existed.
+        """
+        budget = getattr(self.verifier, "budget", None)
+        if budget is None:
+            return True
+        remaining = getattr(budget, "oracle_calls_remaining", None)
+        if remaining is None:
+            return True
+        return remaining >= n
 
     def _promote(self, artifact_id: str) -> None:
         """Copy dev onto stable, skipping the git work when they already agree.
