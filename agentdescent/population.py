@@ -104,6 +104,21 @@ class PopulationAggregator(Aggregator):
         #: which is what a run without a token ceiling should report -- it never
         #: runs short of one.
         self.budget_remaining: float = 1.0
+        #: The fork names this aggregator has created, in creation order.
+        #: ``head_for_worker`` cycles through them.
+        self._forks: List[str] = []
+
+    def head_for_worker(self, worker_id: int = 0) -> str:
+        """The branch a worker should snapshot.
+
+        Worker 0 always gets ``dev`` (the primary head, chosen[0]). The rest
+        cycle through the forks (``head/0``, ``head/1``, ...), so a batch of N
+        workers explores up to ``1 + len(self._forks)`` candidates in parallel.
+        With no forks created yet, every worker gets ``dev`` (the old
+        behaviour)."""
+        if worker_id == 0 or not self._forks:
+            return Ledger.DEV
+        return self._forks[(worker_id - 1) % len(self._forks)]
 
     # -- the archive ---------------------------------------------------------
 
@@ -152,7 +167,8 @@ class PopulationAggregator(Aggregator):
             best = max(self._archive, key=lambda entry: entry["score"])
             return dict(best["state"])
 
-    def _commit_state(self, state: Dict[str, str], message: str) -> Optional[int]:
+    def _commit_state(self, state: Dict[str, str], message: str,
+                      branch: str = Ledger.DEV) -> Optional[int]:
         """Replace the head's state outright, deletions included.
 
         ``ops`` carries ``None`` for every key the head has and the target does
@@ -161,7 +177,7 @@ class PopulationAggregator(Aggregator):
         it had ever accumulated and "start from candidate C" quietly meant
         "start from C plus the incumbent". See the module docstring.
         """
-        snap = self.ledger.snapshot(Ledger.DEV)
+        snap = self.ledger.snapshot(branch)
         head = snap.get(self.population_artifact)
         if head is None or dict(head.state) == state:
             return None
@@ -174,7 +190,7 @@ class PopulationAggregator(Aggregator):
             ops=ops, author="population"))
         try:
             _, version = self.ledger.commit(candidate, base_vv,
-                                            branch=Ledger.DEV, message=message)
+                                            branch=branch, message=message)
             return version
         except CASConflict:
             return None
@@ -201,7 +217,7 @@ class PopulationAggregator(Aggregator):
 
     # -- AggregatorProtocol --------------------------------------------------
 
-    def step(self) -> List[MergeReport]:
+    def step(self, n_workers: int = 1) -> List[MergeReport]:
         # Admit the pre-merge head first: on the first step that is the seed,
         # which a post-merge-only admit would lose the moment anything commits
         # over it -- and a population that forgot its seed cannot fall back.
@@ -242,32 +258,60 @@ class PopulationAggregator(Aggregator):
         # the same entry forever. `Beam(4)` was `Beam(1)`, and `ParetoFrontier`
         # sat on whichever front member was admitted first, usually the seed.
         ctx = SelectionContext(head=head_candidate, candidates=tuple(candidates),
-                               round=self._selections, n_workers=1,
+                               round=self._selections, n_workers=n_workers,
                                budget_remaining=self.budget_remaining)
         self._selections += 1
-        chosen = list(self.selection.select(ctx, 1))
+        # Ask for as many starting points as there are workers, so a multi-head
+        # run can explore several candidates in parallel. The ledger's fork
+        # mechanism (``head/<slot>``) holds each one as its own branch.
+        n_heads = min(len(candidates), n_workers if n_workers else 1)
+        chosen = list(self.selection.select(ctx, n_heads))
         if not chosen:
             return reports
+        # chosen[0] is the primary head -> dev. The rest become forks, and each
+        # fork is **created before** the candidate is committed to it, so a
+        # worker that starts from head/1 mid-step never sees a half-written fork.
+        self._forks = []
         self._offered(chosen[0], candidates)
-        target = dict(chosen[0].state)
-        with self._archive_lock:
-            for entry in self._archive:
-                if dict(entry["state"]) == target:
-                    entry["selected"] = int(entry["selected"]) + 1
-                    break
-        version = self._commit_state(target, "population: select parent")
+        for slot, cand in enumerate(chosen):
+            target = dict(cand.state)
+            with self._archive_lock:
+                for entry in self._archive:
+                    if dict(entry["state"]) == target:
+                        entry["selected"] = int(entry["selected"]) + 1
+                        break
+            if slot == 0:
+                version = self._commit_state(target, "population: select parent")
+            else:
+                fork_name = f"head/{slot - 1}"
+                self.ledger.fork(fork_name, from_branch=Ledger.DEV)
+                self._commit_state(target, f"population: head/{slot - 1}",
+                                   branch=fork_name)
+                self._forks.append(fork_name)
         if version is not None:
             reports.append(MergeReport(
                 self.population_artifact, None, False, 0, 0, 0, 0, 0.0, version,
-                reason=f"population: parent switched (archive={len(candidates)})",
+                reason=f"population: parent switched (archive={len(candidates)}, "
+                       f"heads={len(self._forks)})",
                 category="population-select"))
         return reports
 
     def finalize(self) -> None:
-        """Leave the best-scoring candidate on the head, then promote."""
+        """Leave the best-scoring candidate on the head, then promote.
+
+        Multi-head cleanup: discard all forks so the ledger ends with one
+        ``dev`` branch holding the best candidate. A fork that scored higher
+        than ``dev`` is committed to ``dev`` first."""
         best = self._best_state()
         if best is not None:
             self._commit_state(best, "population: final best")
+        # Discard forks
+        for fork_name in list(self._forks):
+            try:
+                self.ledger.discard_head(fork_name)
+            except Exception:  # noqa: BLE001
+                pass
+        self._forks = []
         super().finalize()
 
     # -- checkpointing -------------------------------------------------------

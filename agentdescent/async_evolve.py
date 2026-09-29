@@ -558,7 +558,7 @@ def async_evolve(
     def _gated_step() -> List[Any]:
         """`aggregator.step()`, with phase 2 off this thread when asked."""
         if not _pipelined:
-            return eng.aggregator.step()
+            return eng.aggregator.step(n_workers)
         reports = _collect_gate()
         items = eng.aggregator.begin_step(skip_in_flight=True)
         if any(not hasattr(i, "committed_version") for i in items):
@@ -569,7 +569,8 @@ def async_evolve(
         return reports
 
     def _worker(wid: int, shard: List[Task]) -> None:
-        snap = eng.ledger.snapshot(Ledger.DEV)
+        worker_branch = eng.aggregator.head_for_worker(wid)
+        snap = eng.ledger.snapshot(worker_branch)
         base_v = snap.version.get(eng.artifact_id, 0)
         artifact = snap.get(eng.artifact_id)
         shard_ids = [t.id for t in shard]          # the sampler works on ids
@@ -616,7 +617,7 @@ def async_evolve(
             forced = epoch[0] != local_epoch
             committed_since = commit_epoch[0] != local_commit
             if head_v - base_v > async_ratio or forced or committed_since:
-                snap = eng.ledger.snapshot(Ledger.DEV)
+                snap = eng.ledger.snapshot(worker_branch)
                 base_v = snap.version.get(eng.artifact_id, 0)
                 artifact = snap.get(eng.artifact_id)
                 local_epoch = epoch[0]
@@ -676,6 +677,7 @@ def async_evolve(
                                 diff=diff, base_version={eng.artifact_id: base_v},
                                 touched=[eng.artifact_id], before_after_delta=delta,
                                 trajectory_refs=[task],
+                                branch=worker_branch,
                                 # Same signal as the synchronous path, and the
                                 # reason `GroupAdvantage` accumulates rather than
                                 # batching at a barrier: there is no barrier here,

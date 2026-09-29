@@ -2936,13 +2936,21 @@ def evolve(
             a worker either adopts the snapshot this round already took, or keeps
             the older one it has.
             """
+            branch = aggregator.head_for_worker(worker)
+            if branch != Ledger.DEV:
+                fork_snap = ledger.snapshot(branch)
+                fork_art = fork_snap.get(artifact_id)
+                if fork_art is not None:
+                    fork_v = fork_snap.version.get(artifact_id, 0)
+                    return fork_art, fork_v, branch
             if refresh_interval <= 1:
-                return artifact, base_v
+                return artifact, base_v, Ledger.DEV
             with snap_lock:
                 due = (r % refresh_interval) == (stable_hash(worker) % refresh_interval)
                 if worker not in worker_snaps or due:
                     worker_snaps[worker] = (artifact, base_v)
-                return worker_snaps[worker]
+                art, ver = worker_snaps[worker]
+                return art, ver, Ledger.DEV
 
         def _run_unit(unit) -> None:
             """One worker: rollout -> propose -> ingest evidence (against `snap`).
@@ -2973,7 +2981,7 @@ def evolve(
                 return
             # This worker's own view of the artifact. Identical to the round's
             # under the default `refresh_interval=1`; older, by design, above it.
-            mine, mine_v = _snapshot_for(unit.worker)
+            mine, mine_v, mine_branch = _snapshot_for(unit.worker)
             task = by_id[sampler.pick(unit.keys, r)]     # a task from this worker's shard
             # The rollout is the part that can move elsewhere. Everything around
             # it -- which task, what the output implies, who is told about it --
@@ -3053,6 +3061,7 @@ def evolve(
             aggregator.ingest(EvidenceCard(
                 diff=diff, base_version={artifact_id: mine_v}, touched=[artifact_id],
                 before_after_delta=delta, trajectory_refs=[task],
+                branch=mine_branch,
                 # Recorded always, acted on by nobody unless a policy from
                 # `agentdescent.advantage` is installed. It is arithmetic over
                 # two numbers the round already has, and a signal that is only
@@ -3128,7 +3137,7 @@ def evolve(
             # needs no `worker_starved_seconds` of its own: here it would be
             # `merge_seconds x n_workers` by construction.
             with eng.meter.timed("merge_seconds"), eng.meter.timed("merge_gate_seconds"):
-                reports = check_reports(aggregator.step(), aggregator)
+                reports = check_reports(aggregator.step(n_workers), aggregator)
         except ContractError:
             raise            # a caller-contract violation: the run is meaningless
         except Exception as e:  # noqa: BLE001 - a rollout backend failure (e.g. an
