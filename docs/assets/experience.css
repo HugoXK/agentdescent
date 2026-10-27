@@ -18,6 +18,7 @@ body:has(.experience) .md-main{min-height:100vh;background:#04060a}
 .experience button:focus-visible,.experience a:focus-visible,.experience input:focus-visible,.experience code[tabindex]:focus-visible,.experience summary:focus-visible{outline:2px solid var(--cyan);outline-offset:3px}
 .experience em{font-style:normal;background:linear-gradient(96deg,var(--cyan),var(--mint) 45%,var(--violet));-webkit-background-clip:text;background-clip:text;color:transparent}
 .experience code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.exp-status{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--line);border-radius:999px;padding:5px 10px;color:var(--muted);font:700 10px ui-monospace,monospace;letter-spacing:.12em;white-space:nowrap}
 .exp-nav{position:relative;z-index:10;min-height:74px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:0 max(5vw,calc((100vw - var(--max))/2));gap:18px;background:rgba(4,6,10,.78);backdrop-filter:blur(14px)}
 .exp-brand{display:inline-flex;align-items:center;gap:11px;font-size:15px;font-weight:750;letter-spacing:.12em;white-space:nowrap;color:var(--ink)!important;text-transform:lowercase}
 .brand-mark{width:30px;height:30px;display:grid;place-items:center;background:linear-gradient(135deg,var(--cyan),var(--mint));color:#04141a;font-weight:900;font-size:18px;letter-spacing:-.1em;position:relative;border-radius:8px;box-shadow:0 0 24px rgba(94,240,255,.32)}
@@ -149,3 +150,5 @@ body:has(.experience) .md-main{min-height:100vh;background:#04060a}
 .md-typeset .experience .exp-mobile-menu summary::before,.md-typeset .experience .exp-mobile-menu summary::after,.exp-mobile-menu summary::-webkit-details-marker{display:none}
 
 @media(max-width:900px){.md-typeset .experience .exp-mobile-menu{display:block}}
+
+@media(max-width:900px){.exp-status{display:none}}

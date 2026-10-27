@@ -5,6 +5,7 @@ description: AgentDescent — a parallel, asynchronous framework for self-evolvi
 <div class="experience" data-theme="dark">
   <nav class="exp-nav" aria-label="Main navigation">
     <a class="exp-brand" href="./"><span class="brand-mark">a<span>↘</span></span> agentdescent</a>
+    <span class="exp-status"><span class="pulse-dot"></span> PREVIEW</span>
     <div class="exp-nav-links">
       <a class="nav-active" aria-current="page" href="./"><span data-lang="zh">概览</span><span data-lang="en" hidden>Overview</span></a>
       <a href="#control-plane"><span data-lang="zh">控制面</span><span data-lang="en" hidden>Control plane</span></a>
