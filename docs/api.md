@@ -13,7 +13,7 @@ means the parameter has none.
 Each section links to the page that explains *why* the module is shaped the
 way it is; this page is the *what*.
 
-510 public names across 96 modules.
+509 public names across 96 modules.
 
 ---
 
@@ -4297,17 +4297,9 @@ How complementary diffs become one candidate.
 
 One tournament: what the fused candidate scored against the best single.
 
-### `GuardDecision`
+### `GuardedRun`
 
-One guard's name and decision.
-
-### `GuardPipeline`
-
-Run guards in order; the first refusal is the pipeline's decision.
-
-### `GuardPipelineResult`
-
-The full ordered trail, including the first refusal when there is one.
+The evolution result, the recorded decision and the acceptance chain.
 
 ### `Harness`
 
@@ -4916,6 +4908,10 @@ Run up to `sessions` sessions, keeping the best artifact.
 ### `run_controller`
 
 Run sessions until budget, a kill switch, an error or stagnation.
+
+### `run_guarded`
+
+Run one spec with an injected acceptance policy and optional records.
 
 ### `safety_report`
 
