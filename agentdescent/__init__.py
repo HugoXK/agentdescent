@@ -344,6 +344,7 @@ from .stats_eval import (BootstrapResult, ContaminationReport, bootstrap_ci,
                          contamination_overlap, is_significant, paired_gain)
 from .safety_controller import CanaryResult, KillSwitch, canary, rollback_plan
 from .approval import ApprovalGate, ApprovalRequest, ApprovalStore
+from .leakage import LeakageGuard, LeakageReport, find_leakage
 from .campaign import CampaignReport, CampaignSession, estimate_campaign, run_campaign
 from .variance_sampler import VarianceSampler
 from .safety import SafetyCheck, SafetyReport, safety_report
@@ -783,6 +784,9 @@ __all__ = [
     "ApprovalGate",
     "ApprovalRequest",
     "ApprovalStore",
+    "LeakageGuard",
+    "LeakageReport",
+    "find_leakage",
     "CampaignReport",
     "CampaignSession",
     "estimate_campaign",

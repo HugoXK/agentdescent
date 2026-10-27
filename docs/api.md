@@ -4351,6 +4351,14 @@ Where a runner writes the evolving tree inside a workspace (`claude_skill`, `ski
 
 One spending line of the framework: a limit, what it spent, what it bought.
 
+### `LeakageGuard`
+
+Reject a candidate whose rendered artifact contains protected text.
+
+### `LeakageReport`
+
+What the guard found and which protected strings matched.
+
 ### `LearnableMetaJudge`
 
 A small linear regressor from `outcome_features` to oracle quality, fit by least squares (pure Python, deterministic).
@@ -4790,6 +4798,10 @@ One rollout's rationale as a rule the skill can carry.
 ### `failed_rollouts`
 
 The recorded rollouts that failed, up to `max_failures`.
+
+### `find_leakage`
+
+The protected strings that appear in `text` (normalised match).
 
 ### `gate_source`
 

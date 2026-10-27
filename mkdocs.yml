@@ -110,6 +110,7 @@ nav:
     - Fusion policies: fusion-policies.md
     - Acceptance policies: acceptance-policies.md
     - Approval gate — high-risk changes: approval.md
+    - Leakage guard: leakage.md
     - Risk policy: risk-policy.md
     - Promotion policies: promotion-policies.md
     - Staleness policies: staleness.md
