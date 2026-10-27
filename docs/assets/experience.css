@@ -144,6 +144,8 @@ body:has(.experience) .md-main{min-height:100vh;background:#04060a}
 .experience .qs3-host-tabs button.active{background:var(--cyan);border-color:var(--cyan);color:var(--accent-ink)}
 .experience .qs3-hero-meta span{color:var(--muted2)}
 /* Native <details> menu must not inherit Material's admonition decoration. */
-.md-typeset .experience .exp-mobile-menu{margin:0;padding:0;border:0;border-radius:0;background:transparent;box-shadow:none;color:var(--ink);font-size:inherit;flex:none}
+.md-typeset .experience .exp-mobile-menu{display:none;margin:0;padding:0;border:0;border-radius:0;background:transparent;box-shadow:none;color:var(--ink);font-size:inherit;flex:none}
 .md-typeset .experience .exp-mobile-menu summary{margin:0;background:transparent;list-style:none}
 .md-typeset .experience .exp-mobile-menu summary::before,.md-typeset .experience .exp-mobile-menu summary::after,.exp-mobile-menu summary::-webkit-details-marker{display:none}
+
+@media(max-width:900px){.md-typeset .experience .exp-mobile-menu{display:block}}
