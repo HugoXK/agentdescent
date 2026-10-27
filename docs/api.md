@@ -13,7 +13,7 @@ means the parameter has none.
 Each section links to the page that explains *why* the module is shaped the
 way it is; this page is the *what*.
 
-510 public names across 96 modules.
+545 public names across 107 modules.
 
 ---
 
@@ -1401,6 +1401,8 @@ The vocabulary of `category`.
 | `VIOLATES_INVARIANT` | `'violates-invariant'` |
 | `MISSING_ADAPTERS` | `'missing-adapters'` |
 | `CRITIC_REJECTED` | `'critic-rejected'` |
+| `NEEDS_APPROVAL` | `'needs-approval'` |
+| `APPROVAL_REJECTED` | `'approval-rejected'` |
 | `NOISE_FLOOR` | `'noise-floor'` |
 | `COST_RULE` | `'cost-rule'` |
 
@@ -4145,6 +4147,18 @@ One node of a society: a name, an instruction (a callable), and a budget (how ma
 
 `(ledger, verifier, audit, config, policy) -> AggregatorProtocol` — how a custom optimizer is installed.
 
+### `AlgorithmArm`
+
+One algorithm/seed arm of a tournament.
+
+### `AlgorithmScore`
+
+One algorithm's aggregate over its seeds.
+
+### `AlgorithmTournamentReport`
+
+Every arm, the per-algorithm aggregate, the winner and any tie.
+
 ### `AllocatorContext`
 
 One candidate, as the allocator sees it.
@@ -4156,6 +4170,22 @@ Decide, per candidate, whether the expensive part of a merge is worth it.
 ### `AppendRules`
 
 Accumulate a deduped list of rules/lessons (append-only, content-addressed).
+
+### `ApprovalGate`
+
+Require a human decision for changes above a risk/size threshold.
+
+### `ApprovalRequest`
+
+One high-risk candidate's approval request and its latest decision.
+
+### `ApprovalStore`
+
+Append-only JSONL decisions for high-risk candidates.
+
+### `BootstrapResult`
+
+A paired bootstrap of per-task gains.
 
 ### `BudgetGovernor`
 
@@ -4184,6 +4214,10 @@ Every session, the best artifact and where it lives.
 ### `CampaignSession`
 
 One evolution session inside a campaign.
+
+### `CanaryResult`
+
+The paired sign test and the deployment verdict.
 
 ### `CapabilityGuard`
 
@@ -4221,6 +4255,10 @@ One curriculum step: the selected tasks, the bias before/after.
 
 Which of a batch of mutually contradictory changes survive.
 
+### `ContaminationReport`
+
+How much of the validation text appears in the training text.
+
 ### `ControllerConfig`
 
 Bounds and hooks for the multi-session loop.
@@ -4233,6 +4271,14 @@ The sessions run, the best reward and why the loop stopped.
 
 What `curious_replay_evolve` did: the weights, the gains on the still-curious vs mastered past, and the value produced.
 
+### `DecisionLog`
+
+Append-only JSONL decisions.
+
+### `DecisionRecord`
+
+One immutable adoption/session decision.
+
 ### `DefaultConflict`
 
 Drop contradicting diffs, keeping whichever scores better (PCGrad-style).
@@ -4240,6 +4286,10 @@ Drop contradicting diffs, keeping whichever scores better (PCGrad-style).
 ### `DefaultFusion`
 
 Build the union of complementary diffs and hand it to the gate.
+
+### `DiagnosisReport`
+
+One run's failure mode, the evidence, and what to try next.
 
 ### `EDIT_PROTOCOL`
 
@@ -4297,6 +4347,22 @@ How complementary diffs become one candidate.
 
 One tournament: what the fused candidate scored against the best single.
 
+### `GuardDecision`
+
+One guard's name and decision.
+
+### `GuardPipeline`
+
+Run guards in order; the first refusal is the pipeline's decision.
+
+### `GuardPipelineResult`
+
+The full ordered trail, including the first refusal when there is one.
+
+### `GuardedRun`
+
+The evolution result, the recorded decision and the acceptance chain.
+
 ### `Harness`
 
 One algorithm port, named and runnable.
@@ -4329,6 +4395,10 @@ What a `joint_meta_run` decided, per slot and jointly.
 
 One entry per *category*: competing proposals contradict and are resolved.
 
+### `KillSwitch`
+
+A file-based global stop for further self-improvement sessions.
+
 ### `LAYOUTS`
 
 Where a runner writes the evolving tree inside a workspace (`claude_skill`, `skill_library`, `claude_agent`, `dsh_skill`, `agents_skill`, `root`).
@@ -4336,6 +4406,14 @@ Where a runner writes the evolving tree inside a workspace (`claude_skill`, `ski
 ### `LayerBudget`
 
 One spending line of the framework: a limit, what it spent, what it bought.
+
+### `LeakageGuard`
+
+Reject a candidate whose rendered artifact contains protected text.
+
+### `LeakageReport`
+
+What the guard found and which protected strings matched.
 
 ### `LearnableMetaJudge`
 
@@ -4372,6 +4450,10 @@ Labels the heaviest stratum needs before the reported interval means what it say
 ### `MIN_UNSEEN`
 
 Below this estimated probability of a new mode, more improvement labels are buying the flat part of the rarefaction curve. Not a law -- the point at which a one-in-twenty chance of learning something stops being worth an oracle call is a budget question -- but it is where the Phase 0 curve had flattened.
+
+### `MarginalGainStop`
+
+Stop when reward gained per additional call falls below a bar.
 
 ### `MatchResult`
 
@@ -4464,6 +4546,10 @@ How a rollout becomes candidate changes.
 ### `ROUTE_SEED`
 
 The shipped route rule: answer directly unless the task is hard and the budget allows a search. Deliberately conservative -- it refuses to search when the budget is low, which is exactly the decision an evolved rule can improve on (searching hard tasks pays more than the budget it costs).
+
+### `RSIMetrics`
+
+Aggregate counts and cost for a stream of decisions.
 
 ### `RSIReport`
 
@@ -4693,6 +4779,10 @@ Compose the ring statuses into one verdict.
 
 Admit an archived rule using its own `exam` stamp plus any ring statuses.
 
+### `alerts`
+
+Human-readable alert conditions; empty means no alert.
+
 ### `apply_patch`
 
 Apply a `patch_source` diff back to a source. `ValueError` when the patch does not apply cleanly -- a patch whose context does not match `source` is refused, never half-applied. Untouched lines outside a hunk's context are preserved, so a middle-of-file edit keeps the rest of the file.
@@ -4721,6 +4811,10 @@ Wrap a `max_tokens -> Completion` factory into an adaptive Completion.
 
 Hash a spec, its data files/directories, model config and code version.
 
+### `canary`
+
+Compare candidate vs incumbent per task and recommend promote/hold/rollback.
+
 ### `chain_audit`
 
 Trace one archived adoption through its evidence rings.
@@ -4728,6 +4822,10 @@ Trace one archived adoption through its evidence rings.
 ### `compose_run`
 
 Run the harness(es) for a domain, record the outcomes, pick a winner.
+
+### `contamination_overlap`
+
+Fraction of validation n-grams that also occur in the training text.
 
 ### `cost_adjusted_reward`
 
@@ -4749,6 +4847,10 @@ Evolve a decision slot against a problem distribution the meta loop generates.
 
 Dependency-free dataset loading -- the *data layer* for examples/experiments.
 
+### `diagnose_payload`
+
+Classify why a run ended where it did.
+
 ### `diff_manifest`
 
 Field-level differences between two manifests (empty when identical).
@@ -4760,6 +4862,10 @@ The rationales the artifact will carry: deduped rules from the rollouts, near-mi
 ### `estimate_campaign`
 
 Price a campaign without running it (one composed arm per session).
+
+### `estimate_tournament`
+
+The per-arm plan estimate without running anything.
 
 ### `evaluate`
 
@@ -4785,6 +4891,10 @@ One rollout's rationale as a rule the skill can carry.
 
 The recorded rollouts that failed, up to `max_failures`.
 
+### `find_leakage`
+
+The protected strings that appear in `text` (normalised match).
+
 ### `gate_source`
 
 The candidate's gate: exactly one function of no arguments other than what its signature declares, built only from safe syntax. Imports, dunder access and the calls that reach the interpreter are refused -- the same walk `compile_policy_source` runs over every self-edit.
@@ -4808,6 +4918,10 @@ Evolve against the simulator, verify the result on the real problem.
 ### `improve_source`
 
 Evolve the source of one function under its own tests and benchmark.
+
+### `is_significant`
+
+Whether the lower bound clears `min_effect` and the interval is usable.
 
 ### `joint_archive_rule`
 
@@ -4837,9 +4951,21 @@ Run a population of meta sessions from the archive's best rules, promote the win
 
 `meta_run` with an audited validation: sample, oracle, persist, decide.
 
+### `metrics_from_log`
+
+Aggregate any iterable log (a JSONL-backed log, list, or generator).
+
+### `metrics_from_records`
+
+Aggregate decision records.
+
 ### `outcome_features`
 
 The features a judge learns quality from: mean best-so-far, the final reward, and a constant intercept term. Sweep counts / rollouts are deliberately dropped: raw counts dwarf a `[0, 1]` quality in a linear fit and had the old judge saturating its clip at 1.0 for every outcome. The judge must learn quality from the curve's *shape*, not be handed the answer.
+
+### `paired_gain`
+
+Per-task `after - before` over the keys present in both sides.
 
 ### `patch_source`
 
@@ -4897,6 +5023,10 @@ Attack `value` by mutating the seed tasks outward and scoring each mutation. Ret
 
 Evolve, attack the result, retrain on the failures it found.
 
+### `rollback_plan`
+
+Files to restore/delete to return `current` to `previous`.
+
 ### `rsi_report`
 
 The archive's per-slot adoption history and a longitudinal verdict.
@@ -4916,6 +5046,14 @@ Run up to `sessions` sessions, keeping the best artifact.
 ### `run_controller`
 
 Run sessions until budget, a kill switch, an error or stagnation.
+
+### `run_guarded`
+
+Run one spec with an injected acceptance policy and optional records.
+
+### `run_tournament`
+
+Run every `(algorithm, seed)` arm and return the measured ranking.
 
 ### `safety_report`
 
@@ -4964,6 +5102,10 @@ The evolvable spec: the value is a gated `society()` source compiled into a `Soc
 ### `source_ops`
 
 The deterministic cost of a candidate rule: arithmetic/call nodes in its source, counted from the AST. An attributable unit of work -- evaluating a rule costs what its expression tree costs, and counting it from the source is reproducible where wallclock is not.
+
+### `to_prometheus`
+
+A deterministic Prometheus text exposition (no timestamps).
 
 ### `tournament_promote`
 

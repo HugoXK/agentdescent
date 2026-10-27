@@ -350,6 +350,8 @@ from .diagnose import DiagnosisReport, diagnose_payload
 from .guards import GuardDecision, GuardPipeline, GuardPipelineResult
 from .runtime import GuardedRun, run_guarded
 from .rsi import RSIReport, SlotRSI, rsi_report
+from .tournament import (AlgorithmArm, AlgorithmScore, AlgorithmTournamentReport,
+                         estimate_tournament, run_tournament)
 from .campaign import CampaignReport, CampaignSession, estimate_campaign, run_campaign
 from .variance_sampler import VarianceSampler
 from .safety import SafetyCheck, SafetyReport, safety_report
@@ -805,6 +807,11 @@ __all__ = [
     "RSIReport",
     "SlotRSI",
     "rsi_report",
+    "AlgorithmArm",
+    "AlgorithmScore",
+    "AlgorithmTournamentReport",
+    "estimate_tournament",
+    "run_tournament",
     "CampaignReport",
     "CampaignSession",
     "estimate_campaign",
