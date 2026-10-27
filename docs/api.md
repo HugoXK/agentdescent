@@ -13,7 +13,7 @@ means the parameter has none.
 Each section links to the page that explains *why* the module is shaped the
 way it is; this page is the *what*.
 
-509 public names across 96 modules.
+510 public names across 96 modules.
 
 ---
 
@@ -4241,10 +4241,6 @@ Drop contradicting diffs, keeping whichever scores better (PCGrad-style).
 
 Build the union of complementary diffs and hand it to the gate.
 
-### `DiagnosisReport`
-
-One run's failure mode, the evidence, and what to try next.
-
 ### `EDIT_PROTOCOL`
 
 The multi-file proposal format a `FileTree` reflector is told to emit.
@@ -4300,6 +4296,18 @@ How complementary diffs become one candidate.
 ### `FusionTrial`
 
 One tournament: what the fused candidate scored against the best single.
+
+### `GuardDecision`
+
+One guard's name and decision.
+
+### `GuardPipeline`
+
+Run guards in order; the first refusal is the pipeline's decision.
+
+### `GuardPipelineResult`
+
+The full ordered trail, including the first refusal when there is one.
 
 ### `Harness`
 
@@ -4744,10 +4752,6 @@ Evolve a decision slot against a problem distribution the meta loop generates.
 ### `dataloader`
 
 Dependency-free dataset loading -- the *data layer* for examples/experiments.
-
-### `diagnose_payload`
-
-Classify why a run ended where it did.
 
 ### `diff_manifest`
 

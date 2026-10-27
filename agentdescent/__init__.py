@@ -347,6 +347,7 @@ from .approval import ApprovalGate, ApprovalRequest, ApprovalStore
 from .leakage import LeakageGuard, LeakageReport, find_leakage
 from .stopping import MarginalGainStop
 from .diagnose import DiagnosisReport, diagnose_payload
+from .guards import GuardDecision, GuardPipeline, GuardPipelineResult
 from .campaign import CampaignReport, CampaignSession, estimate_campaign, run_campaign
 from .variance_sampler import VarianceSampler
 from .safety import SafetyCheck, SafetyReport, safety_report
@@ -792,6 +793,9 @@ __all__ = [
     "MarginalGainStop",
     "DiagnosisReport",
     "diagnose_payload",
+    "GuardDecision",
+    "GuardPipeline",
+    "GuardPipelineResult",
     "CampaignReport",
     "CampaignSession",
     "estimate_campaign",
