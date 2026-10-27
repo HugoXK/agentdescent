@@ -13,7 +13,7 @@ means the parameter has none.
 Each section links to the page that explains *why* the module is shaped the
 way it is; this page is the *what*.
 
-511 public names across 96 modules.
+510 public names across 96 modules.
 
 ---
 
@@ -1401,6 +1401,8 @@ The vocabulary of `category`.
 | `VIOLATES_INVARIANT` | `'violates-invariant'` |
 | `MISSING_ADAPTERS` | `'missing-adapters'` |
 | `CRITIC_REJECTED` | `'critic-rejected'` |
+| `NEEDS_APPROVAL` | `'needs-approval'` |
+| `APPROVAL_REJECTED` | `'approval-rejected'` |
 | `NOISE_FLOOR` | `'noise-floor'` |
 | `COST_RULE` | `'cost-rule'` |
 
@@ -4157,6 +4159,18 @@ Decide, per candidate, whether the expensive part of a merge is worth it.
 
 Accumulate a deduped list of rules/lessons (append-only, content-addressed).
 
+### `ApprovalGate`
+
+Require a human decision for changes above a risk/size threshold.
+
+### `ApprovalRequest`
+
+One high-risk candidate's approval request and its latest decision.
+
+### `ApprovalStore`
+
+Append-only JSONL decisions for high-risk candidates.
+
 ### `BudgetGovernor`
 
 Tracks token spend against a cap and decides what to degrade.
@@ -4184,10 +4198,6 @@ Every session, the best artifact and where it lives.
 ### `CampaignSession`
 
 One evolution session inside a campaign.
-
-### `CanaryResult`
-
-The paired sign test and the deployment verdict.
 
 ### `CapabilityGuard`
 
@@ -4332,10 +4342,6 @@ What a `joint_meta_run` decided, per slot and jointly.
 ### `KeyedRules`
 
 One entry per *category*: competing proposals contradict and are resolved.
-
-### `KillSwitch`
-
-A file-based global stop for further self-improvement sessions.
 
 ### `LAYOUTS`
 
@@ -4721,10 +4727,6 @@ Wrap a `max_tokens -> Completion` factory into an adaptive Completion.
 
 Hash a spec, its data files/directories, model config and code version.
 
-### `canary`
-
-Compare candidate vs incumbent per task and recommend promote/hold/rollback.
-
 ### `chain_audit`
 
 Trace one archived adoption through its evidence rings.
@@ -4900,10 +4902,6 @@ Attack `value` by mutating the seed tasks outward and scoring each mutation. Ret
 ### `red_team_evolve`
 
 Evolve, attack the result, retrain on the failures it found.
-
-### `rollback_plan`
-
-Files to restore/delete to return `current` to `previous`.
 
 ### `rule_id`
 
