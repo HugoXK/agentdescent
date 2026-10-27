@@ -13,7 +13,7 @@ means the parameter has none.
 Each section links to the page that explains *why* the module is shaped the
 way it is; this page is the *what*.
 
-510 public names across 96 modules.
+508 public names across 96 modules.
 
 ---
 
@@ -1401,8 +1401,6 @@ The vocabulary of `category`.
 | `VIOLATES_INVARIANT` | `'violates-invariant'` |
 | `MISSING_ADAPTERS` | `'missing-adapters'` |
 | `CRITIC_REJECTED` | `'critic-rejected'` |
-| `NEEDS_APPROVAL` | `'needs-approval'` |
-| `APPROVAL_REJECTED` | `'approval-rejected'` |
 | `NOISE_FLOOR` | `'noise-floor'` |
 | `COST_RULE` | `'cost-rule'` |
 
@@ -4159,18 +4157,6 @@ Decide, per candidate, whether the expensive part of a merge is worth it.
 
 Accumulate a deduped list of rules/lessons (append-only, content-addressed).
 
-### `ApprovalGate`
-
-Require a human decision for changes above a risk/size threshold.
-
-### `ApprovalRequest`
-
-One high-risk candidate's approval request and its latest decision.
-
-### `ApprovalStore`
-
-Append-only JSONL decisions for high-risk candidates.
-
 ### `BudgetGovernor`
 
 Tracks token spend against a cap and decides what to degrade.
@@ -4351,14 +4337,6 @@ Where a runner writes the evolving tree inside a workspace (`claude_skill`, `ski
 
 One spending line of the framework: a limit, what it spent, what it bought.
 
-### `LeakageGuard`
-
-Reject a candidate whose rendered artifact contains protected text.
-
-### `LeakageReport`
-
-What the guard found and which protected strings matched.
-
 ### `LearnableMetaJudge`
 
 A small linear regressor from `outcome_features` to oracle quality, fit by least squares (pure Python, deterministic).
@@ -4394,6 +4372,10 @@ Labels the heaviest stratum needs before the reported interval means what it say
 ### `MIN_UNSEEN`
 
 Below this estimated probability of a new mode, more improvement labels are buying the flat part of the rarefaction curve. Not a law -- the point at which a one-in-twenty chance of learning something stops being worth an oracle call is a budget question -- but it is where the Phase 0 curve had flattened.
+
+### `MarginalGainStop`
+
+Stop when reward gained per additional call falls below a bar.
 
 ### `MatchResult`
 
@@ -4798,10 +4780,6 @@ One rollout's rationale as a rule the skill can carry.
 ### `failed_rollouts`
 
 The recorded rollouts that failed, up to `max_failures`.
-
-### `find_leakage`
-
-The protected strings that appear in `text` (normalised match).
 
 ### `gate_source`
 
