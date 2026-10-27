@@ -109,3 +109,7 @@ body:not(:has(.experience)) .ad-doc-paths b{margin-top:auto;padding-top:.5rem;fo
 @media(max-width:1150px){body:not(:has(.experience)) .md-header__source{display:none}}
 @media(max-width:900px){body:not(:has(.experience)) .ad-header-links{display:none}}
 @media(max-width:640px){body:not(:has(.experience)) .ad-doc-paths{grid-template-columns:1fr}body:not(:has(.experience)) .ad-doc-paths a{min-height:0}}
+
+body:not(:has(.experience)) .ad-preview-badge{display:inline-flex;align-items:center;gap:.35rem;padding:.22rem .48rem;border:1px solid #8aaa4c;border-radius:999px;color:#5f7d2f;background:color-mix(in srgb,#8aaa4c 10%,transparent);font:700 .52rem ui-monospace,SFMono-Regular,Consolas,monospace;letter-spacing:.08em;white-space:nowrap}
+body:not(:has(.experience)) .ad-preview-badge:before{content:"";width:.32rem;height:.32rem;border-radius:50%;background:#8aaa4c;box-shadow:0 0 0 3px color-mix(in srgb,#8aaa4c 18%,transparent)}
+@media(max-width:1150px){body:not(:has(.experience)) .ad-preview-badge{display:none}}

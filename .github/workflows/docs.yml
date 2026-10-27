@@ -10,7 +10,7 @@ name: docs
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, site/hugoxk]
   workflow_dispatch:
 
 permissions:
@@ -19,7 +19,7 @@ permissions:
 concurrency:
   # PR runs cancel only earlier runs for the same PR. Main/manual Pages runs
   # keep their existing group and cannot be canceled by a PR validation.
-  group: ${{ github.event_name == 'pull_request' && format('pages-pr-{0}', github.event.pull_request.number) || 'pages' }}
+  group: ${{ github.event_name == 'pull_request' && format('pages-pr-{0}', github.event.pull_request.number) || format('pages-{0}', github.ref) }}
   cancel-in-progress: true
 
 jobs:
@@ -58,7 +58,7 @@ jobs:
     needs: build
     # A push to main, or a manual re-publish. Anything else -- a PR build --
     # validates and stops, because a fork's build must never reach Pages.
-    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/site/hugoxk'
     runs-on: ubuntu-latest
     permissions:
       pages: write
