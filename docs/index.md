@@ -5,7 +5,6 @@ description: AgentDescent — a parallel, asynchronous framework for self-evolvi
 <div class="experience" data-theme="dark">
   <nav class="exp-nav" aria-label="Main navigation">
     <a class="exp-brand" href="./"><span class="brand-mark">a<span>↘</span></span> agentdescent</a>
-    <span class="exp-status"><span class="pulse-dot"></span> PREVIEW</span>
     <div class="exp-nav-links">
       <a class="nav-active" aria-current="page" href="./"><span data-lang="zh">概览</span><span data-lang="en" hidden>Overview</span></a>
       <a href="#control-plane"><span data-lang="zh">控制面</span><span data-lang="en" hidden>Control plane</span></a>
@@ -30,12 +29,11 @@ description: AgentDescent — a parallel, asynchronous framework for self-evolvi
         <p class="hero-lead"><span data-lang="zh">AgentDescent 是一个并行、异步的自进化框架。定义要进化的对象，运行任务，按 held-out 结果合并每一处改进。</span><span data-lang="en" hidden>AgentDescent is a parallel, asynchronous framework for self-evolving agents. Define the artifact, run tasks, and merge only changes that improve held-out evidence.</span></p>
         <div class="hero-ctas"><a class="exp-button primary" href="install/"><span data-lang="zh">快速开始</span><span data-lang="en" hidden>Get started</span> <span>↗</span></a><a class="exp-button ghost" href="docs/"><span data-lang="zh">阅读文档</span><span data-lang="en" hidden>Read the docs</span> <span>→</span></a></div>
         <div class="hero-command"><span>$</span><code tabindex="0">curl -fsSL https://raw.githubusercontent.com/Birfy/agentdescent/main/scripts/install.sh | bash</code><button class="exp-copy" data-copy="curl -fsSL https://raw.githubusercontent.com/Birfy/agentdescent/main/scripts/install.sh | bash">Copy</button></div>
-        <div class="hero-stats"><div><b>23</b><span data-lang="zh">方法端口</span><span data-lang="en" hidden>METHOD PORTS</span></div><div><b>12</b><span data-lang="zh">预览 PR</span><span data-lang="en" hidden>PREVIEW PRS</span></div><div><b>1</b><span data-lang="zh">统一入口</span><span data-lang="en" hidden>ENTRY POINT</span></div><div><b>0</b><span data-lang="zh">模型调用即可预览</span><span data-lang="en" hidden>MODEL CALLS TO PREVIEW</span></div></div>
+        <div class="hero-stats"><div><b>23</b><span data-lang="zh">方法端口</span><span data-lang="en" hidden>METHOD PORTS</span></div><div><b>12</b><span data-lang="zh">预览 PR</span><span data-lang="en" hidden>PREVIEW PRS</span></div><div><b>1</b><span data-lang="zh">统一入口</span><span data-lang="en" hidden>ENTRY POINT</span></div></div>
       </div>
 
       <div class="hud" aria-label="Example evolution run">
-        <div class="hud-top"><span class="dots"><i></i><i></i><i></i></span><span class="url">agentdescent.hugoxk.online</span><span class="live"><span class="led"></span>LIVE</span></div>
-        <div class="hud-tabs"><span class="on">EVOLVE</span><span>GATES</span><span>LEDGER</span></div>
+        <div class="hud-top"><span class="hud-label">EXAMPLE RUN</span><span class="url">skill_dir · 18 tasks · seed 0</span></div>
         <div class="term">
           <div class="ln"><span class="t">plan</span><span class="tag p">[ARTIFACT]</span><span class="txt">skill_dir · 18 tasks · 4 workers</span></div>
           <div class="ln"><span class="t">run</span><span class="tag c">[WORKER]</span><span class="txt">propose · diff touches 2 slots</span></div>
