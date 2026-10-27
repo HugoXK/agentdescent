@@ -83,6 +83,7 @@ nav:
     - Sparse audit (cheap verifier vs truth): audit.md
     - Decision log: decisions.md
     - Statistical evidence: stats-eval.md
+    - Deployment safety — kill/canary/rollback: safety-controller.md
     - Session controller — when to stop: controller.md
     - Run manifest — reproducibility: manifest.md
     - Evaluation service — budgeted oracle: evaluation.md
