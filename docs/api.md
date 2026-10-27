@@ -13,7 +13,7 @@ means the parameter has none.
 Each section links to the page that explains *why* the module is shaped the
 way it is; this page is the *what*.
 
-508 public names across 96 modules.
+509 public names across 96 modules.
 
 ---
 
@@ -4241,6 +4241,10 @@ Drop contradicting diffs, keeping whichever scores better (PCGrad-style).
 
 Build the union of complementary diffs and hand it to the gate.
 
+### `DiagnosisReport`
+
+One run's failure mode, the evidence, and what to try next.
+
 ### `EDIT_PROTOCOL`
 
 The multi-file proposal format a `FileTree` reflector is told to emit.
@@ -4372,10 +4376,6 @@ Labels the heaviest stratum needs before the reported interval means what it say
 ### `MIN_UNSEEN`
 
 Below this estimated probability of a new mode, more improvement labels are buying the flat part of the rarefaction curve. Not a law -- the point at which a one-in-twenty chance of learning something stops being worth an oracle call is a budget question -- but it is where the Phase 0 curve had flattened.
-
-### `MarginalGainStop`
-
-Stop when reward gained per additional call falls below a bar.
 
 ### `MatchResult`
 
@@ -4744,6 +4744,10 @@ Evolve a decision slot against a problem distribution the meta loop generates.
 ### `dataloader`
 
 Dependency-free dataset loading -- the *data layer* for examples/experiments.
+
+### `diagnose_payload`
+
+Classify why a run ended where it did.
 
 ### `diff_manifest`
 

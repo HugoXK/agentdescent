@@ -346,6 +346,7 @@ from .safety_controller import CanaryResult, KillSwitch, canary, rollback_plan
 from .approval import ApprovalGate, ApprovalRequest, ApprovalStore
 from .leakage import LeakageGuard, LeakageReport, find_leakage
 from .stopping import MarginalGainStop
+from .diagnose import DiagnosisReport, diagnose_payload
 from .campaign import CampaignReport, CampaignSession, estimate_campaign, run_campaign
 from .variance_sampler import VarianceSampler
 from .safety import SafetyCheck, SafetyReport, safety_report
@@ -789,6 +790,8 @@ __all__ = [
     "LeakageReport",
     "find_leakage",
     "MarginalGainStop",
+    "DiagnosisReport",
+    "diagnose_payload",
     "CampaignReport",
     "CampaignSession",
     "estimate_campaign",
