@@ -38,16 +38,13 @@ def check(site, screenshots):
         browser = playwright.chromium.launch()
         try:
             for width in (1440, 1024, 901, 900, 768, 390, 320):
-                for theme in ("light", "dark"):
+                for theme in ("dark",):
                     for route, name in (("/", "home"), ("/install/", "quickstart")):
                         context = browser.new_context(viewport={"width": width, "height": 900}, color_scheme=theme)
                         page = context.new_page()
                         label = f"{name}-{width}-{theme}"
                         try:
                             page.goto(base + route, wait_until="networkidle")
-                            # Use the page's real theme control so CSS and JS agree.
-                            if page.locator(".experience").get_attribute("data-theme") != theme:
-                                page.locator(".theme-toggle").click()
                             assert page.locator(".experience").get_attribute("data-theme") == theme, label
                             assert page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth"), label
                             assert page.locator(".experience").evaluate("e => {const r=e.getBoundingClientRect(); return r.left === 0 && r.right === document.documentElement.clientWidth}"), f"{label}: unwanted outer gutters"
@@ -62,7 +59,7 @@ def check(site, screenshots):
                                 summary.focus()
                                 summary.press("Enter")
                                 assert menu.get_attribute("open") is not None, label
-                                assert menu.get_by_role("link", name="Interactive demo").is_visible(), label
+                                assert menu.get_by_role("link", name="Demo").is_visible(), label
                                 style = summary.evaluate("e => ({bg:getComputedStyle(e).backgroundColor,before:getComputedStyle(e,'::before').display,after:getComputedStyle(e,'::after').display})")
                                 assert style == {"bg": "rgba(0, 0, 0, 0)", "before": "none", "after": "none"}, f"{label}: Material decoration leaked: {style}"
                                 assert menu.locator(":scope > div").evaluate("e => {const r=e.getBoundingClientRect(); return r.left >= 0 && r.right <= document.documentElement.clientWidth}"), f"{label}: dropdown clipped"

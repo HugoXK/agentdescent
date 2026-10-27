@@ -43,7 +43,7 @@ class Navigation(HTMLParser):
 
 def test_demo_is_a_top_level_drawer_destination():
     cfg = config()
-    assert {"Interactive demo": cfg["site_url"] + "#demo"} in cfg["nav"]
+    assert {"Demo": cfg["site_url"] + "#demo"} in cfg["nav"]
     assert 'id="demo"' in (ROOT / "docs/index.md").read_text()
 
 

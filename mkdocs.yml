@@ -28,20 +28,9 @@ theme:
   logo: assets/mark.svg
   font: false
   palette:
-    - media: "(prefers-color-scheme: light)"
-      scheme: default
-      primary: indigo
-      accent: indigo
-      toggle:
-        icon: material/weather-night
-        name: Switch to dark mode
-    - media: "(prefers-color-scheme: dark)"
-      scheme: slate
-      primary: indigo
-      accent: indigo
-      toggle:
-        icon: material/weather-sunny
-        name: Switch to light mode
+    scheme: slate
+    primary: black
+    accent: cyan
   features:
     - navigation.sections
     - navigation.top
@@ -53,7 +42,7 @@ theme:
 nav:
   - Home: index.md
   # Keep the demo reachable in Material's mobile drawer when header links hide.
-  - Interactive demo: https://agentdescent.hugoxk.online/#demo
+  - Demo: https://agentdescent.hugoxk.online/#demo
   - Documentation: docs.md
   - Getting started:
     - Install and first run: install.md
@@ -202,7 +191,7 @@ extra_css:
   - assets/quickstart.css
   - assets/docs-theme.css
 extra_javascript:
-  - assets/experience.js
+  - assets/site.js
 
 extra:
   social:
