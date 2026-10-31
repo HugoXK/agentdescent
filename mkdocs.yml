@@ -65,6 +65,7 @@ nav:
     - Set it up and test it: testing-guide.md
     - Testing the plugins: testing-the-plugins.md
   - Core concepts:
+    - Capability map: capabilities.md
     - Concepts: concepts.md
     - Architecture: architecture.md
     - The data model: data-model.md
