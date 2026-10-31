@@ -7,8 +7,8 @@ as better**, **what may merge**, and **what is remembered**.
 
 This page describes the current `main` branch. Read it as a map, not a second
 source of truth: [Concepts](concepts.md) and [Architecture](architecture.md)
-introduce the terms, and each section links to the detailed page. Modules added
-after this page was written are listed under *Proposed (not on main)*.
+introduce the terms, and each section links to the detailed page. The changelog
+and `agentdescent algorithms list` remain the source for per-release details.
 
 ## The five primitives
 
@@ -54,9 +54,9 @@ See [evolution](evolution.md), [architecture](architecture.md),
   reward hacking detection.
 - `self_model`, `process_reward`: calibrated confidence/abstention and
   step-level process rewards.
-- `planning`, `search_fabric`: UCT/MCTS, PRM/verifier value and PRM reranking
-  ([search and planning](evolution.md)); marginal-gain stopping is in
-  [stopping](stopping.md).
+- `planning`, `search_fabric`, `budgeted_search`: UCT/MCTS, PRM/verifier value,
+  PRM reranking and marginal-gain stopping ([search and planning](evolution.md),
+  [stopping](stopping.md)).
 - `stats_eval`, `conformal`, `sequential`, `evalops`: paired bootstrap,
   split-conformal bounds, anytime-valid e-processes and continuous evaluation.
 
@@ -73,6 +73,8 @@ See [verifier](verifier.md), [statistical evidence](stats-eval.md) and
   and only a green bundle promotes. Artifact-id binding is always checked; hash
   binding applies when `artifact_hash` is supplied. See
   [trusted promotion](trusted-promotion.md).
+- `promotion_ledger`: an accepted promotion becomes a signed `ArtifactManifest`
+  and a lineage node carrying evidence and decision hashes.
 - `policy_release`, `proofs`, `safe_selfmod`, `capability_guard`, `risk_policy`,
   `approval`, `leakage`: policy-as-code, signed manifests, invariant
   certificates, capability gates, risk actions, human approval and leakage
@@ -107,6 +109,8 @@ See [runtime](runtime.md), [controller](controller.md) and
   earlier rejection reasons.
 - `capability_foundry`: validation → review → capability gate → proof → holdout
   gain → artifact registration.
+- `capability_scout`: failed tasks → tool synthesis → capability request →
+  foundry admission.
 - `deliberation`, `society_runtime`, `agent_society`: weighted judge panels,
   blackboard runtimes and multi-agent topology evolution.
 - `quality_diversity`, `artifact_graph`, `semantic_dedup`,
@@ -126,7 +130,10 @@ See [capability foundry](capability-foundry.md) and
 - `consolidation`: cross-run artifact archive with a mini-eval seed gate.
 - `counterfactual` / `credit`: replay interventions, leave-one-out and Shapley
   step attribution.
+- `counterfactual_experience`: Shapley step credit → per-action experience
+  rewards.
 - `preference`: pairwise preference reward model (RLHF/DPO's reward-model half).
+- `preference_replay`: preference-ranked replay selection.
 - `self_improve`, `recursive`, `joint_meta`, `meta_audit`, `meta_exam`,
   `meta_population`, `verified_seed`: recursive/joint/meta self-improvement with
   examined and verified seeds.
@@ -167,9 +174,9 @@ engine and governance layer without writing another RSI loop:
 | CI tests, lint, evals | `verifier`, `verifier_ensemble`, `evalops` |
 | Real failures / PR traces | `DataFlywheel`, `TaskFoundry`, `TaskPipeline` |
 | Cross-version metrics | `stats_eval`, `conformal`, `sequential` |
-| Promotion | `trust_evidence`, `promotion` |
+| Promotion | `trust_evidence`, `promotion`, `promotion_ledger` |
 | Capability library | `QualityDiversityArchive`, `ArtifactGraph`, `CapabilityArchive` |
-| Continual learning | `ExperienceEngine`, `continual_meta` |
+| Continual learning | `ExperienceEngine`, `continual_meta`, `counterfactual_experience`, `preference_replay` |
 | Operations | `durable_runs`, `workspaces`, `ops_fabric`, `lineage` |
 | Safety | `safe_selfmod`, `proofs`, `policy_release`, `governance` |
 
@@ -183,25 +190,13 @@ A defensible rollout:
 3. **Continual operation.** Add `durable_runs` + `workspaces` + `ops_fabric`,
    `task_pipeline` for failure-driven tasks, `capability_archive` for the skill
    library, and `experience` for cross-cycle memory.
-4. **Governed autonomy.** Add `policy_release` + `proofs` + canary/rollback and
-   `calibrated_deferral` for answer/defer/deny routing. A signed release receipt
-   (`promotion_ledger`) is proposed in #639.
+4. **Governed autonomy.** Add `promotion_ledger` + `policy_release` + `proofs` +
+   canary/rollback and `calibrated_deferral` for answer/defer/deny routing.
 
 Do not use a single LLM judge as the only merge gate. Do not let candidates edit
 the evaluator, CI configuration or frozen policy. Do not accept on a point
 estimate alone; use a held-out set and a statistical gate. Do not put unbounded
 experience into a prompt.
-
-## Proposed (not on main)
-
-These are open PRs, not current `main` capabilities; keep them out of a rollout
-until they land:
-
-- `capability_scout`: failed tasks → tool synthesis → admission (#634).
-- `budgeted_search`: stop UCT when another expansion stops paying (#638).
-- `promotion_ledger`: accepted promotion → signed manifest + lineage (#639).
-- `counterfactual_experience`: Shapley step credit → experience rewards (#640).
-- `preference_replay`: preference-ranked replay selection (#641).
 
 ## Boundaries
 
