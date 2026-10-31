@@ -44,6 +44,15 @@ from .advantage import (
     TrustRegion,
     state_distance,
 )
+from .jev import JEVModel
+from .verifier_curriculum import (
+    CoevolutionReport,
+    CoevolutionRound,
+    ProbeRow,
+    VerifierAgreement,
+    VerifierCurriculum,
+)
+from .capability_guard import CapabilityGuard, CapabilityReport, CapabilitySuite
 from .defaults import DefaultConflict, DefaultFusion
 from .invariants import (
     BUILTIN_INVARIANTS,
@@ -152,6 +161,30 @@ from .consolidation import (
     config_fingerprint,
     seed_from_archive,
 )
+from .harness import (
+    Harness,
+    HarnessReport,
+    HarnessRun,
+    compose_run,
+    harness,
+    harness_leaderboard,
+    harness_score,
+    record_harness,
+    select_harness,
+)
+from .portfolio import (
+    LayerBudget,
+    PortfolioReport,
+    layers_from_archive,
+    portfolio_report,
+)
+from .portfolio_evolve import (
+    ReallocationPolicy,
+    portfolio_evolve,
+    portfolio_problem,
+    reallocation_spec,
+    windows_from_archive,
+)
 from .allocator import (
     AllocatorContext,
     AllocatorPolicy,
@@ -166,11 +199,231 @@ from .workspec import Ref, RefError, RolloutSpec
 from . import rewards                      # agentdescent.rewards.last_number(...)
 from .rewards import SCORERS, scorer, command_scorer, GraderError
 from .meta import (
-    SLOTS, SLOT_PROTOCOLS, MetaOutcome, MetaRunReport, ParamSlot, PrioritySelection,
-    PRIORITY_SEED, SlotSpec, SourceSlot, auc, compile_policy_source,
-    compile_priority, evolve_problem, final_reward, meta_evolve, meta_run,
-    meta_validate, policy_source, priority_selection, rollouts_to, seed_source,
-    slot_reflector, transfer_ratio,
+    SLOTS, SLOT_PROTOCOLS, ContinuousMetaReport, MetaOutcome, MetaRunReport,
+    ParamSlot, PrioritySelection, PRIORITY_SEED, SlotSpec, SourceSlot, archive_rule,
+    auc, compile_policy_source, compile_priority, continuous_meta_run,
+    evolve_problem, final_reward, meta_evolve, meta_run, meta_validate,
+    policy_source, priority_selection, problem_descriptor, problem_from_archive,
+    rollouts_to, seed_source, slot_reflector, transfer_ratio,
+)
+from .rationale_distill import (
+    RationaleReport,
+    distill,
+    extract_rationale,
+    rationale_evolve,
+)
+from .self_modify import (
+    SelfModifyReport,
+    apply_patch,
+    evaluate_source,
+    gate_source,
+    improve_source,
+    patch_source,
+)
+from .curious_replay import (
+    CuriousReplayReport,
+    ReplayExample,
+    curiosity_weight,
+    curious_replay_evolve,
+)
+from .verifiable_rl import (
+    VerifiableReport,
+    policy_improve,
+    verifiable_problem,
+    verifiable_reward,
+)
+from .red_team import (
+    RedTeamReport,
+    red_team,
+    red_team_evolve,
+)
+from .trajectory_search import (
+    SearchReport,
+    SearchTree,
+    search_evolve,
+)
+from .agent_society import (
+    AgentNode,
+    SocietyGraph,
+    SocietyReport,
+    society_evolve,
+    society_problem,
+    society_spec,
+)
+from .world_model import (
+    ImagineReport,
+    LearnedSimulator,
+    imagine_then_evolve,
+    simulator_problem,
+    simulator_score,
+)
+from .rule_tournament import (
+    EloRating,
+    MatchResult,
+    TournamentReport,
+    rule_tournament,
+    tournament_promote,
+)
+from .evolved_programs import (
+    FastRuleReport,
+    cost_adjusted_reward,
+    evolve_fast_rule,
+    priority_grid_problem,
+    source_ops,
+)
+from .learn_to_think import (
+    LearnToThinkReport,
+    ROUTE_SEED,
+    learn_to_think,
+    quality_per_cost,
+    think_policy_spec,
+    think_problem,
+)
+from .self_rewarding import (
+    LearnableMetaJudge,
+    SelfRewardingReport,
+    outcome_features,
+    self_rewarding_meta_run,
+)
+from .meta_audit import (
+    MetaAuditRecord,
+    MetaAuditStore,
+    audited_meta_validate,
+    meta_run_audited,
+)
+from .meta_population import (
+    MetaPopulationReport,
+    PopulationIsland,
+    async_meta_population_run,
+    meta_population_run,
+)
+from .meta_curriculum import (
+    MetaChallengerConfig,
+    MetaProblemChallenger,
+    curriculum_meta_run,
+)
+from .trajectory_curriculum import (
+    failed_rollouts,
+    problem_from_tasks,
+    trajectory_challenger,
+)
+from .meta_exam import (
+    ExaminedRule,
+    MetaExamReport,
+    exam_archive,
+)
+from .verified_seed import (
+    VerifiedSeed,
+    verified_rules,
+)
+from .chain_audit import (
+    ChainAuditReport,
+    ChainLink,
+    chain_audit,
+)
+from .evidence import (
+    EvidenceSnapshot,
+    HarnessEvidence,
+    SlotEvidence,
+    rank_slots,
+    snapshot,
+)
+from .admit import (
+    AdmitVerdict,
+    admit,
+    admit_record,
+)
+from .self_improve import (
+    SelfImproveConfig,
+    SelfImproveReport,
+    SelfImproveTick,
+    self_improve,
+)
+from .leakage import LeakageGuard, LeakageReport, find_leakage
+from .stopping import MarginalGainStop
+from .stats_eval import (BootstrapResult, ContaminationReport, bootstrap_ci,
+                         contamination_overlap, is_significant, paired_gain)
+from .approval import ApprovalGate, ApprovalRequest, ApprovalStore
+from .guards import GuardDecision, GuardPipeline, GuardPipelineResult
+from .decisions import DecisionLog, DecisionRecord
+from .safety_controller import CanaryResult, KillSwitch, canary, rollback_plan
+from .runtime import GuardedRun, run_guarded
+from .diagnose import DiagnosisReport, diagnose_payload
+from .tournament import (AlgorithmArm, AlgorithmScore, AlgorithmTournamentReport,
+                         estimate_tournament, run_tournament)
+from .rsi import RSIReport, SlotRSI, rsi_report
+from .campaign import CampaignReport, CampaignSession, estimate_campaign, run_campaign
+from .variance_sampler import VarianceSampler
+from .safety import SafetyCheck, SafetyReport, safety_report
+from .rsi_metrics import (RSIMetrics, alerts, metrics_from_log,
+                          metrics_from_records, to_prometheus)
+from .controller import (ControllerConfig, ControllerReport, SessionOutcome,
+                         SessionRecord, run_controller)
+from .evaluation import EvaluationReport, EvaluationRow, evaluate
+from .loop_kernel import (
+    LoopConfig,
+    LoopObservation,
+    LoopContext,
+    LoopGeneration,
+    LoopReport,
+    LoopKernel,
+)
+from .promotion import (
+    PromotionAction,
+    PromotionRules,
+    ProofEvidence,
+    PromotionRequest,
+    PromotionDecision,
+    promote,
+)
+from .trust_evidence import TrustEvidence, build_trust_evidence
+from .compute_policy import (
+    ComputeAction,
+    ComputeOption,
+    ComputeContext,
+    ComputeDecision,
+    OptionReport,
+    ComputeReport,
+    ComputeController,
+)
+from .continual_meta import (
+    ContinualMetaLearner,
+    ContinualReport,
+    LinearPolicy,
+    MetaExample,
+    MetaUpdate,
+    ReplayBuffer,
+)
+from .capability_foundry import (
+    CapabilityFoundry,
+    CapabilityOutcome,
+    CapabilityRequest,
+    CapabilityStatus,
+)
+from .experience import (
+    ExperienceEngine,
+    ExperienceHit,
+    ExperienceRecord,
+    ExperienceReport,
+    ExperienceStore,
+    ExperienceUpdate,
+)
+from .platform import PlatformConfig, PlatformReport, RSIPlatform
+from .risk_policy import RiskContext, RiskDecision, RiskPolicy, RiskRule
+from .manifest import (RunManifest, build_manifest, diff_manifest,
+                       verify_manifest)
+from .recursive import (
+    RecursiveRound,
+    RecursiveSelfImproveReport,
+    recursive_self_improve,
+)
+from .joint_meta import (
+    JointMetaReport,
+    PoliciesBundle,
+    joint_archive_rule,
+    joint_meta_run,
+    joint_meta_validate,
+    joint_problem,
 )
 from .filetree import (
     TreeError,
@@ -247,7 +500,7 @@ from .parallel import (
     shard_round_robin,
 )
 
-__version__ = "0.6.0"
+__version__ = "0.8.0"
 
 __all__ = [
     "Contract",
@@ -289,6 +542,15 @@ __all__ = [
     "TrustRegion",
     "StableDistanceAcceptance",
     "state_distance",
+    "JEVModel",
+    "CoevolutionReport",
+    "CoevolutionRound",
+    "ProbeRow",
+    "VerifierAgreement",
+    "VerifierCurriculum",
+    "CapabilityGuard",
+    "CapabilityReport",
+    "CapabilitySuite",
     "SelectionPolicy",
     "SelectionContext",
     "Candidate",
@@ -329,6 +591,24 @@ __all__ = [
     "SeedReport",
     "config_fingerprint",
     "seed_from_archive",
+    "Harness",
+    "HarnessReport",
+    "HarnessRun",
+    "compose_run",
+    "harness",
+    "harness_leaderboard",
+    "harness_score",
+    "record_harness",
+    "select_harness",
+    "LayerBudget",
+    "PortfolioReport",
+    "layers_from_archive",
+    "portfolio_report",
+    "ReallocationPolicy",
+    "portfolio_evolve",
+    "portfolio_problem",
+    "reallocation_spec",
+    "windows_from_archive",
     # solver-challenger self-play (#329 / #341)
     "Challenger",
     "ChallengerConfig",
@@ -441,6 +721,11 @@ __all__ = [
     "MetaRunReport",
     "meta_validate",
     "evolve_problem",
+    "ContinuousMetaReport",
+    "continuous_meta_run",
+    "problem_descriptor",
+    "problem_from_archive",
+    "archive_rule",
     "MetaOutcome",
     "SlotSpec",
     "ParamSlot",
@@ -453,6 +738,207 @@ __all__ = [
     "rollouts_to",
     "slot_reflector",
     "transfer_ratio",
+    "RationaleReport",
+    "distill",
+    "extract_rationale",
+    "rationale_evolve",
+    "SelfModifyReport",
+    "apply_patch",
+    "evaluate_source",
+    "gate_source",
+    "improve_source",
+    "patch_source",
+    "CuriousReplayReport",
+    "ReplayExample",
+    "curiosity_weight",
+    "curious_replay_evolve",
+    "VerifiableReport",
+    "policy_improve",
+    "verifiable_problem",
+    "verifiable_reward",
+    "RedTeamReport",
+    "red_team",
+    "red_team_evolve",
+    "SearchReport",
+    "SearchTree",
+    "search_evolve",
+    "AgentNode",
+    "SocietyGraph",
+    "SocietyReport",
+    "society_evolve",
+    "society_problem",
+    "society_spec",
+    "ImagineReport",
+    "LearnedSimulator",
+    "imagine_then_evolve",
+    "simulator_problem",
+    "simulator_score",
+    "EloRating",
+    "MatchResult",
+    "TournamentReport",
+    "rule_tournament",
+    "tournament_promote",
+    "FastRuleReport",
+    "cost_adjusted_reward",
+    "evolve_fast_rule",
+    "priority_grid_problem",
+    "source_ops",
+    "LearnToThinkReport",
+    "ROUTE_SEED",
+    "learn_to_think",
+    "quality_per_cost",
+    "think_policy_spec",
+    "think_problem",
+    "LearnableMetaJudge",
+    "SelfRewardingReport",
+    "outcome_features",
+    "self_rewarding_meta_run",
+    "MetaAuditRecord",
+    "MetaAuditStore",
+    "audited_meta_validate",
+    "meta_run_audited",
+    "MetaPopulationReport",
+    "PopulationIsland",
+    "meta_population_run",
+    "MetaChallengerConfig",
+    "MetaProblemChallenger",
+    "curriculum_meta_run",
+    "async_meta_population_run",
+    "failed_rollouts",
+    "problem_from_tasks",
+    "trajectory_challenger",
+    "ExaminedRule",
+    "MetaExamReport",
+    "exam_archive",
+    "VerifiedSeed",
+    "verified_rules",
+    "ChainAuditReport",
+    "ChainLink",
+    "chain_audit",
+    "EvidenceSnapshot",
+    "HarnessEvidence",
+    "SlotEvidence",
+    "rank_slots",
+    "snapshot",
+    "AdmitVerdict",
+    "admit",
+    "admit_record",
+    "SelfImproveConfig",
+    "SelfImproveReport",
+    "SelfImproveTick",
+    "self_improve",
+    "LeakageGuard",
+    "LeakageReport",
+    "find_leakage",
+    "MarginalGainStop",
+    "BootstrapResult",
+    "ContaminationReport",
+    "bootstrap_ci",
+    "contamination_overlap",
+    "is_significant",
+    "paired_gain",
+    "ApprovalGate",
+    "ApprovalRequest",
+    "ApprovalStore",
+    "GuardDecision",
+    "GuardPipeline",
+    "GuardPipelineResult",
+    "DecisionLog",
+    "DecisionRecord",
+    "CanaryResult",
+    "KillSwitch",
+    "canary",
+    "rollback_plan",
+    "GuardedRun",
+    "run_guarded",
+    "DiagnosisReport",
+    "diagnose_payload",
+    "AlgorithmArm",
+    "AlgorithmScore",
+    "AlgorithmTournamentReport",
+    "estimate_tournament",
+    "run_tournament",
+    "RSIReport",
+    "SlotRSI",
+    "rsi_report",
+    "CampaignReport",
+    "CampaignSession",
+    "estimate_campaign",
+    "run_campaign",
+    "VarianceSampler",
+    "SafetyCheck",
+    "SafetyReport",
+    "safety_report",
+    "RSIMetrics",
+    "alerts",
+    "metrics_from_log",
+    "metrics_from_records",
+    "to_prometheus",
+    "ControllerConfig",
+    "ControllerReport",
+    "SessionOutcome",
+    "SessionRecord",
+    "run_controller",
+    "LoopConfig",
+    "LoopObservation",
+    "LoopContext",
+    "LoopGeneration",
+    "LoopReport",
+    "LoopKernel",
+    "PromotionAction",
+    "PromotionRules",
+    "ProofEvidence",
+    "PromotionRequest",
+    "PromotionDecision",
+    "promote",
+    "TrustEvidence",
+    "build_trust_evidence",
+    "ComputeAction",
+    "ComputeOption",
+    "ComputeContext",
+    "ComputeDecision",
+    "OptionReport",
+    "ComputeReport",
+    "ComputeController",
+    "ContinualMetaLearner",
+    "ContinualReport",
+    "LinearPolicy",
+    "MetaExample",
+    "MetaUpdate",
+    "ReplayBuffer",
+    "CapabilityFoundry",
+    "CapabilityOutcome",
+    "CapabilityRequest",
+    "CapabilityStatus",
+    "ExperienceEngine",
+    "ExperienceHit",
+    "ExperienceRecord",
+    "ExperienceReport",
+    "ExperienceStore",
+    "ExperienceUpdate",
+    "PlatformConfig",
+    "PlatformReport",
+    "RSIPlatform",
+    "EvaluationReport",
+    "EvaluationRow",
+    "evaluate",
+    "RiskContext",
+    "RiskDecision",
+    "RiskPolicy",
+    "RiskRule",
+    "RunManifest",
+    "build_manifest",
+    "diff_manifest",
+    "verify_manifest",
+    "RecursiveRound",
+    "RecursiveSelfImproveReport",
+    "recursive_self_improve",
+    "JointMetaReport",
+    "PoliciesBundle",
+    "joint_archive_rule",
+    "joint_meta_run",
+    "joint_meta_validate",
+    "joint_problem",
     "compile_priority",
     "priority_selection",
     "SLOT_PROTOCOLS",

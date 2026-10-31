@@ -11,13 +11,18 @@ import pytest
 from agentdescent import cli
 from agentdescent.cli import _unusable_refs
 from agentdescent.evolvespec import EvolveSpec
+from agentdescent.integrations import provider_key_names
 
 KEYS = ("OPENAI_API_KEY", "OPENAI_BASE_URL", "ANTHROPIC_API_KEY", "X_KEY", "X_URL")
 
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
-    for k in KEYS:
+    # Every provider key the preflight looks at, not only the ones named here:
+    # a developer or CI box with e.g. ARK_API_KEY exported otherwise gets an
+    # extra "ARK_API_KEY is set -- name one with ..." hint and the exact-text
+    # assertions fail for reasons unrelated to the code under test.
+    for k in {*KEYS, *provider_key_names()}:
         monkeypatch.delenv(k, raising=False)
     # the `anthropic` package is a separate preflight item; pretend it is there
     real = cli.doctor_report
@@ -44,6 +49,10 @@ def _spec(tmp_path, reflect=None, agent=None):
 @pytest.mark.parametrize("field", ["reflect", "agent"])
 def test_the_named_key_is_the_one_checked(tmp_path, monkeypatch, ref, default, other, field):
     block = {"ref": ref, "model": "m", "api_key_env": "X_KEY"}
+    if ref == "openai_compatible":
+        # an endpoint of its own: a non-OpenAI key with none configured is the
+        # separate "would send X_KEY to api.openai.com" warning (#422)
+        block["default_base_url"] = "https://x.example/v1"
     spec = (_spec(tmp_path, reflect=block) if field == "reflect"
             else _spec(tmp_path, agent=block))
 
@@ -93,7 +102,8 @@ def test_claude_default_key_is_unchanged(tmp_path, monkeypatch):
 
 def test_plan_reports_the_named_key(tmp_path, monkeypatch, capsys):
     spec = _spec(tmp_path, reflect={"ref": "openai_compatible", "model": "m",
-                                    "api_key_env": "X_KEY"})
+                                    "api_key_env": "X_KEY",
+                                    "default_base_url": "https://x.example/v1"})
     path = tmp_path / "spec.json"
     path.write_text(json.dumps(spec.to_dict()))
     monkeypatch.setenv("OPENAI_API_KEY", "unrelated")

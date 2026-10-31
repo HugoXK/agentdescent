@@ -43,7 +43,7 @@ from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 from .evolution import EvolutionResult, Task
 
 __all__ = ["ConsolidationRecord", "ConsolidationStore", "SeedReport",
-           "config_fingerprint", "seed_from_archive"]
+           "config_fingerprint", "missing_archive_message", "seed_from_archive"]
 
 
 def config_fingerprint(config: Optional[Dict[str, Any]]) -> str:
@@ -84,6 +84,25 @@ class ConsolidationRecord:
     #: Durable trajectory ledger path, linked not copied (the evidence lives
     #: where the run left it; the archive only points at it).
     trajectory_store: Optional[str] = None
+    #: How to rebuild the inner problem(s) this product was produced or judged
+    #: on. ``None`` for a plain artifact record; a rule record (written by
+    #: ``agentdescent.meta.archive_rule``) carries the problem descriptor so a
+    #: later session can rebuild the same inner problems via
+    #: ``agentdescent.meta.problem_from_archive``. Optional and backwards
+    #: compatible: an archive written before this field existed reads back as
+    #: ``None`` and stays seedable.
+    problem: Optional[Dict[str, Any]] = None
+    #: Self-exam status, stamped by ``agentdescent.meta_exam.exam_archive``.
+    #: ``None`` until the rule is examined, then ``"passed"`` / ``"flagged"`` /
+    #: ``"demoted"``. A demoted rule is excluded from future seeding by
+    #: ``meta._archived_rules``. Optional and backwards compatible: an archive
+    #: written before this field existed reads back as ``None`` and stays
+    #: seedable until examined.
+    exam: Optional[str] = None
+    #: Consecutive failed exams, counted toward demotion.
+    exam_flags: int = 0
+    #: The last exam's reason, so a human can read why a rule was demoted.
+    exam_note: str = ""
     created_at: float = field(default_factory=time.time)
 
     @property
@@ -102,6 +121,10 @@ class ConsolidationRecord:
             "final_reward": self.final_reward,
             "rounds": self.rounds,
             "trajectory_store": self.trajectory_store,
+            "problem": self.problem,
+            "exam": self.exam,
+            "exam_flags": self.exam_flags,
+            "exam_note": self.exam_note,
             "created_at": self.created_at,
         }
 
@@ -116,8 +139,27 @@ class ConsolidationRecord:
             final_reward=float(d.get("final_reward", 0.0)),
             rounds=int(d.get("rounds", 0)),
             trajectory_store=d.get("trajectory_store"),
+            problem=dict(d["problem"]) if d.get("problem") else None,
+            exam=d.get("exam"),
+            exam_flags=int(d.get("exam_flags", 0)),
+            exam_note=d.get("exam_note", ""),
             created_at=float(d.get("created_at", 0.0)),
         )
+
+
+
+def missing_archive_message(root: str) -> str:
+    """Actionable text for a path that is not a consolidation archive (#512).
+
+    Plugin / ``evolve`` paths never write one; only the Python meta API
+    (``continuous_meta_run`` and friends) does. Host agents that only see
+    the CLI/MCP otherwise invent a nonexistent "run a consolidation" step.
+    """
+    return (
+        f"archive {root!r} does not exist; write one with continuous_meta_run "
+        f"(see docs/consolidation.md) — evolve / plugin runs do not write an "
+        f"archive"
+    )
 
 
 class ConsolidationStore:
@@ -133,10 +175,13 @@ class ConsolidationStore:
     not take the next run down.
     """
 
-    def __init__(self, root: str) -> None:
+    def __init__(self, root: str, *, create: bool = True) -> None:
         self.root = root
         self._runs_dir = os.path.join(root, "runs")
-        os.makedirs(self._runs_dir, exist_ok=True)
+        # Read-only callers (CLI/MCP safety/portfolio/audit) pass create=False
+        # so an empty existing archive is not dirtied with a fresh runs/ (#512).
+        if create:
+            os.makedirs(self._runs_dir, exist_ok=True)
         self._lock = threading.RLock()
 
     @staticmethod
@@ -183,6 +228,7 @@ class ConsolidationStore:
         strategy: Optional[str] = None,
         config: Optional[Dict[str, Any]] = None,
         trajectory_store: Optional[str] = None,
+        problem: Optional[Dict[str, Any]] = None,
     ) -> ConsolidationRecord:
         """Archive one run's product. Idempotent by ``run_id`` (atomic rewrite).
 
@@ -190,7 +236,11 @@ class ConsolidationStore:
         later run adopts the state only through the same strategy. ``config``
         names the dataset/scorer/model/params so retrieval keeps domains
         apart. ``trajectory_store`` links the run's durable evidence without
-        copying it."""
+        copying it. ``problem`` is an optional descriptor of how to rebuild the
+        inner problem(s) this product was produced or judged on (written by
+        ``meta.archive_rule`` for an adopted slot rule); it is read back by
+        ``meta.problem_from_archive`` and is ``None`` for an ordinary artifact
+        record."""
         reward = float(result.final_reward)
         if not math.isfinite(reward) or not 0.0 <= reward <= 1.0:
             raise ValueError(
@@ -205,6 +255,7 @@ class ConsolidationStore:
             final_reward=reward,
             rounds=len(result.history),
             trajectory_store=trajectory_store or result.trajectories_path,
+            problem=dict(problem) if problem else None,
         )
         with self._lock:
             path = self._path(run_id)
@@ -271,6 +322,39 @@ class ConsolidationStore:
                        if n.endswith(".json"))
         except OSError:
             return 0
+
+    def mark_exam(self, run_id: str, *, exam: Optional[str],
+                  flags: int = 0, note: str = "") -> ConsolidationRecord:
+        """Stamp a rule's self-exam status. Idempotent by ``run_id``.
+
+        Reads the current record, updates ``exam`` / ``exam_flags`` /
+        ``exam_note``, and rewrites it atomically (tmp + rename, the same
+        pattern as :meth:`archive`), so an exam result never tears a record and
+        a concurrent write cannot interleave into a half-stamped file. ``None``
+        ``exam`` clears the stamp."""
+        rec = self.find(run_id)
+        if rec is None:
+            raise KeyError(f"no archived run {run_id!r} to mark")
+        payload = rec.to_dict()
+        payload["exam"] = exam
+        payload["exam_flags"] = int(flags)
+        payload["exam_note"] = note
+        with self._lock:
+            path = self._path(run_id)
+            tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+            try:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    json.dump(payload, fh, sort_keys=True, default=str,
+                              allow_nan=False)
+                os.replace(tmp, path)
+            finally:
+                try:
+                    if os.path.exists(tmp):
+                        os.remove(tmp)
+                except OSError:
+                    pass
+        return self.find(run_id)  # type: ignore[return-value]
 
 
 @dataclass(frozen=True)

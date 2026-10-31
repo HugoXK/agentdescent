@@ -1,6 +1,7 @@
 """The MCP server: the CLI's verbs as tools a host agent can call.
 
-``agentdescent mcp`` serves over stdio. DeepSeek Harness, Claude Code, Codex and
+``agentdescent mcp`` serves over stdio (or, with ``--transport streamable-http``,
+over HTTP for URL-only hosts). DeepSeek Harness, Claude Code, Codex and
 the other hosts all speak MCP, so this one server is the whole runtime
 integration; the per-host material in ``integrations/`` is only manifests and a
 skill file telling the host *when* to call these.
@@ -31,15 +32,16 @@ from __future__ import annotations
 import inspect
 import json
 import os
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Annotated, Any, Dict, Optional, Sequence, Tuple
 
 from . import __version__, runstore
-from .cli import (NESTED_ENV, apply_payload, doctor_report, plan_payload,
-                 require_cli_on_path, require_resume_host_on_path, show_payload,
-                 status_payload)
+from .cli import (NESTED_ENV, apply_from_payload, apply_payload, doctor_report,
+                 plan_payload, require_cli_on_path, require_resume_host_on_path,
+                 show_payload, status_payload)
 from .evolvespec import EvolveSpec, SpecError, compose
 
-__all__ = ["RESCAN_ALLOW_ENV", "Tools", "TOOL_DESCRIPTIONS", "build_server",
+__all__ = ["DEFAULT_HTTP_HOST", "DEFAULT_HTTP_PORT", "RESCAN_ALLOW_ENV", "STREAMABLE_HTTP_REQUIRES", "TRANSPORTS",
+           "Tools", "TOOL_DESCRIPTIONS", "build_server", "is_loopback_host",
            "rescan_allow_from_env", "serve"]
 
 #: Comma-separated import prefixes `audit_rescan` may resolve beyond this
@@ -66,18 +68,40 @@ def rescan_allow_from_env(environ: Optional[Dict[str, str]] = None
 #: Written for the calling model: what the tool is for and what to do around it.
 TOOL_DESCRIPTIONS: Dict[str, str] = {
     "doctor": (
-        "Check what this machine can run: which worker agent CLIs (claude, codex, dsh) "
+        "Check what this machine can run: which worker agent CLIs (claude, codex, dsh, "
+        "opencode) "
         "are on PATH, which provider keys are set, whether a container engine and the "
-        "git ledger are available, and which AgentDescent version and Python interpreter "
-        "this server runs (compare with the shell's `agentdescent doctor` when results "
-        "differ). Call this FIRST, before planning a run, and tell the "
-        "user what is missing instead of starting a run that fails on round one."),
+        "git ledger are available, host skill/MCP install state, and which AgentDescent "
+        "version and Python interpreter this server runs (compare with the shell's "
+        "`agentdescent doctor` when results differ). Optional `home` is the same probe "
+        "directory as `agentdescent doctor --home` / `install --home`. Call this FIRST, "
+        "before planning a run, and tell the user what is missing instead of starting a "
+        "run that fails on round one."),
+    "list_algorithms": (
+        "List the named algorithms a spec can ask for (`algorithm` field), with a "
+        "one-line summary, the kinds each applies to and its fidelity. Call this when "
+        "the user names a method (GEPA, ACE, RRSI, ...) or asks what methods exist; if "
+        "they named none, the default recipe for the kind is usually right. Do not "
+        "invent a name -- an unknown one fails in plan."),
+    "rsi": (
+        "The archive's longitudinal self-improvement trend: per decision slot, "
+        "the first and best adopted reward, the gain, the adoption that set the "
+        "best, and how many adoptions have happened since. Use it when the user "
+        "asks whether the system is still getting better or has plateaued; it is "
+        "read-only and costs no model calls. `--archive` is the consolidation "
+        "archive, not a run store."),
+    "describe_algorithm": (
+        "One algorithm's card: summary, kinds, fidelity, source, extra cost and every "
+        "parameter with its type, default and bounds. Call this before setting "
+        "`algorithm: {name, params}` so the values you pass are the ones plan expects. "
+        "The same data is in `agentdescent algorithms show <name>`."),
     "plan": (
         "Validate an EvolveSpec and estimate its cost WITHOUT running anything. Resolves "
         "every agent/scorer/policy reference and loads the data, so a wrong field fails "
         "here with its name. Returns the composed evolve() arguments, the task count, an "
-        "upper bound on agent calls per round and in total, and notes. Show the user the "
-        "spec and the estimate and get a yes before calling start."),
+        "upper bound on agent calls per round and in total, and notes. When the spec has "
+        "an `algorithm`, the resolved name/params are echoed. Show the user the spec and "
+        "the estimate and get a yes before calling start."),
     "start": (
         "Start an evolution run in the background and return its run_id at once. The run "
         "is a detached process; poll `status` about once per round (not more often) and "
@@ -97,13 +121,22 @@ TOOL_DESCRIPTIONS: Dict[str, str] = {
         "written, extra files, backups); for text, the evolved instruction. Also the "
         "outcomes() histogram that says why proposals were committed or refused. Explain "
         "what changed and why; do not paste the whole tree."),
+    "diagnose": (
+        "Explain why a run ended where it did: solved, partial-improvement, running, "
+        "cancelled, run-failed, reflector-error, scoring-mismatch, agent-failures, "
+        "gate-rejected, no-improvement or unknown, with bounded evidence and the next "
+        "step. Call this after `show` when the run learned little, instead of guessing "
+        "from the outcome histogram."),
     "apply": (
-        "DESTRUCTIVE: write the evolved artifact back over the target directory (or `to`). "
-        "Backs the original up first unless backup=false. Ask the user explicitly before "
-        "calling this, after they have seen `show`; use dry_run=true to preview. Returns "
-        "written / unchanged / backup; `noop: true` means the target already matched the "
-        "run, so nothing was written and no backup exists -- tell the user nothing "
-        "changed. Otherwise tell them the backup path afterwards."),
+        "DESTRUCTIVE: write an evolved artifact back over a target. Pass `run_id` to "
+        "install a finished run's result (optional `to` overrides the run's target), OR "
+        "pass `from` + `to` to install an on-disk artifact such as a campaign "
+        "`final_target` -- same rules as CLI `apply --from` (from requires to; mutually "
+        "exclusive with run_id; symlinks refused). Backs the original up first unless "
+        "backup=false. Ask the user explicitly before calling this; use dry_run=true to "
+        "preview. Returns written / unchanged / backup; `noop: true` means the target "
+        "already matched, so nothing was written and no backup exists -- tell the user "
+        "nothing changed. Otherwise tell them the backup path afterwards."),
     "cancel": (
         "Stop a running evolution and every worker agent it started. The run keeps its "
         "ledger and can be resumed."),
@@ -151,6 +184,28 @@ TOOL_DESCRIPTIONS: Dict[str, str] = {
         "whatever prefixes the operator set in AGENTDESCENT_RESCAN_ALLOW can be named. "
         "That list is not something this tool can widen: if the reference you need is "
         "refused, tell the user which prefix to add and why."),
+    "safety": (
+        "Read-only: is a consolidation archive (the rules meta runs adopted) safe to "
+        "keep seeding new runs from? Returns `verdict` (safe / caution / unsafe), a "
+        "one-line `reason`, counts of rules, unexamined, flagged and demoted ones, and "
+        "every `check` with its status. Pass `audit` (a MetaAuditStore JSONL) to check "
+        "verifier bias -- without it that check is a warning, not a pass. `archive` "
+        "defaults to $AGENTDESCENT_HOME/archive; a missing one is an error and is never "
+        "created. Same data as `agentdescent safety --json`. Relay the verdict and "
+        "every non-ok check before the user seeds from the archive."),
+    "portfolio": (
+        "Read-only: rank a consolidation archive's layers by return per cost and "
+        "propose how to split the next budget window between them (`reallocated`, "
+        "with a `reasons` line per layer). Only reports the suggestion; nothing is "
+        "written or applied. `archive` defaults to $AGENTDESCENT_HOME/archive; a missing "
+        "or empty one is an error. Same data as `agentdescent portfolio --json`."),
+    "audit_trace": (
+        "Read-only: trace one archived adoption (`run_id`) through its evidence rings "
+        "-- archive record, meta-gain audit, inner-reward audit -- and say whether the "
+        "chain is `verified`, with each link's status and reason. Pass `meta_audit` / "
+        "`inner_audit` store paths for those rings; a ring with no store is reported as "
+        "missing evidence, not as passing. Same data as `agentdescent audit <run_id> "
+        "--json` (the CLI's --harness ring needs a module reference and is CLI-only)."),
     "audit_drift": (
         "Chart the correction across verifier versions with an EWMA control chart. A "
         "`bias-up` signal means the loop is finding answers the verifier likes and the "
@@ -201,8 +256,44 @@ class Tools:
 
     # -- read-only -------------------------------------------------------------
 
-    def doctor(self) -> Dict[str, Any]:
-        return doctor_report()
+    def doctor(self, home: Optional[str] = None) -> Dict[str, Any]:
+        return doctor_report(home=home) if home is not None else doctor_report()
+
+    def list_algorithms(self, kind: Optional[str] = None) -> Dict[str, Any]:
+        from . import algorithms
+        from .evolvespec import KINDS
+
+        if kind is not None and kind not in KINDS:
+            return {"error": f"unknown kind {kind!r}; choose from {list(KINDS)}"}
+        payload: Dict[str, Any] = {
+            "algorithms": [a.describe() for a in algorithms.listing(kind)]}
+        errors = algorithms.external_errors()
+        if errors:
+            payload["load_errors"] = errors
+        if kind == "policy_slot" and not payload["algorithms"]:
+            payload["note"] = ("no algorithm applies to kind 'policy_slot': that "
+                               "kind evolves a policy slot, and `plan` refuses an "
+                               "algorithm for it")
+        return payload
+
+    def rsi(self, archive: Optional[str] = None, slot: Optional[str] = None,
+            stagnation_window: int = 3) -> Dict[str, Any]:
+        from .cli import _archive_root
+        from .rsi import rsi_report
+
+        try:
+            return rsi_report(_archive_root(archive), slot=slot,
+                              stagnation_window=stagnation_window).to_dict()
+        except Exception as e:  # noqa: BLE001 - a bad archive is a report, not a crash
+            return {"error": str(e)}
+
+    def describe_algorithm(self, name: str) -> Dict[str, Any]:
+        from . import algorithms
+
+        try:
+            return algorithms.get(name, where="describe_algorithm").describe()
+        except algorithms.AlgorithmError as e:
+            return {"error": str(e)}
 
     def plan(self, spec: Dict[str, Any], usd_per_call: Optional[float] = None) -> Dict[str, Any]:
         try:
@@ -230,6 +321,14 @@ class Tools:
     def show(self, run_id: str, diff: bool = True) -> Dict[str, Any]:
         try:
             return show_payload(run_id, store=self.store, diff=diff)
+        except runstore.RunStoreError as e:
+            return {"error": str(e)}
+
+    def diagnose(self, run_id: str) -> Dict[str, Any]:
+        from .diagnose import diagnose_payload
+
+        try:
+            return diagnose_payload(run_id, store=self.store).to_dict()
         except runstore.RunStoreError as e:
             return {"error": str(e)}
 
@@ -288,10 +387,28 @@ class Tools:
                 **({} if (self.bridge or self.host_cli)
                    else {"host_model_unavailable": self.bridge_error})}
 
-    def apply(self, run_id: str, to: Optional[str] = None, dry_run: bool = False,
-              backup: bool = True) -> Dict[str, Any]:
+    def apply(self, run_id: Optional[str] = None, to: Optional[str] = None,
+              dry_run: bool = False, backup: bool = True, *,
+              source: Optional[str] = None) -> Dict[str, Any]:
+        """Install a run result (`run_id`) or an on-disk artifact (`source` + `to`).
+
+        ``source`` is the MCP/`CLI` ``from`` path (campaign ``final_target``, etc.).
+        ``run_id`` and ``source`` are mutually exclusive; ``source`` requires ``to``.
+        """
         try:
-            return apply_payload(run_id, to=to, store=self.store, dry_run=dry_run, backup=backup)
+            if source:
+                if run_id:
+                    raise runstore.RunStoreError(
+                        "pass a run_id or from PATH, not both")
+                if not to:
+                    raise runstore.RunStoreError(
+                        "from needs to PATH (where to install the artifact)")
+                return apply_from_payload(source, to=to, dry_run=dry_run, backup=backup)
+            if not run_id:
+                raise runstore.RunStoreError(
+                    "apply needs a run_id, or from PATH and to PATH")
+            return apply_payload(run_id, to=to, store=self.store, dry_run=dry_run,
+                                backup=backup)
         except (runstore.RunStoreError, OSError, ValueError) as e:
             return {"error": str(e)}
 
@@ -399,6 +516,48 @@ class Tools:
 
         return service.audit_drift(path, versions)
 
+    # -- the meta stack (read-only) ---------------------------------------------
+    #
+    # The bodies are the CLI's own (`cli.*_payload`), so a tool and the
+    # `--json` verb cannot drift apart. None of them writes: a missing archive
+    # is an error, never a directory created on the way (#502).
+
+    def safety(self, archive: Optional[str] = None, audit: Optional[str] = None,
+               bias_threshold: float = 0.1,
+               min_exam: str = "passed") -> Dict[str, Any]:
+        from .cli import MetaCommandError, safety_payload
+
+        try:
+            return safety_payload(archive, audit=audit,
+                                  bias_threshold=bias_threshold, min_exam=min_exam)
+        except MetaCommandError as e:
+            return {"error": str(e)}
+
+    def portfolio(self, archive: Optional[str] = None, floor: float = 0.05,
+                  min_samples: int = 3, grow: float = 0.5, shrink: float = 0.5,
+                  cap: Optional[float] = None) -> Dict[str, Any]:
+        from .cli import MetaCommandError, portfolio_payload
+
+        try:
+            return portfolio_payload(archive, floor=floor, min_samples=min_samples,
+                                     grow=grow, shrink=shrink, cap=cap)
+        except (MetaCommandError, ValueError) as e:
+            return {"error": str(e)}
+
+    def audit_trace(self, run_id: str, archive: Optional[str] = None,
+                    meta_audit: Optional[str] = None,
+                    inner_audit: Optional[str] = None,
+                    bias_threshold: float = 0.1) -> Dict[str, Any]:
+        from .cli import MetaCommandError, audit_trace_payload
+
+        try:
+            return audit_trace_payload(run_id, archive=archive,
+                                       meta_audit=meta_audit,
+                                       inner_audit=inner_audit,
+                                       bias_threshold=bias_threshold)
+        except MetaCommandError as e:
+            return {"error": str(e)}
+
 
 def _context_class():
     """The SDK's ``Context``, whose *annotation* is how a tool asks for a session.
@@ -501,8 +660,21 @@ def build_server(store: Optional[str] = None, *, name: str = "agentdescent",
             t.bridge, t.bridge_error = None, f"{type(e).__name__}: {e}"
 
     @server.tool(description=TOOL_DESCRIPTIONS["doctor"])
-    def doctor() -> Dict[str, Any]:
-        return t.doctor()
+    def doctor(home: Optional[str] = None) -> Dict[str, Any]:
+        return t.doctor(home)
+
+    @server.tool(description=TOOL_DESCRIPTIONS["list_algorithms"])
+    def list_algorithms(kind: Optional[str] = None) -> Dict[str, Any]:
+        return t.list_algorithms(kind)
+
+    @server.tool(description=TOOL_DESCRIPTIONS["describe_algorithm"])
+    def describe_algorithm(name: str) -> Dict[str, Any]:
+        return t.describe_algorithm(name)
+
+    @server.tool(description=TOOL_DESCRIPTIONS["rsi"])
+    def rsi(archive: Optional[str] = None, slot: Optional[str] = None,
+            stagnation_window: int = 3) -> Dict[str, Any]:
+        return t.rsi(archive, slot, stagnation_window)
 
     @server.tool(description=TOOL_DESCRIPTIONS["plan"])
     def plan(spec: Dict[str, Any], usd_per_call: Optional[float] = None) -> Dict[str, Any]:
@@ -536,10 +708,26 @@ def build_server(store: Optional[str] = None, *, name: str = "agentdescent",
     def show(run_id: str, diff: bool = True) -> Dict[str, Any]:
         return t.show(run_id, diff)
 
-    @server.tool(description=TOOL_DESCRIPTIONS["apply"])
-    def apply(run_id: str, to: Optional[str] = None, dry_run: bool = False,
-              backup: bool = True) -> Dict[str, Any]:
-        return t.apply(run_id, to, dry_run, backup)
+    @server.tool(description=TOOL_DESCRIPTIONS["diagnose"])
+    def diagnose(run_id: str) -> Dict[str, Any]:
+        return t.diagnose(run_id)
+
+    # `from` is a Python keyword; expose it as the MCP arg name via pydantic
+    # validation_alias so hosts pass `{"from": ..., "to": ...}` like the CLI.
+    # Annotation is set after the def (like Context on start/resume) because
+    # `from __future__ import annotations` would stringify a local Field import
+    # and fail when the SDK evaluates it.
+    from pydantic import Field as _Field
+
+    def apply(run_id: Optional[str] = None, to: Optional[str] = None,
+              dry_run: bool = False, backup: bool = True,
+              from_: Optional[str] = None) -> Dict[str, Any]:
+        return t.apply(run_id, to, dry_run, backup, source=from_)
+
+    apply.__annotations__["from_"] = Annotated[
+        Optional[str],
+        _Field(validation_alias="from", serialization_alias="from")]
+    server.tool(description=TOOL_DESCRIPTIONS["apply"])(apply)
 
     @server.tool(description=TOOL_DESCRIPTIONS["cancel"])
     def cancel(run_id: str) -> Dict[str, Any]:
@@ -594,6 +782,23 @@ def build_server(store: Optional[str] = None, *, name: str = "agentdescent",
     def audit_drift(path: str, versions: Optional[list] = None) -> Dict[str, Any]:
         return t.audit_drift(path, versions)
 
+    @server.tool(description=TOOL_DESCRIPTIONS["safety"])
+    def safety(archive: Optional[str] = None, audit: Optional[str] = None,
+               bias_threshold: float = 0.1, min_exam: str = "passed") -> Dict[str, Any]:
+        return t.safety(archive, audit, bias_threshold, min_exam)
+
+    @server.tool(description=TOOL_DESCRIPTIONS["portfolio"])
+    def portfolio(archive: Optional[str] = None, floor: float = 0.05,
+                  min_samples: int = 3, grow: float = 0.5, shrink: float = 0.5,
+                  cap: Optional[float] = None) -> Dict[str, Any]:
+        return t.portfolio(archive, floor, min_samples, grow, shrink, cap)
+
+    @server.tool(description=TOOL_DESCRIPTIONS["audit_trace"])
+    def audit_trace(run_id: str, archive: Optional[str] = None,
+                    meta_audit: Optional[str] = None, inner_audit: Optional[str] = None,
+                    bias_threshold: float = 0.1) -> Dict[str, Any]:
+        return t.audit_trace(run_id, archive, meta_audit, inner_audit, bias_threshold)
+
     @server.resource("agentdescent://runs", mime_type="application/json",
                      description="Every run in the store, newest first, with its status.")
     def runs() -> str:
@@ -607,6 +812,64 @@ def build_server(store: Optional[str] = None, *, name: str = "agentdescent",
     return server
 
 
-def serve(store: Optional[str] = None) -> None:
-    """Serve over stdio until the host closes the pipe."""
-    build_server(store).run("stdio")
+#: Transports ``agentdescent mcp --transport`` accepts. stdio is what hosts that
+#: spawn a subprocess speak; streamable-http is for hosts that only take a URL
+#: (Grok Bot's custom MCP connectors, other remote hosts) behind a tunnel.
+TRANSPORTS = ("stdio", "streamable-http")
+DEFAULT_HTTP_HOST = "127.0.0.1"
+DEFAULT_HTTP_PORT = 8000
+#: One-line reason when the installed SDK predates streamable-http (mcp < 1.8).
+STREAMABLE_HTTP_REQUIRES = (
+    'streamable-http needs mcp>=1.8; this install cannot serve it. '
+    'Upgrade with: pip install -U "mcp>=1.8", or use --transport stdio.'
+)
+
+
+def is_loopback_host(host: str) -> bool:
+    """True when ``host`` only accepts connections from this machine."""
+    h = (host or "").strip().strip("[]").lower()
+    if h == "localhost":
+        return True
+    try:
+        import ipaddress
+        return ipaddress.ip_address(h).is_loopback
+    except ValueError:
+        return False
+
+
+def serve(store: Optional[str] = None, *, transport: str = "stdio",
+          host: str = DEFAULT_HTTP_HOST, port: int = DEFAULT_HTTP_PORT) -> None:
+    """Serve until the host closes the pipe (stdio) or the process is stopped.
+
+    ``streamable-http`` listens on ``host:port`` at ``/mcp``. The host/port go
+    where each SDK generation reads them: mcp 2.x takes them as keywords to
+    ``run``; mcp 1.x's ``FastMCP`` reads them from ``server.settings``. Callers
+    are responsible for the loopback check (the CLI refuses a non-loopback host
+    without ``--allow-remote``): ``start`` and ``apply`` write to disk.
+    """
+    if transport not in TRANSPORTS:
+        raise ValueError(f"unknown transport {transport!r}; expected one of {TRANSPORTS}")
+    server = build_server(store)
+    if transport == "stdio":
+        server.run("stdio")
+        return
+    # mcp 1.2–1.7 accept only stdio/sse; ``run("streamable-http")`` raises an
+    # opaque SDK ValueError. ``run_streamable_http_async`` appears in 1.8.0.
+    runner = getattr(server, "run_streamable_http_async", None)
+    if runner is None:
+        raise RuntimeError(STREAMABLE_HTTP_REQUIRES)
+    params = inspect.signature(runner).parameters
+    if "host" in params and "port" in params:  # mcp >= 2
+        server.run("streamable-http", host=host, port=port)
+    else:  # mcp 1.x FastMCP (>= 1.8)
+        server.settings.host = host
+        server.settings.port = port
+        # mcp 1.x decides DNS-rebinding protection in the constructor, from the
+        # host it was built with (loopback by default): it pins allowed Host
+        # headers to 127.0.0.1/localhost/[::1]. Changing settings.host later does
+        # not undo that, so a non-loopback bind (``--allow-remote``) would answer
+        # every remote request 421. Mirror what the constructor itself does for a
+        # non-loopback host and drop the loopback-only pin.
+        if not is_loopback_host(host) and getattr(server.settings, "transport_security", None):
+            server.settings.transport_security = None
+        server.run("streamable-http")

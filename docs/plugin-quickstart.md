@@ -10,10 +10,10 @@ until step 3.
 
 ## 1. Install
 
-Install **0.6.0** from PyPI with its MCP extra:
+Install **0.8.0** from PyPI with its MCP extra:
 
 ```bash
-pip install "agentdescent[mcp]>=0.6.0"
+pip install "agentdescent[mcp]>=0.8.0"
 ```
 
 Or, from a source checkout:
@@ -95,13 +95,36 @@ agentdescent apply <run_id> --dry-run    # what it would write
 agentdescent apply <run_id>              # write it, keeping a .bak- backup
 ```
 
+When a run learns little, `show` also lists the worst rollouts (`samples`:
+output vs gold) and the diffs the gate measured and refused (`rejected`: files,
+short diff, rationale, outcome), so "the agent answered wrongly" is
+distinguishable from "the reflector proposed nothing useful". Both are
+diagnostics on disk; `record_rollouts: false` keeps neither.
+
 Pass `--dir ./somewhere` to keep the demo's files around and poke at them.
 
 ## 3. Put it in your agent
 
 ```bash
-agentdescent install claude-code    # or: dsh, codex, opencode
+agentdescent install claude-code    # or: dsh, codex, opencode, grok-bot
 ```
+
+#### Grok Bot
+
+`agentdescent install grok-bot` writes a scaffold under
+`~/.agentdescent/plugins/grok-bot/` (skill + `HOST.md` + example MCP JSON).
+There is no one-click host wire-up yet — read `HOST.md` for the current
+best path (save the skill in the Bot; drive runs with the CLI). To give the
+Bot the MCP tools, serve them over HTTP and expose them with a tunnel, then add
+the tunnel URL (ending in `/mcp`) as a custom MCP server:
+
+```bash
+agentdescent mcp --transport streamable-http --port 8000
+cloudflared tunnel --url http://127.0.0.1:8000 --http-host-header 127.0.0.1:8000
+```
+
+The HTTP server has no authentication, so keep the URL private. See
+[Use it from your agent](plugins.md).
 
 Then load it, and check it is actually there:
 
@@ -180,6 +203,26 @@ no worker CLI installed it writes `claude_code` as a placeholder and warns;
 the `host` CLI is checked on its own: it comes from the plugin's format (a
 `.claude-plugin/` tree needs `claude`), so an installed `agent` does not make
 a missing host pass, and `plan`, `evolve` and MCP `start` refuse it by name.
+
+The reflector (the model that proposes each edit) is an `openai_compatible`
+call, and `init` never guesses its model or endpoint: it writes `<your-model>`
+(and, for a non-OpenAI key, `<your-endpoint-url>`), names the provider key that is
+set here, and `plan` refuses the spec until the placeholders are filled. Pass the
+values at `init` time instead, for example with only `ARK_API_KEY` set:
+
+```bash
+agentdescent init ./my-skill --data cases.jsonl --out spec.json \
+  --model doubao-seed-code --base-url https://ark.cn-beijing.volces.com/api/coding/v3
+```
+
+```json
+"reflect": {"ref": "openai_compatible", "model": "doubao-seed-code",
+            "api_key_env": "ARK_API_KEY",
+            "default_base_url": "https://ark.cn-beijing.volces.com/api/coding/v3"}
+```
+
+`--key-env NAME` picks the key variable when several are set; with
+`OPENAI_API_KEY` alone only `--model` is needed.
 
 `cases.jsonl` is one JSON object per line, and it is the only thing you have to
 build yourself:

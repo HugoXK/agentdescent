@@ -314,6 +314,8 @@ small script so they cannot drift.
 skills/agentdescent/SKILL.md    the shared skill
 commands/evolve.md              /agentdescent:evolve <path> — a slash-command shortcut that
                                 invokes the skill with the argument prefilled
+commands/algorithms.md          /agentdescent:algorithms list|show|run — same cards as
+                                `algorithms list`/`show` and MCP list/describe
 .mcp.json                       {"mcpServers": {"agentdescent": {"command": "agentdescent", "args": ["mcp"],
                                 "env_vars": [...]}}}   (env_vars: what Codex forwards; see plugins.md)
 hooks/hooks.json                SessionStart: `agentdescent status --brief` so an in-progress run
@@ -440,7 +442,7 @@ on start.
 | Host | Skill location | MCP config | Worker command |
 |---|---|---|---|
 | Gemini CLI | `gemini-extension.json` + `GEMINI.md` + `skills/` | in the extension manifest | `gemini -p` |
-| ~~OpenCode~~ | **implemented and verified** -- `~/.config/opencode/skill/`, `mcp` in `opencode.jsonc`, `opencode run`; see plugins.md | | |
+| ~~OpenCode~~ | **implemented and verified** -- `~/.config/opencode/skill/`, `command/agentdescent/evolve.md` (`/agentdescent/evolve`), `mcp` in `opencode.jsonc`, `opencode run`; see plugins.md | | |
 | Cursor | `.cursor/rules/agentdescent.mdc` (rule wraps the skill text) | `.cursor/mcp.json` | not a worker; use `dsh`/`claude_code`/`codex`/API |
 
 `agentdescent install <host>` is the single entry point for all of them; each

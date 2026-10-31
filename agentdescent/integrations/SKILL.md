@@ -37,6 +37,22 @@ written back until the user says so.
      run asked for 8 rounds and completed 2 in 90 minutes. Read `plan`'s notes
      aloud: they say how many held-out tasks the gate actually gets, and with
      too few it has both committed a worse rule and committed nothing at all.
+   - `algorithm` (optional): a named method. Call `list_algorithms` (or
+     `describe_algorithm` for one) before naming one; the same data is in
+     `agentdescent algorithms list` / `show`. Hosts that expose slash
+     commands also ship `/algorithms` (Claude `/agentdescent:algorithms`,
+     OpenCode `/agentdescent/algorithms`, Codex `/prompts:algorithms`) for
+     list / show / run. To compare methods on the user's
+     own spec, offer `agentdescent tournament <spec> --algorithm default
+     --algorithm NAME` (same budget per arm; the winner is the best mean over
+     seeds, and a tie is reported as a tie). Run its `--dry-run` first and quote
+     the total call estimate before starting. Offer one only when the user asks
+     for a specific method or the artifact clearly fits it; the default recipe
+     for the kind is otherwise the right answer. Never invent a name -- `plan`
+     rejects it. The spec can carry parameters under
+     `algorithm: {name, params}`; explicit `policies` / `evolve` fields in the
+     same spec still override the algorithm's defaults. `plan` echoes what was
+     resolved and what it costs.
    - No data? Offer to draft 12 to 20 cases into `eval/cases.jsonl`
      (`{"prompt": ..., "gold": ...}` per line) and have the user check them.
      Fewer than 12 leaves under 4 held-out cases at the default `held_out_frac`
@@ -78,6 +94,12 @@ written back until the user says so.
    in one line, and say it loudest when they asked for many rounds or workers
    (cost is rounds x n_workers x tasks). Starting a run whose size the user has
    not seen is the one thing this procedure exists to prevent.
+   To keep improving across sessions, offer `agentdescent campaign <spec>
+   --sessions N`; it works on a copy, reports the workspace/final target and
+   never touches the live target. Run its `--dry-run` first. A campaign has no
+   run id: install its result with the MCP `apply` tool using `from`=<final_target>
+   and `to`=<target> (dry_run=true first, then after asking without), or the CLI
+   form `agentdescent apply --from <final_target> --to <target> --dry-run`.
 4. **`start`**. It replies with `host_model_route` when the spec uses
    `host_model` -- report the route it actually got (`sampling`, or a CLI name)
    rather than assuming; only the sampling route dies with this session.
@@ -91,9 +113,18 @@ written back until the user says so.
    a `phase` means alive. Judge liveness from `status`, not from `ps`: the
    busiest process on the machine is usually your own host. If you wait with a
    shell `sleep`, keep it under a minute -- host shell tools time out near two.
-5. When done, **`show`** with `diff=true`. Explain what changed and why using
+5. When done, **`show`** with `diff=true`. If the run learned little, call
+   `diagnose` first: it names the failure mode (agent failures, reflector
+   error, gate rejection, scoring mismatch) and the next step. Explain what changed and why using
    the `outcomes` histogram (`committed`, `below-threshold`, `oracle-rejected`
-   ...). Do not paste the whole tree.
+   ...). Do not paste the whole tree. If `final_reward` is low (or every outcome
+   is a rejection), read `samples` (the worst rollouts, output vs gold) and
+   `rejected` (the diffs the gate measured and refused) and say what went wrong
+   -- the agent answered wrongly, the reflector proposed nothing useful, or the
+   score is too strict -- before suggesting more rounds.
+   When the user asks whether the system is still getting better over time,
+   call `rsi` (it reads the consolidation archive, not a run store) rather than
+   extrapolating from one run.
 6. **Ask before `apply`.** It overwrites the target (`show` names it); it backs
    up first. Tell the user the backup path afterwards. If the result has
    `noop: true` (also visible in `show`'s `apply_plan` and `--dry-run`), the target
@@ -129,11 +160,36 @@ rounds already committed are kept).
 
 Agents by short name. The CLI agents, which edit files: `claude_code` (the
 `claude` binary), `codex`, `dsh`, `opencode`. The plain models: `host_model`
-(this host's, no key), `openai_compatible` (needs `model` and `OPENAI_API_KEY`),
+(this host's, no key), `openai_compatible` (needs `model` and a key --
+`OPENAI_API_KEY` unless the spec says otherwise, see *Other providers*),
 and `claude` -- which is the **Anthropic SDK**, not the Claude CLI, and needs
 the `anthropic` package plus `ANTHROPIC_API_KEY`. `plan` warns when a spec names
 something this machine cannot run; read its `warnings` before quoting a cost.
 A cheap `reflect` model behind an expensive `agent` is the usual trade. For `kind: plugin`, set `host` to `dsh`, `claude_code`, `codex` or `opencode`.
+
+**Other providers.** `openai_compatible` is not OpenAI-only: it works with any
+OpenAI-format endpoint (Volcengine Ark, DeepSeek, a gateway, a local server).
+Three fields on the block, and no others, say where it goes and with what:
+`api_key_env` (the *name* of the variable holding the key, e.g. `ARK_API_KEY`),
+`default_base_url` (the endpoint URL) and `base_url_env` (the name of a variable
+that overrides it). `doctor` lists every key it can see in `provider_keys_present`,
+so a key it shows as set that is not `OPENAI_API_KEY` is usable this way:
+
+```json
+"reflect": {"ref": "openai_compatible", "model": "<the user's model>",
+            "api_key_env": "ARK_API_KEY",
+            "default_base_url": "https://ark.cn-beijing.volces.com/api/coding/v3"}
+```
+
+**Ask the user for the endpoint and the model; never guess either.** Without an
+endpoint the call goes to `api.openai.com` carrying that key, and `plan` warns
+about it. Never write a key into the spec: `base_url` and `api_key` are refused,
+and only the names above exist. Other keys in the block (`temperature`,
+`thinking`) go into the request body.
+A reasoning model (Ark `doubao-seed-code` thinks by default) can sit silent past
+the 120 s timeout; if `propose_error` says `did not answer within`, add
+`"stream": true` to the block (or raise `"timeout"`, or turn thinking off with
+`"thinking": {"type": "disabled"}`).
 
 **Which model runs.** A worker is the host CLI as a subprocess, started with its
 config directory redirected into the rollout workspace -- so it inherits
@@ -153,8 +209,9 @@ fields change that, and the user should be told which one you used:
   model, their login, their plugins. Say so when you use it, and do not use it
   for `kind: plugin` -- the run would load the plugin it is rewriting.
 
-If `doctor` reports no provider key, that is not a dead end. Two routes, neither
-needing one:
+If `doctor` reports no provider key (it checks `OPENAI_API_KEY`,
+`ANTHROPIC_API_KEY`, `DEEPSEEK_API_KEY` and `ARK_API_KEY`), that is not a dead
+end. Two routes, neither needing one:
 
 - `"reflect": {"ref": "host_model"}` reflects on **this host's model** -- the
   live session's over MCP sampling where the host supports it, otherwise the
@@ -205,6 +262,33 @@ turn the correction on.
    `verifier` argument is imported and **run**; anything outside the
    `agentdescent` package needs the user to widen `allow`. Ask them.
 
+## When the user asks about an archive
+
+A consolidation archive (default `$AGENTDESCENT_HOME/archive`) holds rules that
+**Python meta sessions** adopted — `continuous_meta_run` and friends; see
+`docs/consolidation.md`. `evolve`, `start`, and every plugin / MCP run write
+**no** archive. There is no CLI or MCP verb that creates one.
+
+Three read-only tools answer questions about an existing archive; none of them
+writes anything, and a missing archive comes back as an `error` (naming the
+meta API) rather than being created. When the archive is missing, tell the user
+that honestly — do **not** invent a "run a consolidation" or similar step that
+does not exist on the CLI/MCP path.
+
+- **`safety`** — "is this archive safe to keep seeding from?" Relay `verdict`
+  (safe / caution / unsafe) and every check that is not `ok`. Pass `audit` (a
+  meta-audit JSONL) when one exists: without it the bias check is a warning,
+  not a pass.
+- **`portfolio`** — "how do the layers rank, and how should the next budget
+  window be split?" It reports `reallocated` and a `reasons` line per layer;
+  it only suggests, nothing is applied.
+- **`audit_trace`** — "where did this adopted rule's evidence come from?" for
+  one `run_id`. A ring with no store passed in is missing evidence, not a pass.
+
+`agentdescent exam` re-judges rules with an independent oracle: it needs a
+`--domain module:builder` and runs it, so it is CLI-only. Suggest the command
+to the user rather than looking for a tool.
+
 ## Guardrails
 
 - Never edit the target directory yourself while a run is in progress.
@@ -223,4 +307,5 @@ agentdescent evolve spec.json --detach
 agentdescent status <run_id>
 agentdescent show   <run_id>
 agentdescent apply  <run_id> --dry-run
+agentdescent safety --archive PATH        # also: portfolio, audit <run_id>, exam
 ```

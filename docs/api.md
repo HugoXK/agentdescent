@@ -13,7 +13,7 @@ means the parameter has none.
 Each section links to the page that explains *why* the module is shaped the
 way it is; this page is the *what*.
 
-354 public names across 58 modules.
+585 public names across 115 modules.
 
 ---
 
@@ -44,6 +44,7 @@ EvolutionResult(
     replay: Optional[Dict[str, Any]] = None,
     curriculum: Optional[Dict[str, Any]] = None,
     meta: Optional[Dict[str, Any]] = None,
+    lineages: Optional[List[Dict[str, Any]]] = None,
     usage: Usage = <factory>,
     wallclock: float = 0.0,
     rollouts: int = 0,
@@ -257,6 +258,7 @@ evolve(
     shuffle: bool = False,
     seed: int = 0,
     on_round: Optional[Callable[['RoundInfo'], None]] = None,
+    on_reports: Optional[Callable[[Sequence[Any]], None]] = None,
     stop_when: Optional[Callable[['RoundInfo'], bool]] = None,
     verbose: bool = False,
     usage: Optional[Usage] = None,
@@ -318,6 +320,7 @@ evolve(
 | `shuffle` | `bool` | `False` | Shuffle `tasks` before that positional split. Off by default, which keeps a run reproducible and keeps `val_frac`'s promise that the engine's held-out split is exactly that `Dataset`'s `val`. Turn it on for **grouped** data -- anything ordered by category, source, difficulty or date -- where the tail of the file is a different distribution from the head, and every gate in the run (the acceptance test, `target_reward`, `final_reward`) would then be measured against it. |
 | `seed` | `int` | `0` | As `shuffle`. |
 | `on_round` | `Optional[Callable[['RoundInfo'], None]]` | `None` | Called with each `RoundInfo` as the round completes -- progress for a long run, which otherwise reports nothing until it returns. An exception raised here is reported but does not abort the run. |
+| `on_reports` | `Optional[Callable[[Sequence[Any]], None]]` | `None` | Called with each round's `MergeReport`s, before `on_round` reduces them to counters. Each report names the diff the merger measured (`candidate_diff`), so a caller can keep rejected candidates for a diagnosis instead of losing what a run that learned nothing proposed (#452). An exception raised here is reported, not fatal. |
 | `stop_when` | `Optional[Callable[['RoundInfo'], bool]]` | `None` | Called after `on_round` with the same `RoundInfo`; return `True` to end the run with `stop_reason="stop_when"`. This is the seam for a budget the engine does not know how to count -- dollars from a shared `Usage`, an external deadline, a kill file. It is asked where `max_seconds` / `max_calls` are, so it stops between rounds and never mid-merge, and the run keeps what it has committed. An exception raised here is reported, not fatal. |
 | `verbose` | `bool` | `False` | Print a line per round. Independent of the `RuntimeWarning` emitted when a run ends early -- that always fires. |
 | `usage` | `Optional[Usage]` | `None` | Share one `Usage` with your model adapters (`claude(usage=u)`, `openai_compatible(usage=u)`) and the result's token counts become real. Without it the run still reports calls, seconds and failures -- `run` is `(rendered, task) -> str`, so an opaque actor has no way to surface tokens, and inventing a number would be worse than reporting zero. |
@@ -360,6 +363,30 @@ tasks_from(
 ## Meta-evolution
 
 Evolve a decision slot of `evolve()` itself, and validate it elsewhere. &nbsp;·&nbsp; `agentdescent.meta` &nbsp;·&nbsp; [guide](meta-evolution.md)
+
+### `ContinuousMetaReport(...)`
+
+What one `continuous_meta_run` session did, and why.
+
+```python
+ContinuousMetaReport(
+    slot: str,
+    seed_value: str,
+    value: str,
+    validation: Dict[str, Dict[str, float]],
+    mean_gain: float,
+    transfer: Optional[float],
+    verdict: str,
+    reason: str,
+    seeded_from: Optional[str],
+    fresh_seed_value: str,
+    fresh_gain: float,
+    fresh_transfer: Optional[float],
+    archived: bool,
+    archived_run_id: Optional[str],
+    archive_count: int
+) -> None
+```
 
 ### `MetaOutcome(...)`
 
@@ -446,6 +473,26 @@ SourceSlot(
 |---|---|
 | `accepts(proposal: str) -> Tuple[bool, str]` | Would `to_diff` take this proposal? `(accepted, reason)`. |
 
+### `archive_rule(...)`
+
+Write an adopted slot rule back to the archive.
+
+```python
+archive_rule(
+    store: ConsolidationStore,
+    report: MetaRunReport,
+    result: EvolutionResult,
+    *,
+    run_id: str,
+    slot: str,
+    spec: SlotSpec,
+    config: Optional[Dict[str, Any]] = None,
+    problem: Optional[Dict[str, Any]] = None,
+    artifact_id: str = 'meta-rule',
+    trajectory_store: Optional[str] = None
+) -> ConsolidationRecord
+```
+
 ### `auc(outcome: MetaOutcome) -> float`
 
 Mean best-so-far held-out reward over the inner run: how *fast* it rose.
@@ -468,6 +515,69 @@ compile_policy_source(
 ### `compile_priority(source: str) -> Callable[..., float]`
 
 AST-gate `source` and return its `priority` function.
+
+### `continuous_meta_run(...)`
+
+One session of continuous meta-learning: evolve, judge, archive.
+
+```python
+continuous_meta_run(
+    store: ConsolidationStore,
+    slot: str,
+    spec: SlotSpec,
+    propose: Optional[Callable[[str, Task, str, float], Optional[str]]] = None,
+    *,
+    tasks_for: Callable[[ConsolidationRecord], Sequence[Task]],
+    run: Callable[[str, Task], str],
+    reward: Callable[[Task, str], float],
+    inner_propose: Callable[[str, Task, str, float], Optional[str]],
+    inner_strategy: Any,
+    config: Optional[Dict[str, Any]] = None,
+    problems: Optional[Union[Sequence[Problem], Mapping[str, Problem]]] = None,
+    val_problems: Optional[Union[Sequence[Problem], Mapping[str, Problem]]] = None,
+    artifact_id: str = 'meta-rule',
+    train_runs: int = 2,
+    val_runs: int = 1,
+    inner: Optional[Dict[str, Any]] = None,
+    model: Optional[Completion] = None,
+    meta_reward: Optional[MetaReward] = None,
+    seeds: Sequence[int] = (0,),
+    val_seeds: Sequence[int] = (1, 2),
+    min_gain: float = 0.0,
+    transfer_floor: float = 0.0,
+    run_id: Optional[str] = None,
+    min_exam: Optional[str] = None,
+    **evolve_kwargs: Any
+) -> Tuple[ContinuousMetaReport, EvolutionResult]
+```
+
+| parameter | type | default | what it is |
+|---|---|---|---|
+| `store` | `ConsolidationStore` | *required* | The `ConsolidationStore` that makes the loop continuous: rules it already holds seed this session, and an adopted rule is written back to it. |
+| `slot` | `str` | *required* | As `meta_run` -- which `Policies` field evolves, how a value is represented/gated/compiled, and the reflector (pass `propose` directly or `model` to get `slot_reflector`). |
+| `spec` | `SlotSpec` | *required* | As `slot`. |
+| `propose` | `Optional[Callable[[str, Task, str, float], Optional[str]]]` | `None` | As `slot`. |
+| `tasks_for` | `Callable[[ConsolidationRecord], Sequence[Task]]` | *required* | Maps an archived `ConsolidationRecord` to the inner tasks of its problem -- the caller's data, read through the archive's configuration. |
+| `run` | `Callable[[str, Task], str]` | *required* | The inner `evolve()` domain functions, passed through to `problem_from_archive` for every rebuilt problem. |
+| `reward` | `Callable[[Task, str], float]` | *required* | As `run`. |
+| `inner_propose` | `Callable[[str, Task, str, float], Optional[str]]` | *required* | As `run`. |
+| `inner_strategy` | `Any` | *required* | As `run`. |
+| `config` | `Optional[Dict[str, Any]]` | `None` | This session's configuration (dataset/scorer/model/params), used to rank archived rules and written back with the adopted rule. |
+| `problems` | `Optional[Union[Sequence[Problem], Mapping[str, Problem]]]` | `None` | The fallback inner problems, used when the archive cannot fill a set (an empty archive is an ordinary `meta_run`). `inner` must describe how these were built for the archived descriptor to be faithful. |
+| `val_problems` | `Optional[Union[Sequence[Problem], Mapping[str, Problem]]]` | `None` | As `problems`. |
+| `artifact_id` | `str` | `'meta-rule'` | The archive `artifact_id` of rule records. |
+| `train_runs` | `int` | `2` | How many archived rules supply the train and validation problems. |
+| `val_runs` | `int` | `1` | As `train_runs`. |
+| `inner` | `Optional[Dict[str, Any]]` | `None` | The JSON-safe inner `evolve()` settings (`rounds`, `n_workers`, `target_reward` ...): defaults for rebuilt problems and the descriptor archived with an adopted rule. |
+| `model` | `Optional[Completion]` | `None` | As `meta_run`. |
+| `meta_reward` | `Optional[MetaReward]` | `None` | As `model`. |
+| `seeds` | `Sequence[int]` | `(0,)` | As `model`. |
+| `val_seeds` | `Sequence[int]` | `(1, 2)` | As `model`. |
+| `min_gain` | `float` | `0.0` | As `model`. |
+| `transfer_floor` | `float` | `0.0` | As `model`. |
+| `run_id` | `Optional[str]` | `None` | The archived `run_id` for the adopted rule; a unique `meta-<slot>-<unix time>-<random>` id when omitted (pass one explicitly when you need to find it again). |
+| `min_exam` | `Optional[str]` | `None` | The seeding bar applied to archived rules before they seed this session, via `verified_rules`: `None` (the default) keeps today's behaviour, `"flagged"` accepts flagged **and** passed rules, and `"passed"` seeds only certified rules. Any other value raises. |
+| `**evolve_kwargs` | `Any` |  | Everything else `meta_evolve` takes, except `initial_state` (this function sets it from the archive) and `strategy`/`run`/ `reward` (the inner domain's, passed above). Returns `(report, result)`; `report.value` is the evolved value and `report.verdict` the adopt/reject decision. |
 
 ### `evolve_problem(...)`
 
@@ -539,6 +649,7 @@ meta_run(
     val_seeds: Sequence[int] = (1, 2),
     min_gain: float = 0.0,
     transfer_floor: float = 0.0,
+    baseline: Optional[str] = None,
     **evolve_kwargs: Any
 ) -> Tuple[MetaRunReport, EvolutionResult]
 ```
@@ -584,6 +695,41 @@ priority_selection(
 ) -> SourceSlot
 ```
 
+### `problem_descriptor(slot: str, **inner: Any) -> Dict[str, Any]`
+
+The serializable shape of one inner `Problem`, for an archive.
+
+### `problem_from_archive(...)`
+
+Rebuild an inner `Problem` from an archived rule's descriptor.
+
+```python
+problem_from_archive(
+    store: ConsolidationStore,
+    run_id: str,
+    *,
+    tasks_for: Callable[[ConsolidationRecord], Sequence[Task]],
+    spec: SlotSpec,
+    run: Callable[[str, Task], str],
+    reward: Callable[[Task, str], float],
+    propose: Callable[[str, Task, str, float], Optional[str]],
+    strategy: Any,
+    **defaults: Any
+) -> Problem
+```
+
+| parameter | type | default | what it is |
+|---|---|---|---|
+| `store` | `ConsolidationStore` | *required* | The archive holding the record. |
+| `run_id` | `str` | *required* | Which archived run to rebuild from. `KeyError` when it is not archived or carries no problem descriptor. |
+| `tasks_for` | `Callable[[ConsolidationRecord], Sequence[Task]]` | *required* | Maps an archived `ConsolidationRecord` to the inner tasks its problem ran on. The caller owns the data; the archive owns the semantics and the configuration. |
+| `spec` | `SlotSpec` | *required* | The outer `SlotSpec` -- used as a guard, not as an input to the inner run: the record's `strategy` must be this spec's class name, the same "adopt through the strategy that wrote the state" rule `seed_from_archive` enforces. A record archived by a different spec is refused, never silently misread. |
+| `run` | `Callable[[str, Task], str]` | *required* | The inner problem's own `evolve()` parts -- the domain functions. |
+| `reward` | `Callable[[Task, str], float]` | *required* | As `run`. |
+| `propose` | `Callable[[str, Task, str, float], Optional[str]]` | *required* | As `run`. |
+| `strategy` | `Any` | *required* | As `run`. |
+| `**defaults` | `Any` |  | Inner `evolve()` settings. Each overrides the archived value: the descriptor says how the problem was run *then*; the caller may want it run differently *now*. |
+
 ### `rollouts_to(target: float) -> MetaReward`
 
 `1 / (1 + sweeps until the curve first reaches target)`; 0 if never.
@@ -615,6 +761,71 @@ transfer_ratio(
     source: str,
     target: str
 ) -> Optional[float]
+```
+
+---
+
+## Learn-to-think
+
+Evolve *when* the framework spends compute: direct, search, or reflect. &nbsp;·&nbsp; `agentdescent.learn_to_think` &nbsp;·&nbsp; [guide](meta-evolution.md)
+
+### `LearnToThinkReport(...)`
+
+What `learn_to_think` found: the evolved route rule and how its quality-per-cost compares with the default on validation problems.
+
+```python
+LearnToThinkReport(
+    seed_value: str,
+    value: str,
+    seed_score: float,
+    evolved_score: float,
+    gain: float,
+    routes_on: Dict[str, str]
+) -> None
+```
+
+### `learn_to_think(...)`
+
+Evolve the route rule on quality-per-cost.
+
+```python
+learn_to_think(
+    problems: Union[Sequence[Problem], Mapping[str, Problem]],
+    val_problems: Union[Sequence[Problem], Mapping[str, Problem]],
+    *,
+    propose: Optional[Callable[[str, Task, str, float], Optional[str]]] = None,
+    model: Optional[Any] = None,
+    seeds: Sequence[int] = (0, 1, 2, 3),
+    val_seeds: Sequence[int] = (4, 5, 6, 7),
+    seed_source: str = 'class Policy:\n    # Answer directly unless the task is hard and the budget allows a search.\n    def route(self, difficulty, budget_left, reward):\n        if difficulty >= 0.7 and budget_left >= 0.5:\n            return "search"\n        if difficulty >= 0.4:\n            return "reflect"\n        return "direct"\n',
+    **evolve_kwargs: Any
+) -> Tuple[LearnToThinkReport, EvolutionResult]
+```
+
+### `quality_per_cost(outcome: MetaOutcome) -> float`
+
+The outcome's reward, read back (already quality-per-cost).
+
+### `think_policy_spec(...)`
+
+The evolvable spec: the value is a `Policy.route` source, gated and compiled by `_build_route` (a smoke test runs the route on an easy, a hard-with-budget and a hard-without-budget input).
+
+```python
+think_policy_spec(
+    seed: str = 'class Policy:\n    # Answer directly unless the task is hard and the budget allows a search.\n    def route(self, difficulty, budget_left, reward):\n        if difficulty >= 0.7 and budget_left >= 0.5:\n            return "search"\n        if difficulty >= 0.4:\n            return "reflect"\n        return "direct"\n'
+) -> SourceSlot
+```
+
+### `think_problem(...)`
+
+A `Problem` over one workload instance.
+
+```python
+think_problem(
+    *,
+    lam: float = 0.1,
+    base_quality: Optional[Callable[[float], float]] = None
+) -> Problem
 ```
 
 ---
@@ -1190,6 +1401,8 @@ The vocabulary of `category`.
 | `VIOLATES_INVARIANT` | `'violates-invariant'` |
 | `MISSING_ADAPTERS` | `'missing-adapters'` |
 | `CRITIC_REJECTED` | `'critic-rejected'` |
+| `NEEDS_APPROVAL` | `'needs-approval'` |
+| `APPROVAL_REJECTED` | `'approval-rejected'` |
 | `NOISE_FLOOR` | `'noise-floor'` |
 | `COST_RULE` | `'cost-rule'` |
 
@@ -1208,7 +1421,8 @@ MergeReport(
     committed_version: Optional[int],
     reason: str = '',
     category: str = '',
-    oversized: int = 0
+    oversized: int = 0,
+    candidate_diff: Optional[Diff] = None
 ) -> None
 ```
 
@@ -2918,6 +3132,7 @@ PopulationAggregator(
 | `checkpoint() -> Optional[dict]` | Serialise the archive and the selection counter. |
 | `finalize() -> None` | Leave the best-scoring candidate on the head, then promote. |
 | `head_for_worker(worker_id: int = 0) -> str` | The branch a worker should snapshot. |
+| `lineage_report() -> List[Dict[str, object]]` | A read-only per-branch view for a population run (#150, semantics C). |
 | `restore(state: dict) -> None` | Restore the archive written by `checkpoint`. |
 | `step(n_workers: int = 1) -> List[MergeReport]` | Fire every artifact bucket that is ready and return per-artifact reports. |
 
@@ -2961,11 +3176,15 @@ ConsolidationRecord(
     final_reward: float,
     rounds: int,
     trajectory_store: Optional[str] = None,
+    problem: Optional[Dict[str, Any]] = None,
+    exam: Optional[str] = None,
+    exam_flags: int = 0,
+    exam_note: str = '',
     created_at: float = <factory>
 ) -> None
 ```
 
-### `ConsolidationStore(root: str) -> None`
+### `ConsolidationStore(root: str, *, create: bool = True) -> None`
 
 A durable archive of what runs learned.
 
@@ -2973,6 +3192,7 @@ A durable archive of what runs learned.
 |---|---|
 | `archive(...)` | Archive one run's product. Idempotent by `run_id` (atomic rewrite). |
 | `find(run_id: str) -> Optional[ConsolidationRecord]` | Lookup by identity. |
+| `mark_exam(...)` | Stamp a rule's self-exam status. Idempotent by `run_id`. |
 
 ### `SeedReport(...)`
 
@@ -3013,6 +3233,674 @@ seed_from_archive(
     seed: int = 0
 ) -> Tuple[Optional[Dict[str, str]], SeedReport]
 ```
+
+---
+
+## The RSI loop kernel
+
+One resumable loop over step, control, apply and the durable event log. &nbsp;·&nbsp; `agentdescent.loop_kernel` &nbsp;·&nbsp; [guide](loop-kernel.md)
+
+### `LoopConfig(...)`
+
+Identity, bounds and controller thresholds for one durable loop.
+
+```python
+LoopConfig(
+    tenant: str,
+    workspace: str,
+    spec_hash: str = 'loop',
+    max_generations: int = 3,
+    target: Optional[float] = None,
+    max_cost: Optional[float] = None,
+    min_gain: float = 0.0,
+    patience: int = 2,
+    risk_limit: float = 1.0,
+    base_seed: int = 0,
+    lease_seconds: float = 30.0,
+    max_retries: int = 3
+) -> None
+```
+
+### `LoopContext(...)`
+
+What the caller's `step` sees for one generation.
+
+```python
+LoopContext(
+    run_id: str,
+    generation: int,
+    seed: int,
+    budget_scale: float,
+    best_reward: Optional[float],
+    history: Tuple[LoopGeneration, ...],
+    snapshot: RunSnapshot
+) -> None
+```
+
+### `LoopGeneration(...)`
+
+One generation's durable record, reconstructed from the event log.
+
+```python
+LoopGeneration(
+    generation: int,
+    seed: int,
+    action: str,
+    reason: str,
+    reward: float,
+    cost: float,
+    risk: float,
+    gain: Optional[float],
+    artifact_id: str,
+    stop: bool,
+    applied: bool = False,
+    error: Optional[str] = None,
+    budget_scale: float = 1.0,
+    span_id: str = '',
+    evidence: Mapping[str, Any] = <factory>
+) -> None
+```
+
+### `LoopKernel(...)`
+
+Run a durable loop of `step -> control -> apply` generations.
+
+```python
+LoopKernel(
+    store: SqliteRunStore,
+    config: LoopConfig,
+    *,
+    decision_log: Optional[Any] = None,
+    telemetry: Optional[Any] = None,
+    gate: Optional[Callable[..., Any]] = None,
+    risk_gate: Optional[Callable[..., Any]] = None,
+    controller_factory: Optional[ControllerFactory] = None
+) -> None
+```
+
+| method | what it does |
+|---|---|
+| `cancel(run_id: str, *, reason: str = 'operator cancel') -> LoopReport` | Cancel a pending/running loop and return the durable report. |
+| `run(...)` | Resume/run until the controller stops or the budget ends. |
+
+### `LoopObservation(...)`
+
+One measured generation: reward, cost, risk and the artifact it produced.
+
+```python
+LoopObservation(
+    reward: float,
+    cost: float = 0.0,
+    risk: float = 0.0,
+    error: Optional[str] = None,
+    artifact_id: str = '',
+    evidence: Mapping[str, Any] = <factory>
+) -> None
+```
+
+### `LoopReport(...)`
+
+The durable loop's generations and why it stopped.
+
+```python
+LoopReport(
+    run_id: str,
+    status: str,
+    generations: Tuple[LoopGeneration, ...] = (),
+    best_reward: Optional[float] = None,
+    total_cost: float = 0.0,
+    accepted: int = 0,
+    stopped_reason: str = '',
+    reason: str = '',
+    detail: str = ''
+) -> None
+```
+
+---
+
+## Trusted promotion
+
+One fail-closed promotion decision over eval, statistics, proof, canary and admission. &nbsp;·&nbsp; `agentdescent.promotion` &nbsp;·&nbsp; [guide](trusted-promotion.md)
+
+### `PromotionAction()`
+
+The closed vocabulary a promotion decision may emit.
+
+### `PromotionDecision(...)`
+
+The verdict, the evidence it saw and a stable hash of that evidence.
+
+```python
+PromotionDecision(
+    artifact_id: str,
+    action: str,
+    accepted: bool,
+    reasons: Tuple[str, ...] = (),
+    missing: Tuple[str, ...] = (),
+    evidence: Mapping[str, Any] = <factory>,
+    evidence_hash: str = '',
+    decision_hash: str = '',
+    risk: Optional[float] = None
+) -> None
+```
+
+### `PromotionRequest(...)`
+
+All evidence a caller has for one candidate.
+
+```python
+PromotionRequest(
+    artifact_id: str,
+    artifact_hash: Optional[str] = None,
+    eval_result: Optional[EvalResult] = None,
+    contaminated: Optional[bool] = None,
+    conformal: Optional[ConformalReport] = None,
+    sequential: Optional[SequentialReport] = None,
+    canary: Optional[CanaryResult] = None,
+    proof: Optional[ProofEvidence] = None,
+    admission: Optional[AdmissionResult] = None,
+    risk: Optional[float] = None,
+    approved: Optional[bool] = None,
+    goodhart: Optional[GoodhartReport] = None,
+    metamorphic: Optional[MetamorphicReport] = None,
+    verifier: Optional[EnsembleReport] = None,
+    calibration: Optional[CalibrationReport] = None,
+    metadata: Mapping[str, Any] = <factory>
+) -> None
+```
+
+### `PromotionRules(...)`
+
+What evidence a promotion must present, and the bars it must clear.
+
+```python
+PromotionRules(
+    require_eval: bool = True,
+    require_contamination: bool = True,
+    require_risk: bool = True,
+    require_conformal: bool = False,
+    require_sequential: bool = False,
+    require_canary: bool = True,
+    require_proof: bool = False,
+    require_admission: bool = False,
+    require_approval: bool = False,
+    require_goodhart: bool = False,
+    require_metamorphic: bool = False,
+    require_verifier: bool = False,
+    require_calibration: bool = False,
+    allow_contaminated: bool = False,
+    min_effect: float = 0.0,
+    min_tasks: int = 2,
+    max_risk: float = 1.0
+) -> None
+```
+
+### `ProofEvidence(certificate: ProofCertificate, verification: ProofVerification) -> None`
+
+A proof certificate plus the verification that actually checked it.
+
+### `promote(request: PromotionRequest, policy: Optional[PromotionRules] = None) -> PromotionDecision`
+
+Assemble and judge one promotion; missing or failed evidence never passes.
+
+---
+
+## Adaptive compute
+
+Which strategy deserves this task's compute: direct, PRM, search or ensemble. &nbsp;·&nbsp; `agentdescent.compute_policy` &nbsp;·&nbsp; [guide](compute-policy.md)
+
+### `ComputeAction()`
+
+The closed strategy vocabulary this policy allocates over.
+
+### `ComputeContext(...)`
+
+What the task asks of the compute policy.
+
+```python
+ComputeContext(
+    task_id: str = '',
+    tokens: int = 0,
+    difficulty: float = 0.5,
+    max_cost: Optional[float] = None,
+    required_tags: Tuple[str, ...] = ()
+) -> None
+```
+
+### `ComputeController(...)`
+
+A cost-aware Thompson-sampling bandit over compute strategies.
+
+```python
+ComputeController(
+    options: Sequence[ComputeOption],
+    router: ModelRouter,
+    *,
+    cost_weight: float = 0.5,
+    exploration: float = 0.05,
+    max_calls: Optional[int] = None,
+    seed: int = 0
+) -> None
+```
+
+### `ComputeDecision(...)`
+
+One allocated strategy + model, with the numbers used to choose it.
+
+```python
+ComputeDecision(
+    option: str,
+    action: str,
+    model: str,
+    reason: str,
+    expected_quality: float,
+    sampled_quality: float,
+    expected_cost: float,
+    calls: int,
+    exploration: bool = False,
+    model_reason: str = '',
+    detail: str = '',
+    reservation_id: str = ''
+) -> None
+```
+
+### `ComputeOption(...)`
+
+One strategy's cost/quality profile and when it is eligible.
+
+```python
+ComputeOption(
+    name: str,
+    action: str,
+    calls: int = 1,
+    quality_prior: Tuple[float, float] = (1.0, 1.0),
+    min_difficulty: float = 0.0,
+    max_difficulty: float = 1.0,
+    note: str = ''
+) -> None
+```
+
+### `ComputeReport(...)`
+
+```python
+ComputeReport(
+    options: Tuple[OptionReport, ...],
+    router: RoutingReport,
+    pulls: int,
+    mean_reward: float,
+    mean_cost: float,
+    total_calls: int,
+    reserved_calls: int = 0,
+    detail: str = ''
+) -> None
+```
+
+### `OptionReport(...)`
+
+```python
+OptionReport(
+    option: str,
+    action: str,
+    pulls: int,
+    mean_reward: float,
+    mean_cost: float,
+    posterior_mean: float,
+    detail: str = ''
+) -> None
+```
+
+---
+
+## Trusted evidence
+
+Build the evaluation, canary, statistical, Goodhart, metamorphic, verifier and calibration reports from one paired run. &nbsp;·&nbsp; `agentdescent.trust_evidence` &nbsp;·&nbsp; [guide](trust-evidence.md)
+
+### `TrustEvidence(...)`
+
+The reports one paired evaluation produced, ready for `promote()`.
+
+```python
+TrustEvidence(
+    eval_result: EvalResult,
+    canary: CanaryResult,
+    conformal: ConformalReport,
+    sequential: SequentialReport,
+    goodhart: Optional[GoodhartReport] = None,
+    metamorphic: Optional[MetamorphicReport] = None,
+    verifier: Optional[EnsembleReport] = None,
+    calibration: Optional[CalibrationReport] = None,
+    contaminated: Optional[bool] = None,
+    risk: Optional[float] = None,
+    approved: Optional[bool] = None,
+    metadata: Mapping[str, Any] = <factory>
+) -> None
+```
+
+| method | what it does |
+|---|---|
+| `to_promotion_request(...)` | A `PromotionRequest` carrying every report this bundle has. |
+
+### `build_trust_evidence(...)`
+
+Compute every report from paired task scores and optional side data.
+
+```python
+build_trust_evidence(
+    before: Mapping[str, float],
+    after: Mapping[str, float],
+    *,
+    eval_id: str = 'paired',
+    dataset_id: str = 'paired',
+    version: int = 1,
+    verifier: Optional[VerifierEnsemble] = None,
+    candidate: Any = None,
+    calibration: Optional[Tuple[Iterable[float], Iterable[float]]] = None,
+    sequential_deltas: Optional[Iterable[float]] = None,
+    sequential_max_n: Optional[int] = None,
+    proxy_gains: Optional[Sequence[float]] = None,
+    oracle_gains: Optional[Sequence[float]] = None,
+    metamorphic: Optional[MetamorphicSuite] = None,
+    metamorphic_run: Optional[Callable[[Any], Any]] = None,
+    metamorphic_tasks: Iterable[Any] = (),
+    contaminated: Optional[bool] = None,
+    risk: Optional[float] = None,
+    approved: Optional[bool] = None,
+    alpha: float = 0.05,
+    seed: int = 0,
+    min_effect: float = 0.0
+) -> TrustEvidence
+```
+
+---
+
+## Capability foundry
+
+Admit a synthesized tool only after validation, review, safety, proof and a holdout gain. &nbsp;·&nbsp; `agentdescent.capability_foundry` &nbsp;·&nbsp; [guide](capability-foundry.md)
+
+### `CapabilityFoundry(...)`
+
+Admit a synthesized tool only when its review, safety, proof and gain hold.
+
+```python
+CapabilityFoundry(
+    gate: SafeSelfModifier,
+    *,
+    graph: Optional[ArtifactGraph] = None,
+    prover: Optional[ProofRunner] = None,
+    require_review: bool = True,
+    require_proof: bool = True,
+    require_registration: bool = True,
+    min_valid_score: float = 0.5,
+    min_review_agreement: float = 0.6,
+    min_holdout_gain: float = 0.0
+) -> None
+```
+
+### `CapabilityOutcome(...)`
+
+The admission decision, the proof and the registered artifact id.
+
+```python
+CapabilityOutcome(
+    gap_id: str,
+    tool_name: str,
+    status: str,
+    reasons: Tuple[str, ...] = (),
+    missing: Tuple[str, ...] = (),
+    artifact_id: str = '',
+    proof: Optional[ProofCertificate] = None,
+    safety: Optional[SafetyDecision] = None,
+    review: Optional[DeliberationReport] = None,
+    validation: Optional[ToolValidation] = None,
+    holdout_gain: Optional[float] = None
+) -> None
+```
+
+### `CapabilityRequest(...)`
+
+One synthesized tool and the evidence gathered for it.
+
+```python
+CapabilityRequest(
+    gap_id: str,
+    tool: ToolSpec,
+    validation: ToolValidation,
+    modification: ModificationSpec,
+    before: float,
+    after: float,
+    canary: Optional[float] = None,
+    review: Optional[DeliberationReport] = None,
+    review_winner: str = 'approve',
+    metadata: Mapping[str, Any] = <factory>
+) -> None
+```
+
+### `CapabilityStatus()`
+
+The closed outcome vocabulary for one capability candidate.
+
+---
+
+## Continual experience
+
+Cross-run recall, replay warm-start and a forgetting guard around the meta learner. &nbsp;·&nbsp; `agentdescent.experience` &nbsp;·&nbsp; [guide](continual-experience.md)
+
+### `ExperienceEngine(...)`
+
+Feed cross-run records into a continual learner with a forgetting guard.
+
+```python
+ExperienceEngine(
+    learner: ContinualMetaLearner,
+    store: ExperienceStore,
+    *,
+    require_anchors: bool = True,
+    anchor_tolerance: float = 0.0
+) -> None
+```
+
+| method | what it does |
+|---|---|
+| `replay_from_store() -> int` | Warm the learner replay from the store without re-writing rows. |
+
+### `ExperienceHit(record: ExperienceRecord, distance: float) -> None`
+
+One recalled record and its distance from the query.
+
+### `ExperienceRecord(...)`
+
+One run's experience: context features and the reward of each action.
+
+```python
+ExperienceRecord(
+    run_id: str,
+    features: Tuple[float, ...],
+    rewards: Mapping[str, float],
+    cost: float = 0.0,
+    accepted: bool = True,
+    artifact_id: str = '',
+    created_at: float = 0.0,
+    metadata: Mapping[str, Any] = <factory>
+) -> None
+```
+
+### `ExperienceReport(...)`
+
+```python
+ExperienceReport(
+    rows: int,
+    learner: ContinualReport,
+    skipped: int = 0,
+    detail: str = ''
+) -> None
+```
+
+### `ExperienceStore(path: Optional[str] = None) -> None`
+
+An append-only, optionally persistent experience memory.
+
+| method | what it does |
+|---|---|
+| `recall(features: Sequence[float], *, k: int = 5) -> Tuple[ExperienceHit, ...]` | Nearest records with the same feature dimension; others are skipped. |
+
+### `ExperienceUpdate(...)`
+
+The validation result plus the anchor guard's verdict.
+
+```python
+ExperienceUpdate(
+    version: int,
+    accepted: bool,
+    before: float,
+    after: float,
+    drift: float,
+    anchor_before: Optional[float] = None,
+    anchor_after: Optional[float] = None,
+    rolled_back: bool = False,
+    reason: str = ''
+) -> None
+```
+
+---
+
+## Continual meta-policy
+
+Online policy updates with replay, validation and rollback. &nbsp;·&nbsp; `agentdescent.continual_meta` &nbsp;·&nbsp; [guide](continual-experience.md)
+
+### `ContinualMetaLearner(...)`
+
+Update a softmax meta-policy with replay, validation and rollback.
+
+```python
+ContinualMetaLearner(
+    actions: Sequence[str],
+    *,
+    dim: int,
+    learning_rate: float = 0.2,
+    l2: float = 0.001,
+    replay_size: int = 1000,
+    min_gain: float = 0.0,
+    seed: int = 0
+) -> None
+```
+
+| method | what it does |
+|---|---|
+| `rollback() -> bool` | Undo the immediately preceding accepted update. |
+
+### `ContinualReport(...)`
+
+```python
+ContinualReport(
+    version: int,
+    updates: int,
+    accepted: int,
+    rejected: int,
+    replay: int,
+    detail: str = ''
+) -> None
+```
+
+### `LinearPolicy(actions: Tuple[str, ...], dim: int, weights: List[List[float]] = <factory>) -> None`
+
+### `MetaExample(...)`
+
+```python
+MetaExample(
+    features: Tuple[float, ...],
+    rewards: Mapping[str, float],
+    cost: float = 0.0,
+    at: float = 0.0
+) -> None
+```
+
+### `MetaUpdate(...)`
+
+```python
+MetaUpdate(
+    version: int,
+    accepted: bool,
+    before: float,
+    after: float,
+    drift: float,
+    reason: str
+) -> None
+```
+
+### `ReplayBuffer(max_size: int = 1000) -> None`
+
+A bounded, deterministic replay buffer.
+
+---
+
+## The RSI platform cycle
+
+One cycle that hands compute, loop, promotion, foundry and experience to each other. &nbsp;·&nbsp; `agentdescent.platform` &nbsp;·&nbsp; [guide](platform.md)
+
+### `PlatformConfig(...)`
+
+The loop identity and bounds; the layers keep their own policies.
+
+```python
+PlatformConfig(
+    tenant: str,
+    workspace: str,
+    max_generations: int = 3,
+    target: Optional[float] = None,
+    max_cost: Optional[float] = None,
+    min_gain: float = 0.0,
+    patience: int = 2,
+    risk_limit: float = 1.0,
+    base_seed: int = 0,
+    spec_hash: str = 'platform',
+    lease_seconds: float = 30.0,
+    max_retries: int = 3
+) -> None
+```
+
+### `PlatformReport(...)`
+
+The five layers' decisions for one cycle, and whether all configured ones ran.
+
+```python
+PlatformReport(
+    run_id: str,
+    loop: LoopReport,
+    promotion: Optional[PromotionDecision] = None,
+    foundry: Optional[CapabilityOutcome] = None,
+    experience: Optional[ExperienceUpdate] = None,
+    skipped: Tuple[str, ...] = (),
+    self_validated: bool = False,
+    complete: bool = False,
+    detail: str = ''
+) -> None
+```
+
+### `RSIPlatform(...)`
+
+Compose the loop, compute, promotion, foundry and experience layers.
+
+```python
+RSIPlatform(
+    store: SqliteRunStore,
+    config: PlatformConfig,
+    *,
+    compute: ComputeController,
+    promotion_rules: Optional[PromotionRules] = None,
+    foundry: Optional[CapabilityFoundry] = None,
+    experience: Optional[ExperienceEngine] = None,
+    decision_log: Optional[Any] = None,
+    telemetry: Optional[Any] = None,
+    gate: Optional[Callable[..., Any]] = None,
+    risk_gate: Optional[Callable[..., Any]] = None,
+    _processed: Optional[Dict[str, Dict[str, Any]]] = None
+) -> None
+```
+
+| method | what it does |
+|---|---|
+| `clone(*, base_seed: Optional[int] = None) -> 'RSIPlatform'` | A new platform with a new loop seed, sharing every other component. |
+| `run_cycle(...)` | Run one full cycle; every configured layer must produce a decision. |
 
 ---
 
@@ -3354,6 +4242,7 @@ EvolveSpec(
     evolve: Dict[str, Any] = <factory>,
     extra_artifacts: Dict[str, Any] = <factory>,
     allow: Sequence[str] = (),
+    record_rollouts: bool = True,
     version: int = 1
 ) -> None
 ```
@@ -3449,6 +4338,7 @@ async_evolve(
     resume_queue: Optional['ResumeQueue'] = None,
     task_sampler: Optional['TaskSampler'] = None,
     on_round: Optional[Callable[[RoundInfo], None]] = None,
+    on_reports: Optional[Callable[[Sequence[Any]], None]] = None,
     stop_when: Optional[Callable[[RoundInfo], bool]] = None,
     verbose: bool = False,
     usage: Optional[Usage] = None,
@@ -3509,6 +4399,7 @@ async_evolve(
 | `resume_queue` | `Optional['ResumeQueue']` | `None` | Turn a counted straggler into a **re-run**. A shared `ResumeQueue` passed here receives every detected straggler's task and the version it measured; the next idle worker whose shard owns that task re-runs it against the **current** head. A straggler measured version N, its re-run measures version N+k, so the pair is a free cross-version A/B signal. Detection is **after-return** -- a rollout that overruns its estimate is noticed once it has finished, not cancelled mid-flight. `None` (the default) keeps the old behaviour exactly: stragglers are counted and dropped. `result.resumed` reports the re-runs. |
 | `task_sampler` | `Optional['TaskSampler']` | `None` | Which task a worker takes next from its shard. |
 | `on_round` | `Optional[Callable[[RoundInfo], None]]` | `None` | Called with each `RoundInfo` as a merger sweep completes -- progress for a long run. It runs on the merger thread and must be cheap and thread-safe; an exception is reported, not fatal. |
+| `on_reports` | `Optional[Callable[[Sequence[Any]], None]]` | `None` | Called with the sweep's `MergeReport`s before `on_round` reduces them to counters; each carries the diff the merger measured, accepted or not (#452). Same thread and same rules as `on_round`. |
 | `stop_when` | `Optional[Callable[[RoundInfo], bool]]` | `None` | Asked after `on_round` with the same `RoundInfo`; `True` ends the run with `stop_reason="stop_when"` -- the caller's own budget (dollars, a deadline, a kill file), checked between merger sweeps like the built-in bounds. Same thread and the same rules as `on_round`. |
 | `verbose` | `bool` | `False` | Print one line per merger sweep. |
 | `usage` | `Optional[Usage]` | `None` | Share one `Usage` with your model adapters (`claude(usage=u)`, `openai_compatible(usage=u)`) and the result's token counts become real. Without it the run still reports calls, seconds and failures -- `run` is `(rendered, task) -> str`, so an opaque actor has no way to surface tokens, and inventing a number would be worse than reporting zero. |
@@ -3912,9 +4803,29 @@ Commit or not, and -- when not -- which of the merge categories it was.
 
 Whether a candidate is committed.
 
+### `AdmitVerdict`
+
+The composed decision: `pass` / `flag` / `demote` and why.
+
+### `AgentNode`
+
+One node of a society: a name, an instruction (a callable), and a budget (how many uses the node may spend).
+
 ### `AggregatorFactory`
 
 `(ledger, verifier, audit, config, policy) -> AggregatorProtocol` — how a custom optimizer is installed.
+
+### `AlgorithmArm`
+
+One algorithm/seed arm of a tournament.
+
+### `AlgorithmScore`
+
+One algorithm's aggregate over its seeds.
+
+### `AlgorithmTournamentReport`
+
+Every arm, the per-algorithm aggregate, the winner and any tie.
 
 ### `AllocatorContext`
 
@@ -3927,6 +4838,22 @@ Decide, per candidate, whether the expensive part of a merge is worth it.
 ### `AppendRules`
 
 Accumulate a deduped list of rules/lessons (append-only, content-addressed).
+
+### `ApprovalGate`
+
+Require a human decision for changes above a risk/size threshold.
+
+### `ApprovalRequest`
+
+One high-risk candidate's approval request and its latest decision.
+
+### `ApprovalStore`
+
+Append-only JSONL decisions for high-risk candidates.
+
+### `BootstrapResult`
+
+A paired bootstrap of per-task gains.
 
 ### `BudgetGovernor`
 
@@ -3948,6 +4875,46 @@ Somewhere to keep evaluations. In one process, across many, or on disk.
 
 A mutable per-call max_tokens, set by the engine before each expansion.
 
+### `CampaignReport`
+
+Every session, the best artifact and where it lives.
+
+### `CampaignSession`
+
+One evolution session inside a campaign.
+
+### `CanaryResult`
+
+The paired sign test and the deployment verdict.
+
+### `CapabilityGuard`
+
+Reject a self-modification that regresses a protected capability.
+
+### `CapabilityReport`
+
+What the protected suites measured for one candidate.
+
+### `CapabilitySuite`
+
+Tasks a self-modification must not regress, and the bar it must clear.
+
+### `ChainAuditReport`
+
+What a `chain_audit` pass found, ring by ring.
+
+### `ChainLink`
+
+One ring of an adoption's evidence chain.
+
+### `CoevolutionReport`
+
+The curriculum's effect on verifier/oracle agreement.
+
+### `CoevolutionRound`
+
+One curriculum step: the selected tasks, the bias before/after.
+
 ### `Completion`
 
 `Callable[[str], str]` — the one contract every model and agent satisfies.
@@ -3955,6 +4922,30 @@ A mutable per-call max_tokens, set by the engine before each expansion.
 ### `ConflictPolicy`
 
 Which of a batch of mutually contradictory changes survive.
+
+### `ContaminationReport`
+
+How much of the validation text appears in the training text.
+
+### `ControllerConfig`
+
+Bounds and hooks for the multi-session loop.
+
+### `ControllerReport`
+
+The sessions run, the best reward and why the loop stopped.
+
+### `CuriousReplayReport`
+
+What `curious_replay_evolve` did: the weights, the gains on the still-curious vs mastered past, and the value produced.
+
+### `DecisionLog`
+
+Append-only JSONL decisions.
+
+### `DecisionRecord`
+
+One immutable adoption/session decision.
 
 ### `DefaultConflict`
 
@@ -3964,9 +4955,33 @@ Drop contradicting diffs, keeping whichever scores better (PCGrad-style).
 
 Build the union of complementary diffs and hand it to the gate.
 
+### `DiagnosisReport`
+
+One run's failure mode, the evidence, and what to try next.
+
 ### `EDIT_PROTOCOL`
 
 The multi-file proposal format a `FileTree` reflector is told to emit.
+
+### `EloRating`
+
+A minimal Elo rating over pairwise matches (K-factor 32).
+
+### `EvaluationReport`
+
+The verifier/oracle comparison for one artifact.
+
+### `EvaluationRow`
+
+One audited task's verifier and oracle scores.
+
+### `EvidenceSnapshot`
+
+The reconciled view: slots, ports, and the archive's health counters.
+
+### `ExaminedRule`
+
+One archived rule's self-exam: what the oracle said about it.
 
 ### `Executor`
 
@@ -3984,6 +4999,10 @@ Flip rate above which a rescan is called out rather than reported. The plan's nu
 
 Artifact ids the loop may read but never mutate (L0).
 
+### `FastRuleReport`
+
+How an evolved rule does against the shipped seed, on both axes.
+
 ### `FileCache`
 
 A directory of evaluations, so separate processes can share them.
@@ -3996,13 +5015,81 @@ How complementary diffs become one candidate.
 
 One tournament: what the fused candidate scored against the best single.
 
+### `GuardDecision`
+
+One guard's name and decision.
+
+### `GuardPipeline`
+
+Run guards in order; the first refusal is the pipeline's decision.
+
+### `GuardPipelineResult`
+
+The full ordered trail, including the first refusal when there is one.
+
+### `GuardedRun`
+
+The evolution result, the recorded decision and the acceptance chain.
+
+### `Harness`
+
+One algorithm port, named and runnable.
+
+### `HarnessEvidence`
+
+What the archive says about one algorithm port (harness) on a domain.
+
+### `HarnessReport`
+
+What a `compose_run` did, and why.
+
+### `HarnessRun`
+
+One harness's measured outcome in a `compose_run`.
+
+### `ImagineReport`
+
+What `imagine_then_evolve` did: the verified value, its real gain over the seed, the simulator's trust score, and how much of the budget was spent dreaming vs waking.
+
+### `JEVModel`
+
+A linear student verifier trained on oracle labels.
+
+### `JointMetaReport`
+
+What a `joint_meta_run` decided, per slot and jointly.
+
 ### `KeyedRules`
 
 One entry per *category*: competing proposals contradict and are resolved.
 
+### `KillSwitch`
+
+A file-based global stop for further self-improvement sessions.
+
 ### `LAYOUTS`
 
 Where a runner writes the evolving tree inside a workspace (`claude_skill`, `skill_library`, `claude_agent`, `dsh_skill`, `agents_skill`, `root`).
+
+### `LayerBudget`
+
+One spending line of the framework: a limit, what it spent, what it bought.
+
+### `LeakageGuard`
+
+Reject a candidate whose rendered artifact contains protected text.
+
+### `LeakageReport`
+
+What the guard found and which protected strings matched.
+
+### `LearnableMetaJudge`
+
+A small linear regressor from `outcome_features` to oracle quality, fit by least squares (pure Python, deterministic).
+
+### `LearnedSimulator`
+
+A pure-Python nearest-neighbour simulator from observed rollouts.
 
 ### `LearningValueModel`
 
@@ -4032,6 +5119,14 @@ Labels the heaviest stratum needs before the reported interval means what it say
 
 Below this estimated probability of a new mode, more improvement labels are buying the flat part of the rarefaction curve. Not a law -- the point at which a one-in-twenty chance of learning something stops being worth an oracle call is a budget question -- but it is where the Phase 0 curve had flattened.
 
+### `MarginalGainStop`
+
+Stop when reward gained per additional call falls below a bar.
+
+### `MatchResult`
+
+One pairwise match: who played whom, on whose ground, and who won.
+
 ### `MemoryCache`
 
 In-process, single-flight, counted.
@@ -4039,6 +5134,30 @@ In-process, single-flight, counted.
 ### `MergeContext`
 
 Everything an `AcceptancePolicy` is allowed to look at.
+
+### `MetaAuditRecord`
+
+One sampled `(problem, seed)` before/after pair, awaiting truth.
+
+### `MetaAuditStore`
+
+Durable JSONL of sampled meta pairs and verdicts, indexed in memory.
+
+### `MetaChallengerConfig`
+
+The problem-challenger's dials: how much of the problem budget goes to the frontier, what counts as learned or stuck, and how long a generator may keep trying. The same numbers `curriculum_evolve` uses, one level up.
+
+### `MetaExamReport`
+
+What an `exam_archive` pass did, and why.
+
+### `MetaPopulationReport`
+
+What a `meta_population_run` did, and why.
+
+### `MetaProblemChallenger`
+
+The problem-generation artifact for the meta loop.
 
 ### `PLUGIN_FROZEN`
 
@@ -4055,6 +5174,22 @@ Upstream ERA's flat PUCT -- `rank + c * P(s,a) * sqrt(N) / (1 + n)` with `c = 1`
 ### `Policies`
 
 Every replaceable piece, in one argument.
+
+### `PoliciesBundle`
+
+The joint artifact: a bundle of per-slot `SlotSpec` values.
+
+### `PopulationIsland`
+
+One island of a `meta_population_run`: a rule's search, and how it went.
+
+### `PortfolioReport`
+
+What a `portfolio_report` pass saw, and decided.
+
+### `ProbeRow`
+
+One task's verifier and oracle scores, and how far apart they are.
 
 ### `ProcessExecutor`
 
@@ -4076,6 +5211,38 @@ What a `ProposalPolicy` is given for one rollout.
 
 How a rollout becomes candidate changes.
 
+### `ROUTE_SEED`
+
+The shipped route rule: answer directly unless the task is hard and the budget allows a search. Deliberately conservative -- it refuses to search when the budget is low, which is exactly the decision an evolved rule can improve on (searching hard tasks pays more than the budget it costs).
+
+### `RSIMetrics`
+
+Aggregate counts and cost for a stream of decisions.
+
+### `RSIReport`
+
+The archive's longitudinal view, plus the current portfolio health.
+
+### `RationaleReport`
+
+What `rationale_evolve` distilled: how many rationales the skill now carries, and the skill itself.
+
+### `ReallocationPolicy`
+
+The evolvable reallocation rule: four numbers, applied to a layer window.
+
+### `RecursiveRound`
+
+One outer round: the inner self-improvement session and the policy move.
+
+### `RecursiveSelfImproveReport`
+
+The outer session: every round, the final rule, and both gains.
+
+### `RedTeamReport`
+
+What a `red_team_evolve` round did: the attack's findings and the coverage before and after the retraining.
+
 ### `Ref`
 
 A callable named rather than sent: `"module:attribute"` plus config.
@@ -4084,13 +5251,37 @@ A callable named rather than sent: `"module:attribute"` plus config.
 
 A reference could not be resolved, and why -- never a bare ImportError.
 
+### `ReplayExample`
+
+One replayed past example: the task it came from, its recorded outcome, and the rolling statistics that decide how curious the artifact still is.
+
 ### `Result`
 
 What one rollout produced, or why it did not.
 
+### `RiskContext`
+
+The facts a policy may match on.
+
+### `RiskDecision`
+
+The action a policy chose and the rule that produced it.
+
+### `RiskPolicy`
+
+First-match risk rules with a fail-closed default.
+
+### `RiskRule`
+
+One ordered rule; every supplied condition must match.
+
 ### `RolloutSpec`
 
 One rollout, described completely enough to run somewhere else.
+
+### `RunManifest`
+
+The hashed inputs of one run and the resulting stable id.
 
 ### `SCHEMA_VERSION`
 
@@ -4116,6 +5307,14 @@ Reward at or above which a task counts as solved (`0.999`). Lower it for a grade
 
 Variance multiplier the acceptance gate applies while a rectification is stale. Not a correction -- a stale rectifier has no number to correct *with* -- but a widening, so a gate that cannot be told how biased its verifier is commits less rather than the same amount with more confidence.
 
+### `SafetyCheck`
+
+One named check and why it passed, warned or failed.
+
+### `SafetyReport`
+
+The archive's trust posture, with every check that produced it.
+
 ### `Sandbox`
 
 One acquired execution environment.
@@ -4132,6 +5331,38 @@ Where sandboxes come from and go back to.
 
 What environment one rollout needs. Must survive JSON: it crosses processes.
 
+### `SearchTree`
+
+A state tree over rendered artifact values, searched by UCB.
+
+### `SelfImproveConfig`
+
+What the loop improves, on what, and how hard.
+
+### `SelfImproveReport`
+
+The whole session: every tick, whether anything improved, total gain.
+
+### `SelfImproveTick`
+
+One pass of the loop: targets, per-slot verdicts, and the budget move.
+
+### `SelfModifyReport`
+
+What `improve_source` accepted: the patch, its tests, its gain.
+
+### `SelfRewardingReport`
+
+What a `self_rewarding_meta_run` did: the evolved value, the judge's measured agreement with the oracle on validation outcomes, whether the judge actually fitted (or fell back to `auc`), how many oracle labels it trained on, and the value's oracle quality vs the seed's on the held-out problems.
+
+### `SessionOutcome`
+
+What one session produced.
+
+### `SessionRecord`
+
+One session's outcome inside the controller report.
+
 ### `SharedSandboxPool`
 
 A pool whose ceiling is the machine's, not this process's.
@@ -4139,6 +5370,22 @@ A pool whose ceiling is the machine's, not this process's.
 ### `SingleSlot`
 
 The artifact **is one value**, and each accepted proposal replaces it.
+
+### `SlotEvidence`
+
+What the archive says about one decision slot's evolution.
+
+### `SlotRSI`
+
+One decision slot's adoption history and whether it is still rising.
+
+### `SocietyGraph`
+
+A directed graph of `AgentNode` with delegation edges.
+
+### `SocietyReport`
+
+What `society_evolve` found: the evolved graph, its cost-adjusted correctness on validation tasks, and the same for the seed.
 
 ### `Strategy`
 
@@ -4152,9 +5399,33 @@ Prefix of the output `code_runner` produces when the frozen gate fails, so the f
 
 The default: a bounded pool of threads in this process.
 
+### `TournamentReport`
+
+The ratings a tournament produced, and the matches that moved them.
+
 ### `ValueBudgetAllocator`
 
 Learn which candidates are worth the expensive evaluation.
+
+### `VarianceSampler`
+
+UCB over the recent reward variance of each task.
+
+### `VerifiableReport`
+
+What `policy_improve` did: the per-round held-out verifiable reward curve (the trajectory-level signal RL trains on) and the before/after on held-out verifiable facts.
+
+### `VerifiedSeed`
+
+The archive's rule records that clear the trust bar, and the reasons the rest were excluded.
+
+### `VerifierAgreement`
+
+Reject a commit whose gain the verifier claims and the oracle denies.
+
+### `VerifierCurriculum`
+
+Select the tasks where the verifier disagrees most with the oracle.
 
 ### `VerifierProtocol`
 
@@ -4168,6 +5439,30 @@ Four methods, from `grep 'self\.verifier\.' agentdescent/aggregator.py`.
 
 Provisions `LocalWorkspaceSandbox` -- `mkdtemp`, plus a lease file.
 
+### `admit`
+
+Compose the ring statuses into one verdict.
+
+### `admit_record`
+
+Admit an archived rule using its own `exam` stamp plus any ring statuses.
+
+### `alerts`
+
+Human-readable alert conditions; empty means no alert.
+
+### `apply_patch`
+
+Apply a `patch_source` diff back to a source. `ValueError` when the patch does not apply cleanly -- a patch whose context does not match `source` is refused, never half-applied. Untouched lines outside a hunk's context are preserved, so a middle-of-file edit keeps the rest of the file.
+
+### `async_meta_population_run`
+
+`meta_population_run` with the islands run concurrently.
+
+### `audited_meta_validate`
+
+`meta_validate`, with a probability sample of pairs sent to the oracle.
+
 ### `backends`
 
 Agentic backends -- a base agent that *navigates documents with tools*, not just maps a prompt to text.
@@ -4180,10 +5475,330 @@ The control every efficiency number in this repository is missing.
 
 Wrap a `max_tokens -> Completion` factory into an adaptive Completion.
 
+### `build_manifest`
+
+Hash a spec, its data files/directories, model config and code version.
+
+### `canary`
+
+Compare candidate vs incumbent per task and recommend promote/hold/rollback.
+
+### `chain_audit`
+
+Trace one archived adoption through its evidence rings.
+
+### `compose_run`
+
+Run the harness(es) for a domain, record the outcomes, pick a winner.
+
+### `contamination_overlap`
+
+Fraction of validation n-grams that also occur in the training text.
+
+### `cost_adjusted_reward`
+
+`quality - lam * (cost / baseline)`, clipped to `[0, 1]`.
+
+### `curiosity_weight`
+
+How much replay weight this example should carry -- **failure-weighted**: high while the artifact is still failing it (mean far below the ceiling), falling as it improves, floor once mastered. `floor` keeps a mastered example replayable without dominating the still-curious past. (This is a failure/need signal, not learning-progress: a permanently stuck example stays heavily weighted until it is solved.)
+
+### `curious_replay_evolve`
+
+Evolve the artifact on its own past, weighted by curiosity.
+
+### `curriculum_meta_run`
+
+Evolve a decision slot against a problem distribution the meta loop generates.
+
 ### `dataloader`
 
 Dependency-free dataset loading -- the *data layer* for examples/experiments.
 
+### `diagnose_payload`
+
+Classify why a run ended where it did.
+
+### `diff_manifest`
+
+Field-level differences between two manifests (empty when identical).
+
+### `distill`
+
+The rationales the artifact will carry: deduped rules from the rollouts, near-miss rationales included -- they are the artifact's own notes about what it still needs. Dedup is on the **exact rationale text**, so the output value stays semantic content (`-1` and `1`, `A` and `a` are different rules, not formatting to normalise away).
+
+### `estimate_campaign`
+
+Price a campaign without running it (one composed arm per session).
+
+### `estimate_tournament`
+
+The per-arm plan estimate without running anything.
+
+### `evaluate`
+
+Compare `verifier` with `oracle` on a deterministic sample.
+
+### `evaluate_source`
+
+Run the candidate against the tests and the benchmark.
+
+### `evolve_fast_rule`
+
+Evolve a `selection` priority rule on quality-per-cost, beat the seed.
+
+### `exam_archive`
+
+Re-validate the archive's adopted rules against an independent oracle.
+
+### `extract_rationale`
+
+One rollout's rationale as a rule the skill can carry.
+
+### `failed_rollouts`
+
+The recorded rollouts that failed, up to `max_failures`.
+
+### `find_leakage`
+
+The protected strings that appear in `text` (normalised match).
+
+### `gate_source`
+
+The candidate's gate: exactly one function of no arguments other than what its signature declares, built only from safe syntax. Imports, dunder access and the calls that reach the interpreter are refused -- the same walk `compile_policy_source` runs over every self-edit.
+
+### `harness`
+
+The least a harness can be: a name and a `(tasks, repo) -> result` callable.
+
+### `harness_leaderboard`
+
+`harness_name -> {rewards, best}` over the archive's recorded outcomes.
+
+### `harness_score`
+
+The best measured reward this harness has recorded for the domain.
+
+### `imagine_then_evolve`
+
+Evolve against the simulator, verify the result on the real problem.
+
+### `improve_source`
+
+Evolve the source of one function under its own tests and benchmark.
+
+### `is_significant`
+
+Whether the lower bound clears `min_effect` and the interval is usable.
+
+### `joint_archive_rule`
+
+Write an adopted bundle to the archive as one `meta-rule` per slot.
+
+### `joint_meta_run`
+
+Evolve several decision slots **together**, validate them jointly, decide.
+
+### `joint_meta_validate`
+
+Attribute a joint change to its slots, and isolate the ones that hurt.
+
+### `joint_problem`
+
+An inner `evolve()` whose candidate is the **whole bundle**.
+
+### `layers_from_archive`
+
+One layer per decision slot, aggregated from the archive's rule records.
+
+### `meta_population_run`
+
+Run a population of meta sessions from the archive's best rules, promote the winner.
+
+### `meta_run_audited`
+
+`meta_run` with an audited validation: sample, oracle, persist, decide.
+
+### `metrics_from_log`
+
+Aggregate any iterable log (a JSONL-backed log, list, or generator).
+
+### `metrics_from_records`
+
+Aggregate decision records.
+
+### `outcome_features`
+
+The features a judge learns quality from: mean best-so-far, the final reward, and a constant intercept term. Sweep counts / rollouts are deliberately dropped: raw counts dwarf a `[0, 1]` quality in a linear fit and had the old judge saturating its clip at 1.0 for every outcome. The judge must learn quality from the curve's *shape*, not be handed the answer.
+
+### `paired_gain`
+
+Per-task `after - before` over the keys present in both sides.
+
+### `patch_source`
+
+A unified diff between two sources -- the patch a human or a reviewer sees, and what an apply can reverse.
+
+### `policy_improve`
+
+Evolve a decision slot on verifiable reward and report the curve.
+
+### `portfolio_evolve`
+
+Evolve the reallocation rule on the archive's (or the caller's) windows.
+
+### `portfolio_problem`
+
+A `Problem` over one layer window.
+
+### `portfolio_report`
+
+Score the layers by return-per-cost and reallocate the next window.
+
+### `priority_grid_problem`
+
+A `Problem` over the priority grid.
+
+### `problem_from_tasks`
+
+A runnable inner `Problem` over exactly these tasks.
+
+### `rank_slots`
+
+The `k` slots to evolve next: paying slots first, plus exploration.
+
+### `rationale_evolve`
+
+Evolve the skill, roll out, distill its own successes back into it.
+
+### `reallocation_spec`
+
+The evolvable spec: the four numbers as a `ParamSlot`.
+
+### `record_harness`
+
+Record one harness outcome for a domain. Idempotent by `run_id`.
+
+### `recursive_self_improve`
+
+Run `self_improve` and `portfolio_evolve` alternately.
+
+### `red_team`
+
+Attack `value` by mutating the seed tasks outward and scoring each mutation. Returns the `(task, score)` failures -- the OOD region where the value does not generalise. A deterministic attacker: the same mutations in the same order, so the attack is reproducible.
+
+### `red_team_evolve`
+
+Evolve, attack the result, retrain on the failures it found.
+
+### `rollback_plan`
+
+Files to restore/delete to return `current` to `previous`.
+
+### `rsi_report`
+
+The archive's per-slot adoption history and a longitudinal verdict.
+
 ### `rule_id`
 
 Content-address a proposal so identical proposals dedupe automatically.
+
+### `rule_tournament`
+
+Run a round-robin between the rules, rated by Elo.
+
+### `run_campaign`
+
+Run up to `sessions` sessions, keeping the best artifact.
+
+### `run_controller`
+
+Run sessions until budget, a kill switch, an error or stagnation.
+
+### `run_guarded`
+
+Run one spec with an injected acceptance policy and optional records.
+
+### `run_tournament`
+
+Run every `(algorithm, seed)` arm and return the measured ranking.
+
+### `safety_report`
+
+Check whether the archive is safe to keep seeding from.
+
+### `search_evolve`
+
+Search the state tree for the best value under a fixed budget.
+
+### `select_harness`
+
+Route a domain to the harness the archive's evidence says wins there.
+
+### `self_improve`
+
+Run the closed loop for `config.ticks` ticks.
+
+### `self_rewarding_meta_run`
+
+Evolve a decision slot with a judge that improves against truth.
+
+### `simulator_problem`
+
+A `Problem` that runs the simulator.
+
+### `simulator_score`
+
+The simulator against the real problem: how much the dream is worth.
+
+### `snapshot`
+
+Compose the archive's per-slot, per-port and health evidence.
+
+### `society_evolve`
+
+Evolve the society topology on correctness-minus-cost.
+
+### `society_problem`
+
+A `Problem` over multi-step tasks.
+
+### `society_spec`
+
+The evolvable spec: the value is a gated `society()` source compiled into a `SocietyGraph`. `SOCIETY_SEED` is the single-agent baseline -- the topology the search is asked to beat.
+
+### `source_ops`
+
+The deterministic cost of a candidate rule: arithmetic/call nodes in its source, counted from the AST. An attributable unit of work -- evaluating a rule costs what its expression tree costs, and counting it from the source is reproducible where wallclock is not.
+
+### `to_prometheus`
+
+A deterministic Prometheus text exposition (no timestamps).
+
+### `tournament_promote`
+
+Run the tournament and promote the winner into the archive.
+
+### `trajectory_challenger`
+
+A `MetaProblemChallenger` that mines the archive's recorded failures.
+
+### `verifiable_problem`
+
+Wrap a `(value, task) -> output` problem so the outcome's reward is verifiable: `1.0` on exact match with `gold`, `0.0` otherwise, with the output and gold carried in `detail` for `verifiable_reward`.
+
+### `verifiable_reward`
+
+The RL signal: `1.0` when the outcome's output exactly matches its `gold`, `0.0` otherwise. A rule that cannot be checked is not rewarded -- the DeepSeek-R1 verifiability contract.
+
+### `verified_rules`
+
+The archive's seedable rule records, gated by trust.
+
+### `verify_manifest`
+
+Rebuild the manifest from current inputs; return changed field names.
+
+### `windows_from_archive`
+
+Train/validation **layer windows** from the archive's rule records.

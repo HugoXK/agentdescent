@@ -125,3 +125,11 @@ register(Algorithm(
     build=_build_archive,
     source="Darwin Gödel Machine (choose_selfimproves), ADAS archive, SICA best-agent",
     extra_calls="none"))
+
+
+# Ported algorithms register themselves; importing them makes the names.
+from . import ace  # noqa: E402,F401
+from . import evoskill  # noqa: E402,F401
+from . import gepa  # noqa: E402,F401
+from . import skillopt  # noqa: E402,F401
+from . import dgm  # noqa: E402,F401

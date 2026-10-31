@@ -59,7 +59,7 @@ from .filetree import TreeSpec, load_tree
 from .fusion import reflective_merge
 from .governance import HARNESS_BLAST_RADIUS, SKILL_BLAST_RADIUS
 from .policies import Policies
-from .rewards import command_scorer, scorer
+from .rewards import SCORERS, command_scorer, scorer
 from .runners import code_runner, gated_reward, tree_runner
 from .skillspec import SKILL_FILE, SkillTreeValidator, parse_skill_frontmatter, validate_skill_tree
 from .staleness import get_policy
@@ -249,6 +249,13 @@ class EvolveSpec:
     #: package's own modules are always allowed; widening this is the moment to
     #: think about who can write the spec.
     allow: Sequence[str] = ()
+    #: Keep each rollout's task id, output and reward under the run's ledger
+    #: (``ledger/trajectories/``) so ``show`` can list the failing ones next
+    #: to their gold (#452). Only the boundary is kept (what the agent was
+    #: shown, what it answered, what that earned) and it stays in the local run
+    #: directory; ``false`` records nothing. Read by the run store; a plain
+    #: :func:`compose` call ignores it.
+    record_rollouts: bool = True
     version: int = 1
 
     # -- (de)serialisation ------------------------------------------------
@@ -473,6 +480,23 @@ def build_tasks(spec: EvolveSpec) -> List[Task]:
     extra: Dict[str, str] = {}
     if rows and isinstance(rows[0], Mapping) and "fixtures" in rows[0]:
         extra["fixtures"] = "fixtures"       # staged into the workspace by the runners
+    for i, row in enumerate(rows):
+        if isinstance(row, Mapping) and prompt not in row:
+            # Say which spec field to change, not which Python argument (#561).
+            raise SpecError(
+                f"data.prompt: no column {prompt!r} in row {i} (columns: "
+                f"{', '.join(sorted(map(str, row)))}); set "
+                f'"data": {{"prompt": "<column>"}} in the spec')
+    if (isinstance(spec.score, str) and spec.score in SCORERS and rows
+            and all(isinstance(r, Mapping) for r in rows)
+            and not any(gold in r for r in rows)):
+        # A gold-comparing scorer with no gold column scores every answer 0.0
+        # and the run spends money learning nothing (#561).
+        cols = sorted({str(k) for r in rows for k in r})
+        raise SpecError(
+            f"data.gold: score {spec.score!r} compares answers to a gold column, "
+            f"but no row has column {gold!r} (columns: {', '.join(cols)}); set "
+            f'"data": {{"gold": "<column>"}} in the spec')
     try:
         return tasks_from(rows, prompt=prompt, gold=gold,
                           id=spec.data.get("id"), **extra)
@@ -563,7 +587,8 @@ def build_audit(spec: EvolveSpec, *, reward: Callable, run: Optional[Callable],
 
 def build_policies(spec: EvolveSpec, *, merger: Optional[Any] = None,
                    base: Optional[Mapping[str, Any]] = None,
-                   usage: Optional[Usage] = None) -> Optional[Policies]:
+                   usage: Optional[Usage] = None,
+                   merge_replaced: bool = False) -> Optional[Policies]:
     """The ``Policies`` bundle a spec asks for, or the default merge pair.
 
     Every merge-side rule is installed by the aggregator through
@@ -575,6 +600,11 @@ def build_policies(spec: EvolveSpec, *, merger: Optional[Any] = None,
     ``base`` is the slots an algorithm already built
     (:class:`~agentdescent.algorithms.Overrides`); each is a default that a slot
     named in ``spec.policies`` replaces.
+
+    ``merge_replaced`` says an ``aggregator_factory`` will run instead of the
+    shipped merge pipeline (an algorithm such as ``gepa`` brings its own), so the
+    default merge pair would never be read: it is left out rather than installed
+    for ``evolve()`` to warn about (#504).
     """
     base = dict(base or {})
     asked = dict(spec.policies)
@@ -589,7 +619,7 @@ def build_policies(spec: EvolveSpec, *, merger: Optional[Any] = None,
     # names an unrelated slot -- `staleness`, say -- is not asking to stop
     # merging, and silently dropping the pair there would make the default
     # depend on a field that has nothing to do with it.
-    default_merge = (merger is not None
+    default_merge = (merger is not None and not merge_replaced
                      and not {"reflective_merge", "conflict", "fusion"} & set(asked)
                      and not {"conflict", "fusion"} & set(base))
     if not asked:
@@ -1053,6 +1083,9 @@ def compose(spec: EvolveSpec, *, usage: Optional[Usage] = None,
     kwargs: Dict[str, Any] = {"artifact_id": aid}
     tree: Optional[Dict[str, str]] = None
 
+    if spec.kind == "text" and ov is not None and ov.strategy_from is not None:
+        raise SpecError(f"algorithm {chosen[0].name!r} derives its strategy from a "
+                        "directory tree and cannot run on kind='text'")
     if spec.kind == "text":
         # Mirror of the skill_dir / agent_dir WorkspaceAgent *requirement*:
         # kind=text is a one-shot Completion per case. A CLI coding agent is also
@@ -1143,6 +1176,10 @@ def compose(spec: EvolveSpec, *, usage: Optional[Usage] = None,
                             max_files_per_diff=spec.max_files_per_diff,
                             max_file_bytes=tspec.max_file_bytes,
                             validators=validators)
+        if ov is not None and ov.strategy_from is not None:
+            # The algorithm's strategy class, built over *this* FileTree so the
+            # kind's frozen paths, include list and validators survive (#615).
+            strategy = ov.strategy_from(strategy)
         overlay = strategy.frozen_files(tree)
         runner_common = dict(name=aid, overlay=overlay, workspace_root=workspace_root,
                              sandbox_pool=sandbox_pool)
@@ -1220,7 +1257,8 @@ def compose(spec: EvolveSpec, *, usage: Optional[Usage] = None,
     # in `reflect`, and that is what merges.
     merger = reflect if not hasattr(reflect, "in_workspace") else None
     policies = build_policies(spec, merger=merger, base=ov.policies if ov else None,
-                              usage=usage)
+                              usage=usage,
+                              merge_replaced=knobs.get("aggregator_factory") is not None)
 
     # The audit wraps the reward and the run, so it has to be built after both
     # exist and before the policies bundle is finalised -- its acceptance rule

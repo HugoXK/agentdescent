@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import threading
 import time
 import subprocess
@@ -704,6 +705,63 @@ def _read_sse(response: Any) -> Dict[str, Any]:
     }
 
 
+#: Names a caller reaches for to say "this endpoint" or "this key" that are *not*
+#: parameters of the ``*_compatible`` adapters. They used to fall into
+#: ``**create_kwargs`` and be sent as JSON body fields, so ``"base_url": "https://..."``
+#: in a spec was accepted, ignored, and the call went to the default OpenAI /
+#: Anthropic host carrying the *other* provider's key (#422).
+_URL_KWARGS = frozenset({"base_url", "api_base", "api_url", "base", "url", "endpoint"})
+_KEY_KWARGS = frozenset({"api_key", "apikey", "key"})
+
+
+def _is_timeout(e: BaseException) -> bool:
+    """True for a request that ran out of ``timeout``: a read timeout raised
+    directly, or a connect timeout that ``urllib`` wraps in ``URLError``."""
+    if isinstance(e, (TimeoutError, socket.timeout)):
+        return True
+    return (isinstance(e, urllib.error.URLError)
+            and isinstance(getattr(e, "reason", None), (TimeoutError, socket.timeout)))
+
+
+def _timeout_message(base: str, model: str, timeout: float, *,
+                     can_stream: bool) -> str:
+    """What a reflector timeout says instead of a bare ``TimeoutError`` (#467).
+
+    It names the endpoint, the model and the seconds, and the knobs that fix it:
+    a reasoning model sends nothing while it thinks, so a non-streaming request
+    can sit silent past ``timeout``."""
+    fixes = ('set "stream": true on this block, raise "timeout", or turn the '
+             "provider's thinking off (e.g. \"thinking\": {\"type\": \"disabled\"})"
+             if can_stream else
+             'raise "timeout", or turn the provider\'s thinking off')
+    return (f"{base} did not answer within {timeout:g}s for model {model!r} "
+            f"(a reasoning model thinks silently before replying): {fixes}")
+
+
+def _reject_connection_kwargs(adapter: str, create_kwargs: Mapping[str, Any]) -> None:
+    """Refuse a connection parameter that would otherwise ride into the request body.
+
+    Raised when the factory is *called* (not on the first request), so ``plan`` /
+    ``evolve`` / MCP ``start`` refuse the spec by name before any call is made. The
+    message names the spelling that exists: ``default_base_url`` (a URL, not a
+    secret) or ``base_url_env`` (a variable *name*) for the endpoint, ``api_key_env``
+    (a variable *name*) for the key. Ordinary body extras (``temperature``,
+    ``thinking``, ...) are unaffected."""
+    for name in sorted(create_kwargs):
+        if name in _URL_KWARGS:
+            raise TypeError(
+                f"`{name}` is not a parameter of `{adapter}`; use `default_base_url` "
+                "(the endpoint URL) or `base_url_env` (the name of an environment "
+                "variable holding it). It would otherwise be sent as a field of the "
+                "JSON request body while the call goes to the default host")
+        if name in _KEY_KWARGS:
+            raise TypeError(
+                f"`{name}` is not a parameter of `{adapter}`; a key is never written in "
+                "a spec -- put it in an environment variable and name that variable in "
+                "`api_key_env`. It would otherwise be sent as a field of the JSON "
+                "request body while the call authenticates with the default key")
+
+
 def openai_compatible(model: str, *, base_url_env: str = "OPENAI_BASE_URL",
                       api_key_env: str = "OPENAI_API_KEY",
                       default_base_url: str = "https://api.openai.com/v1",
@@ -736,8 +794,23 @@ def openai_compatible(model: str, *, base_url_env: str = "OPENAI_BASE_URL",
     final chunk, and an endpoint that ignores that field simply reports zero
     tokens rather than failing.
 
-    Extra keyword arguments go into the request body, so ``temperature=0`` and any
-    provider-specific field work the same way they do on :func:`claude`."""
+    Three parameters say where the call goes and with what: ``default_base_url``
+    (the endpoint, used when ``base_url_env`` is unset), ``base_url_env`` (the name
+    of the variable that overrides it) and ``api_key_env`` (the name of the variable
+    holding the key). Pointing at Volcengine Ark, for instance::
+
+        openai_compatible("deepseek-v4-flash", api_key_env="ARK_API_KEY",
+                          default_base_url="https://ark.cn-beijing.volces.com/api/coding/v3")
+
+    Without them the call goes to ``https://api.openai.com/v1`` carrying
+    ``OPENAI_API_KEY``. A connection-shaped keyword that is *not* one of these
+    (``base_url``, ``api_key``, ``url``, ...) raises ``TypeError`` instead of being
+    sent as a body field to the default host (#422).
+
+    Any other keyword argument goes into the request body, so ``temperature=0`` and
+    any provider-specific field work the same way they do on :func:`claude`."""
+    _reject_connection_kwargs("openai_compatible", create_kwargs)
+
     def complete(prompt: str) -> str:
         base = os.environ.get(base_url_env, default_base_url).rstrip("/")
         key = os.environ.get(api_key_env)
@@ -791,9 +864,13 @@ def openai_compatible(model: str, *, base_url_env: str = "OPENAI_BASE_URL",
                     retry_after = None
                 raise RateLimited(message, retry_after) from e
             raise RuntimeError(message) from e
-        except Exception:
+        except Exception as e:
             if usage is not None:
                 usage.record(seconds=time.time() - t0, failed=True)
+            if _is_timeout(e):
+                # A bare "The read operation timed out" names nothing (#467).
+                raise RuntimeError(_timeout_message(
+                    base, model, timeout, can_stream=not stream)) from e
             raise
         if usage is not None:
             u = data.get("usage") or {}
@@ -850,7 +927,15 @@ def anthropic_compatible(model: str, *, base_url_env: str = "ANTHROPIC_BASE_URL"
     ``thinking`` blocks first and the visible answer after, and concatenating all
     of them would put the reasoning into the artifact's output -- where a scorer
     would grade it, a judge would read it, and a diff might commit it.
+
+    ``default_base_url``, ``base_url_env`` and ``api_key_env`` are the three
+    connection parameters (see :func:`openai_compatible`); a connection-shaped
+    keyword that is not one of them (``base_url``, ``api_key``, ...) raises
+    ``TypeError`` rather than being sent as a body field (#422). Any other keyword
+    goes into the request body.
     """
+    _reject_connection_kwargs("anthropic_compatible", create_kwargs)
+
     def complete(prompt: str) -> str:
         base = os.environ.get(base_url_env, default_base_url).rstrip("/")
         key = os.environ.get(api_key_env)
@@ -893,9 +978,12 @@ def anthropic_compatible(model: str, *, base_url_env: str = "ANTHROPIC_BASE_URL"
                     retry_after = None
                 raise RateLimited(message, retry_after) from e
             raise RuntimeError(message) from e
-        except Exception:
+        except Exception as e:
             if usage is not None:
                 usage.record(seconds=time.time() - t0, failed=True)
+            if _is_timeout(e):
+                raise RuntimeError(_timeout_message(
+                    base, model, timeout, can_stream=False)) from e
             raise
         if usage is not None:
             u = data.get("usage") or {}

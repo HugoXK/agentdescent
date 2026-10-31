@@ -1,8 +1,9 @@
-# Use it from your agent — DeepSeek Harness, Claude Code, Codex, OpenCode
+# Use it from your agent — DeepSeek Harness, Claude Code, Codex, OpenCode, Grok Bot
 
 Everything else in these docs is Python: you write a dozen lines and hand them
 to `evolve()`. This page is for the other audience — a person sitting *inside*
-an agent (DeepSeek Harness, Claude Code, Codex, OpenCode) who wants to say *"evolve this
+an agent (DeepSeek Harness, Claude Code, Codex, OpenCode, or Grok Bot via a
+scaffold) who wants to say *"evolve this
 skill against these examples"* and have the agent do it. It is also for the
 agent: the same surface is what the agent calls.
 
@@ -11,13 +12,13 @@ The design record — why it is shaped this way and what was considered — is
 
 ## Install
 
-Install **0.6.0** from PyPI:
+Install **0.8.0** from PyPI:
 
 ```bash
-pip install "agentdescent[mcp]>=0.6.0"                 # the MCP server needs this extra (and Python >= 3.10)
+pip install "agentdescent[mcp]>=0.8.0"                 # the MCP server needs this extra (and Python >= 3.10)
 agentdescent demo                      # a complete evolution, offline, no key
 agentdescent doctor                    # which agent CLIs, keys and optional pieces are here
-agentdescent install dsh               # or: claude-code, codex, opencode
+agentdescent install dsh               # or: claude-code, codex, opencode, grok-bot (scaffold; needs a tunnel, not one-click)
 ```
 
 Or clone the repository as described in [install and first run](install.md) and
@@ -47,34 +48,59 @@ commands](plugin-quickstart.md) walks the whole path.
 | host | what it writes | how to load it |
 |---|---|---|
 | `dsh` | `~/.dsh/skills/agentdescent/SKILL.md` + `hooks.json`; an `@deepseek-ai/dsh-mcp-client` entry and the `hooks-claude-code` bridge appended to `~/.dsh/cordis.patch.yml` | restart `dsh`; check with `dsh --profile web --dump-config \| grep agentdescent` |
-| `claude-code` | a plugin directory at `~/.agentdescent/plugins/claude-code/` (`plugin.json`, skill, `/agentdescent:evolve`, `.mcp.json`, a `SessionStart` hook) | `claude --plugin-dir ~/.agentdescent/plugins/claude-code`, or `/plugin marketplace add Birfy/agentdescent` then `/plugin install agentdescent@agentdescent` |
-| `codex` | `~/.codex/skills/agentdescent/SKILL.md`; an `[mcp_servers.agentdescent]` block appended to `~/.codex/config.toml` | restart Codex; check with `codex mcp list`. **Or skip `install` entirely** and use the plugin — see below |
-| `opencode` | `~/.config/opencode/skill/agentdescent/SKILL.md`; an `mcp.agentdescent` entry merged into `~/.config/opencode/opencode.jsonc` | restart OpenCode; check with `opencode mcp list` |
+| `claude-code` | a plugin directory at `~/.agentdescent/plugins/claude-code/` (`plugin.json`, skill, `/agentdescent:evolve`, `/agentdescent:algorithms`, `.mcp.json`, a `SessionStart` hook) | `claude --plugin-dir ~/.agentdescent/plugins/claude-code`, or `/plugin marketplace add Birfy/agentdescent` then `/plugin install agentdescent@agentdescent` |
+| `codex` | `~/.codex/skills/agentdescent/SKILL.md`; `/prompts:evolve` and `/prompts:algorithms` as `~/.codex/prompts/{evolve,algorithms}.md` (same bodies as Claude `/agentdescent:evolve` / `/agentdescent:algorithms`); an `[mcp_servers.agentdescent]` block appended to `~/.codex/config.toml` | restart Codex; check with `codex mcp list`. **Or skip `install` entirely** and use the plugin — see below |
+| `opencode` | `~/.config/opencode/skill/agentdescent/SKILL.md`; `/agentdescent/evolve` and `/agentdescent/algorithms` under `~/.config/opencode/command/agentdescent/` (legacy singular `command/`, nested to mirror Claude's namespaced slash); an `mcp.agentdescent` entry merged into `~/.config/opencode/opencode.jsonc` (into `opencode.json` beside it when your `opencode.jsonc` has comments; OpenCode merges the two) | restart OpenCode; check with `opencode mcp list` |
+| `grok-bot` | scaffold under `~/.agentdescent/plugins/grok-bot/` (`SKILL.md`, `HOST.md`, `mcp.example.json`) — **not** a one-click wire-up: Grok Bot has no public plugin API for local skill+stdio MCP; `HOST.md` names `algorithms list`/`show` and MCP discovery | read `HOST.md`; ask Grok Bot to save the skill as a user skill; drive runs with the CLI, or run `agentdescent mcp --transport streamable-http` behind an HTTPS tunnel and add the URL as a custom MCP server. `doctor` reports `mcp n/a` when the scaffold is current |
 
 `agentdescent doctor` also reads what `install` left behind, without writing
-anything: one `host <name>: ok | stale | partial | missing` line per host (the
-same data is `hosts` in the JSON report and the MCP `doctor` tool). `stale`
-means the `SKILL.md` a host holds differs from the one this package would write
-now -- what a `pip install -U` leaves behind -- and `partial` means the skill or
-the MCP entry is absent; both are problems (exit code 1) and the fix is to re-run
-`agentdescent install <host>`. A host CLI on `PATH` with nothing installed is a
-hint, not a problem, because `pip install` wires nothing and not every host on a
-machine should be touched. An OpenCode config with comments (`opencode.jsonc`, or an
-`opencode.json` you keep by hand) that cannot be parsed reports its MCP entry as
-`unknown` rather than guessing; `unknown` alone never makes a host `partial`, so
-a user who never installed anything is `missing`. An install made through a
+anything (`--home <dir>` uses the same probe directory as `install --home` /
+`uninstall --home`, and likewise wins over `CODEX_HOME` / `DSH_HOME` /
+`XDG_CONFIG_HOME`): one `host <name>: ok | stale | partial | missing` line per host, and
+for any installed host the line names `skill` and `mcp` too (for example
+`host opencode: partial (skill ok, mcp missing; cli …)`), so a stale skill after
+`pip install -U` or a missing MCP entry is visible without reading the problems
+section (the same data is `hosts` in the JSON report and the MCP `doctor` tool).
+`stale` means the `SKILL.md` a host holds differs from the one this package would
+write now -- what a `pip install -U` leaves behind -- and `partial` means the
+skill or the MCP entry is absent; both are problems (exit code 1) and the fix is
+to re-run `agentdescent install <host>`. A host CLI on `PATH` with nothing
+installed is a hint, not a problem, because `pip install` wires nothing and not
+every host on a machine should be touched. An OpenCode config with comments (`opencode.jsonc`, or an
+`opencode.json` you keep by hand) that cannot be parsed but names `agentdescent`
+reports its MCP entry as `unknown` rather than guessing; one that never names it
+holds no entry of ours, so with the skill installed the host is `partial`.
+`unknown` alone never makes a host `partial`, so a user who never installed
+anything is `missing`. Grok Bot's scaffold reports `mcp n/a` (no host-native
+MCP config to check); with a current skill that is still `ok`, not `partial`. An install made through a
 host's own marketplace (`codex plugin add`, Claude Code's `/plugin install`)
 leaves no files here, so it reads `missing` and the hint names that route too.
 Only presence is checked: a launcher pinned to an interpreter that has since
 been deleted still reads `ok`.
 
+Supported hosts today are DeepSeek Harness (`dsh`), Claude Code, Codex,
+OpenCode, and a **Grok Bot scaffold** (`agentdescent install grok-bot`). The
+Grok Bot path writes the shared skill plus `HOST.md` / `mcp.example.json`
+under `~/.agentdescent/plugins/grok-bot/`; it does **not** edit a host config,
+because Grok Bot has no public one-click plugin API for local skill directories
+or stdio MCP (custom connectors need public HTTPS). For those, run
+`agentdescent mcp --transport streamable-http` (loopback, port 8000, path
+`/mcp`) and expose it through an HTTPS tunnel; the server has no auth, and a
+non-loopback `--host` needs `--allow-remote`. `doctor` reports
+`mcp n/a` for that host when the scaffold is current. A future one-click route
+(if/when a host-native API appears) is still tracked on #165.
+
 ### Uninstall
 
 `agentdescent uninstall <host>` (`--dry-run` to preview, `--home` as for
 `install`) takes back what the table above says `install` wrote: the skill
-files, the Claude Code plugin directory, the `cordis.patch.yml` block, the
+files, the Claude Code plugin directory, the Grok Bot scaffold under
+`~/.agentdescent/plugins/grok-bot/`, the OpenCode
+`command/agentdescent/{evolve,algorithms}.md` slash entries and the Codex
+`prompts/{evolve,algorithms}.md` slash entries (only while still
+byte-for-byte stock), the `cordis.patch.yml` block, the
 `[mcp_servers.agentdescent]` table in `config.toml`, the `mcp.agentdescent`
-entry in `opencode.jsonc`. Everything around them is left as it was, and so is
+entry in `opencode.jsonc` or `opencode.json`. Everything around them is left as it was, and so is
 the run store in `~/.agentdescent`.
 
 What counts as "ours" differs by file:
@@ -91,9 +117,17 @@ What counts as "ours" differs by file:
   yourself, is kept.
 * **OpenCode**: only the pinned launcher `install` writes. The bare
   `["agentdescent", "mcp"]` entry (what `opencode mcp add` writes) is treated
-  as yours. A `$schema` key that `install` added to `opencode.jsonc` is left
-  behind (it is harmless and cannot be told from one you wrote), and so is an
-  empty `mcp` object you had. A file with comments is never rewritten.
+  as yours. `install` adds a `$schema` key only to a file it creates, and
+  `uninstall` deletes such a file once our entry was all it held; an empty
+  `mcp` object you had is left behind. A file with comments is never
+  rewritten: `install` writes the entry into `opencode.json` beside it instead,
+  and if that file cannot be parsed either it prints a `FAILED:` line with the
+  entry to add by hand and exits 1 (`--json` reports `"ok": false`). The
+  `command/agentdescent/evolve.md` and `algorithms.md` slash files are removed
+  only while each still matches the stock Claude prompt; an edit is kept.
+* **Codex slash files**: `prompts/evolve.md` and `prompts/algorithms.md` are
+  removed only while stock; an edit is kept. (The skill and MCP table rules
+  above still apply.)
 
 Anything kept is printed as `kept ... (...)` and makes the command exit 1, so a
 script can tell "fully removed" from "one step is yours"; nothing to remove
@@ -171,7 +205,7 @@ because a patch file otherwise **overrides** rows by id.
 It is idempotent (`--dry-run` shows what it would do) and honours `DSH_HOME`,
 `CODEX_HOME` and `XDG_CONFIG_HOME`, unless you pass `--home <dir>`: an explicit
 `--home` is the host's whole world, so those variables are ignored and nothing
-outside `<dir>` is read or written (also for `uninstall`). Every manifest here was verified by writing
+outside `<dir>` is read or written (also for `uninstall` and `doctor`). Every manifest here was verified by writing
 it and having the host read it back (dsh 0.1.2-rc.1, Claude Code 2.1.261,
 codex-cli 0.153.4, opencode 1.18.29).
 
@@ -221,6 +255,15 @@ doctor  →  write a spec  →  plan (show the user)  →  start  →  status (o
 * **`apply` is its own tool and says it is destructive.** The evolved artifact
   reaches your real directory only through it, after `show` has displayed the
   diff and the plan (`write_to(dry_run=True)`), and it backs up first.
+* **Questions about an archive are read-only tools.** `safety` (safe to keep
+  seeding from?), `portfolio` (layer ranking and a suggested budget split) and
+  `audit_trace` (one adoption's evidence rings) return the same JSON as the
+  CLI's `safety` / `portfolio` / `audit <run_id>` verbs and write nothing.
+  A missing archive is an error that names the Python meta API
+  (`continuous_meta_run`; see [consolidation](consolidation.md)) — `evolve` /
+  plugin runs never write one, and there is no CLI/MCP verb that does. Tell
+  the user that; do not invent a "consolidation" step. `exam` runs an oracle
+  module, so it stays CLI-only.
 
 **The tool names differ by how the server was added**, which matters when you
 allowlist them or write a probe that greps for one (verified against Claude Code
@@ -277,6 +320,28 @@ line for line:
 
 The other fields:
 
+* **`algorithm`** (optional): a named method from `agentdescent algorithms list`
+  (`rrsi` and `archive_selection` today; the catalog is
+  [named algorithms](algorithms.md); to add one card see
+  [Register a named Algorithm card](algorithm-authoring.md)). A name or `{"name": ..., "params": {...}}`
+  replaces the kind's default recipe with that method's policy/knob defaults;
+  explicit `policies` / `evolve` fields in the same spec still win. `plan` echoes
+  the resolved card, its parameters and its extra cost, and rejects an unknown
+  name, an unknown parameter, a wrong type or a kind the method does not support
+  before any run starts. A host can discover the same cards with the
+  `list_algorithms` / `describe_algorithm` MCP tools, or write the field with
+  `agentdescent init --algorithm NAME --param KEY=VALUE`. Third-party packages
+  can add a name by exposing an `Algorithm` under the
+  `agentdescent.algorithms` entry-point group; a plugin that fails to load is
+  skipped, printed as a warning by `agentdescent algorithms list`, and reported
+  by `agentdescent.algorithms.external_errors()` rather than taking the shipped
+  registry down. The value loads to an `Algorithm` (or a zero-argument factory
+  returning one), and its `name` must equal the entry-point name:
+
+  ```toml
+  [project.entry-points."agentdescent.algorithms"]
+  my_method = "my_pkg:ALGORITHM"
+  ```
 * **`data`**: one of `path` (`.json` / `.jsonl` / `.csv`), `hf`
   (`{"dataset", "split", "config", "limit"}`, through
   [the data layer](dataloader.md)) or `inline` (a list of rows); `prompt` and
@@ -290,6 +355,31 @@ The other fields:
   import allowlist, with keyword arguments beside it. `"call": false` names a
   callable rather than a factory. A cheap `reflect` behind an expensive `agent`
   is the usual trade.
+
+  `openai_compatible` and `anthropic_compatible` have **three connection
+  parameters**, and no others: `api_key_env` (the *name* of the variable holding
+  the key), `base_url_env` (the *name* of a variable holding the endpoint) and
+  `default_base_url` (the endpoint itself, used when that variable is unset).
+  Defaults are `OPENAI_API_KEY` / `OPENAI_BASE_URL` / `https://api.openai.com/v1`
+  (`ANTHROPIC_*` / `https://api.anthropic.com` for the Anthropic twin), so a key
+  that is not OpenAI's needs an endpoint too, or it is sent to `api.openai.com`:
+
+  ```json
+  "reflect": {"ref": "openai_compatible", "model": "deepseek-v4-flash",
+              "api_key_env": "ARK_API_KEY",
+              "default_base_url": "https://ark.cn-beijing.volces.com/api/coding/v3"}
+  ```
+
+  Every other keyword (`temperature`, `thinking`, ...) goes into the request body.
+  A **reasoning model** (Ark `doubao-seed-code` thinks by default) sends nothing
+  while it thinks, so a non-streaming call can hit the 120 s `"timeout"`: set
+  `"stream": true` on the block, raise `"timeout"`, or pass the provider's own
+  switch (`"thinking": {"type": "disabled"}` on Ark). A timeout is reported with
+  the endpoint, model and seconds, not as a bare `TimeoutError`.
+  A spec that writes `base_url`, `api_key` or a similar guess is **refused** by
+  `plan`, `evolve` and MCP `start` with the spelling to use; `plan` also warns when
+  a non-OpenAI `api_key_env` has no endpoint configured. A key is never written in
+  a spec.
 
 ### Which model a run uses
 
@@ -498,6 +588,7 @@ the run holds the resolved paths and is re-runnable from anywhere.
     result.json    EvolutionResult.save() at the end
     tree/          the evolved directory, materialised
     ledger/        the git ledger; resume re-launches on it
+    ledger/trajectories/  one record per rollout (task, answer, reward); off with "record_rollouts": false
     log.txt        the detached process's output
 ```
 
@@ -533,6 +624,18 @@ rollouts are not spent. A reflector that fails only some of the time does not
 fail the run; the counts are recorded and a `RuntimeWarning` names the first
 error. Fix the key or model (`agentdescent doctor`, `plan` warns about the
 missing key) and `resume` the run.
+
+### A run that learned nothing: `samples`
+
+`show` (CLI `show` / `show --json`, and the MCP `show` tool) carries `samples`:
+up to five of the lowest-reward rollouts of the final artifact, one per task,
+each with `task_id`, `reward`, the agent's `output` and the task's `gold` (both
+cut to 300 characters; the whole block stays under 4 KB). That is the answer to
+"did the agent answer wrongly, or did scoring reject a right answer": an output
+of `21` against a gold of `321` is the first case. The records live under
+`ledger/trajectories/` in the run directory, contain only what your own agent
+was shown and answered, and never leave your machine. Set `"record_rollouts":
+false` in the spec to record nothing; `show` then has no `samples` key.
 
 A dollar budget (`--budget` with `--usd-per-call`, or `budget_usd` on `start`)
 uses `evolve(stop_when=)`: the run stops between rounds once

@@ -37,21 +37,24 @@ def _write(tmp_path, spec):
 
 
 def test_builtin_algorithms_are_registered_with_declared_fidelity():
-    assert algorithms.names() == ["archive_selection", "rrsi"]
+    assert algorithms.names() == ["ace", "archive_selection", "dgm", "evoskill", "gepa", "rrsi", "skillopt"]
+    assert algorithms.names(builtin_only=True) == ["ace", "archive_selection", "dgm", "evoskill", "gepa", "rrsi", "skillopt"]
     for alg in algorithms.listing():
         assert alg.fidelity in algorithms.FIDELITY
         assert alg.summary and alg.kinds
 
 
 def test_listing_filters_by_kind():
-    assert [a.name for a in algorithms.listing("text")] == ["archive_selection", "rrsi"]
-    assert [a.name for a in algorithms.listing("skill_dir")] == ["archive_selection"]
+    assert [a.name for a in algorithms.listing("text")] == ["ace", "archive_selection", "dgm", "gepa", "rrsi", "skillopt"]
+    assert [a.name for a in algorithms.listing("skill_dir")] == ["archive_selection", "evoskill"]
+    assert [a.name for a in algorithms.listing("plugin")] == ["archive_selection", "evoskill"]
+    assert [a.name for a in algorithms.listing("agent_dir")] == ["archive_selection", "evoskill"]
     assert algorithms.listing("policy_slot") == []
 
 
 def test_get_unknown_names_the_available_ones():
-    with pytest.raises(AlgorithmError, match=r"unknown algorithm 'gepa'.*rrsi"):
-        algorithms.get("gepa")
+    with pytest.raises(AlgorithmError, match=r"unknown algorithm 'nope'.*rrsi"):
+        algorithms.get("nope")
 
 
 def test_duplicate_registration_is_refused():
@@ -141,7 +144,7 @@ def test_the_spec_round_trips_an_algorithm():
 
 
 @pytest.mark.parametrize("spec_kw, message", [
-    (dict(algorithm="gepa"), r"algorithm: unknown algorithm 'gepa'; available: \['archive_selection', 'rrsi'\]"),
+    (dict(algorithm="nope"), r"algorithm: unknown algorithm 'nope'; available: \['ace', 'archive_selection', 'dgm', 'evoskill', 'gepa', 'rrsi', 'skillopt'\]"),
     (dict(algorithm={"name": "rrsi", "params": {"nope": 1}}),
      r"algorithm\.params: 'rrsi' has no parameter\(s\) \['nope'\]"),
     (dict(algorithm={"name": "rrsi", "params": {"b_max": "x"}}),
@@ -176,7 +179,7 @@ def test_an_algorithm_that_does_not_apply_to_the_kind_names_the_ones_that_do(tmp
                  algorithm="rrsi")
     with pytest.raises(SpecError,
                        match=r"'rrsi' applies to kind \['text'\], not 'skill_dir'; "
-                             r"for kind 'skill_dir': \['archive_selection'\]"):
+                             r"for kind 'skill_dir': \['archive_selection', 'evoskill'\]"):
         compose(spec)
 
 
@@ -318,13 +321,14 @@ def test_cli_list_text_and_json(capsys):
     for argv in (["--json", "algorithms", "list"], ["algorithms", "list", "--json"]):
         assert cli.main(argv) == 0
         rows = json.loads(capsys.readouterr().out)
-        assert [r["name"] for r in rows] == ["archive_selection", "rrsi"]
-        assert {p["name"] for p in rows[1]["params"]} >= {"b_max", "protected"}
+        assert [r["name"] for r in rows] == ["ace", "archive_selection", "dgm", "evoskill", "gepa", "rrsi", "skillopt"]
+        rrsi = next(r for r in rows if r["name"] == "rrsi")
+        assert {p["name"] for p in rrsi["params"]} >= {"b_max", "protected"}
 
 
 def test_cli_list_filters_by_kind_and_rejects_an_unknown_one(capsys):
     assert cli.main(["algorithms", "list", "--kind", "plugin", "--json"]) == 0
-    assert [r["name"] for r in json.loads(capsys.readouterr().out)] == ["archive_selection"]
+    assert [r["name"] for r in json.loads(capsys.readouterr().out)] == ["archive_selection", "evoskill"]
     assert cli.main(["algorithms", "list", "--kind", "bogus"]) == 2
     assert "--kind must be one of" in capsys.readouterr().err
 
@@ -337,3 +341,281 @@ def test_cli_show_prints_the_card_and_fails_for_an_unknown_name(capsys):
     assert json.loads(capsys.readouterr().out)["name"] == "rrsi"
     assert cli.main(["algorithms", "show", "nope"]) == 2
     assert "unknown algorithm 'nope'" in capsys.readouterr().err
+
+
+def test_ace_registers_the_grow_and_refine_playbook():
+    alg = algorithms.get("ace")
+    assert alg.kinds == ("text",) and alg.fidelity == "mechanism_microport"
+    assert {p.name for p in alg.params} == {"title", "dedup_threshold"}
+    comp = compose(_spec(algorithm={"name": "ace",
+                                    "params": {"dedup_threshold": 0.7}}))
+    from agentdescent.algorithms.ace import ACEPlaybook, GrowAndRefine
+    assert isinstance(comp.kwargs["strategy"], ACEPlaybook)
+    assert comp.kwargs["strategy"].dedup_threshold == 0.7
+    assert isinstance(comp.kwargs["policies"].acceptance, GrowAndRefine)
+def test_gepa_registers_the_pareto_optimizer():
+    alg = algorithms.get("gepa")
+    assert alg.kinds == ("text",) and alg.fidelity == "mechanism_microport"
+    assert {p.name for p in alg.params} == {"seed", "eval_concurrency"}
+    comp = compose(_spec(algorithm={"name": "gepa", "params": {"seed": 3}}))
+    assert "aggregator_factory" in comp.kwargs
+    factory = comp.kwargs["aggregator_factory"]
+    assert callable(factory) and factory.holder == {}
+
+
+def test_gepa_spec_run_returns_the_best_average_candidate(tmp_path):
+    spec = _spec(algorithm="gepa",
+                 evolve={"rounds": 3, "n_workers": 2, "seed": 0})
+    comp = compose(spec, repo_path=str(tmp_path / "repo"))
+    holder = comp.kwargs["aggregator_factory"].holder
+    result = comp.run()
+    agg = holder["agg"]
+    assert agg.states
+    # finalize() leaves GEPA's best-average candidate on dev, not the last
+    # win-frequency sample the step loop committed.
+    assert result.state == agg.best_state
+    assert "gepa-select" in result.outcomes()
+# -- the plugin surface: init, CLI overrides, MCP, docs (#384 slice 3) ----------
+
+
+def test_init_writes_the_algorithm_and_only_the_params_given(tmp_path, capsys):
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("be terse\n")
+    assert cli.main(["init", str(prompt), "--out", str(tmp_path / "spec.json"),
+                     "--algorithm", "rrsi", "--param", 'protected=["secret"]',
+                     "--model", "m"]) == 0
+    spec = json.loads((tmp_path / "spec.json").read_text())
+    assert spec["algorithm"] == {"name": "rrsi", "params": {"protected": ["secret"]}}
+    assert "wrote" in capsys.readouterr().out
+
+
+def test_init_refuses_an_unknown_algorithm_or_wrong_kind(tmp_path, capsys):
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("be terse\n")
+    assert cli.main(["init", str(prompt), "--out", str(tmp_path / "a.json"),
+                     "--algorithm", "nope"]) == 2
+    assert "unknown algorithm" in capsys.readouterr().err
+    skill = tmp_path / "skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("---\nname: s\ndescription: d\n---\nbody\n")
+    assert cli.main(["init", str(skill), "--out", str(tmp_path / "b.json"),
+                     "--algorithm", "rrsi", "--agent", "opencode"]) == 2
+    assert "applies to kind" in capsys.readouterr().err
+
+
+def test_init_refuses_params_without_an_algorithm(tmp_path, capsys):
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("be terse\n")
+    assert cli.main(["init", str(prompt), "--out", str(tmp_path / "a.json"),
+                     "--param", "b_max=3"]) == 2
+    assert "--param needs --algorithm" in capsys.readouterr().err
+
+
+def test_plan_can_override_the_spec_algorithm(tmp_path, capsys):
+    path = _write(tmp_path, _spec())
+    assert cli.main(["--json", "plan", path, "--algorithm", "rrsi",
+                     "--param", "b_max=3"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["algorithm"]["name"] == "rrsi"
+    assert out["algorithm"]["params"]["b_max"] == 3
+    assert json.loads(open(path).read()).get("algorithm") is None   # not written
+
+
+def test_plan_override_fails_closed(tmp_path, capsys):
+    path = _write(tmp_path, _spec())
+    assert cli.main(["--json", "plan", path, "--algorithm", "nope"]) == 2
+    assert "unknown algorithm" in json.loads(capsys.readouterr().out)["error"]
+
+
+def test_mcp_lists_and_describes_the_registry():
+    from agentdescent.mcp import Tools
+
+    t = Tools(None)
+    listed = t.list_algorithms()
+    assert [a["name"] for a in listed["algorithms"]] == algorithms.names()
+    assert [a["name"] for a in t.list_algorithms("skill_dir")["algorithms"]] == \
+        ["archive_selection", "evoskill"]
+    assert [a["name"] for a in t.list_algorithms("agent_dir")["algorithms"]] == \
+        ["archive_selection", "evoskill"]
+    assert "unknown kind" in t.list_algorithms("nope")["error"]
+    card = t.describe_algorithm("rrsi")
+    assert card["name"] == "rrsi" and any(p["name"] == "b_max" for p in card["params"])
+    assert "unknown algorithm" in t.describe_algorithm("nope")["error"]
+
+
+def test_the_docs_catalog_is_generated_from_the_registry():
+    from tools import gen_algorithms_docs as gen
+
+    current = open(gen.OUT, encoding="utf-8").read()
+    assert current == gen.render()
+    for name in algorithms.names():
+        assert f"## `{name}`" in current
+
+
+def test_a_same_name_override_merges_params(tmp_path, capsys):
+    path = _write(tmp_path, _spec(algorithm={"name": "rrsi", "params": {"b_max": 3}}))
+    assert cli.main(["--json", "plan", path, "--algorithm", "rrsi",
+                     "--param", "b_min=2"]) == 0
+    alg = json.loads(capsys.readouterr().out)["algorithm"]
+    assert alg["params"]["b_max"] == 3 and alg["params"]["b_min"] == 2
+
+
+def test_param_without_flag_tweaks_the_specs_algorithm(tmp_path, capsys):
+    path = _write(tmp_path, _spec(algorithm={"name": "rrsi", "params": {"b_max": 3}}))
+    assert cli.main(["--json", "plan", path, "--param", "b_min=2"]) == 0
+    alg = json.loads(capsys.readouterr().out)["algorithm"]
+    assert alg["params"]["b_max"] == 3 and alg["params"]["b_min"] == 2
+
+
+def test_mcp_explains_that_policy_slot_has_no_algorithms():
+    from agentdescent.mcp import Tools
+
+    out = Tools(None).list_algorithms("policy_slot")
+    assert out["algorithms"] == [] and "no algorithm applies" in out["note"]
+
+
+def test_dgm_registers_the_keep_all_archive():
+    alg = algorithms.get("dgm")
+    assert alg.kinds == ("text",) and alg.fidelity == "mechanism_microport"
+    assert {p.name for p in alg.params} == {
+        "seed", "archive_mode", "failure_threshold"}
+    comp = compose(_spec(algorithm={"name": "dgm",
+                                    "params": {"archive_mode": "keep_better"}}))
+    from agentdescent.algorithms.dgm import HarnessStrategy
+    assert isinstance(comp.kwargs["strategy"], HarnessStrategy)
+    assert callable(comp.kwargs["aggregator_factory"])
+
+
+def test_dgm_runs_an_offline_evolve_round(tmp_path):
+    spec = _spec(
+        algorithm="dgm",
+        reflect={"ref": "tests.test_algorithms:_dgm_reflect", "call": False},
+        allow=["tests."],
+        evolve={"rounds": 2, "n_workers": 1, "seed": 0})
+    comp = compose(spec, repo_path=str(tmp_path / "repo"))
+    holder = comp.kwargs["aggregator_factory"].holder
+    result = comp.run()
+    agg = holder["agg"]
+    assert agg.ctx.archive                      # seeded
+    assert any(len(a.capabilities) > 1 for a in agg.ctx.archive)
+    best = max(agg.ctx.archive, key=lambda a: a.score)
+    assert result.state["capabilities"] == ",".join(sorted(best.capabilities))
+
+
+def _dgm_reflect(prompt):
+    return "plan-first"
+def test_evoskill_registers_the_skill_library_frontier(tmp_path):
+    (tmp_path / "AGENT.md").write_text("# agent\n")
+    spec = EvolveSpec(kind="agent_dir", target=str(tmp_path),
+                      data={"inline": ROWS}, agent="opencode",
+                      editable=["SKILL.md"], frozen=["skip/**"],
+                      algorithm={"name": "evoskill",
+                                 "params": {"max_frontier": 3}})
+    comp = compose(spec)
+    from agentdescent.algorithms.evoskill import SkillLibraryTree
+    strategy = comp.kwargs["strategy"]
+    assert isinstance(strategy, SkillLibraryTree)
+    assert strategy.editable == ("SKILL.md",)
+    assert strategy.frozen == ("skip/**",)
+    assert not strategy.writable("skills/new/SKILL.md")   # guardrail honoured
+    assert callable(comp.kwargs["aggregator_factory"])
+    assert comp.algorithm["params"]["max_frontier"] == 3
+
+
+def test_evoskill_make_propose_offers_a_skill_path():
+    from agentdescent.algorithms.evoskill import (EvoSkillContext, Frontier,
+                                                   make_propose)
+    from agentdescent.filetree import canonical
+
+    ctx = EvoSkillContext(docs={}, frontier=Frontier(), batch_size=1)
+
+    def complete(prompt):
+        return "create careful" if "Skill Proposer" in prompt else "Read the task."
+
+    propose = make_propose(ctx, complete)
+    class T:
+        prompt = "q"
+        meta = {"gold": "a"}
+    assert propose(canonical({"SKILL.md": "seed"}), T(), "wrong", 0.0) == \
+        "careful :: Read the task."
+
+
+def test_evoskill_runs_an_offline_evolve_round(tmp_path):
+    from tests.test_evolvespec import _dir_spec
+
+    spec = _dir_spec(
+        str(tmp_path), kind="agent_dir",
+        reflect={"ref": "tests.test_algorithms:_evoskill_reflect", "call": False},
+        algorithm={"name": "evoskill", "params": {"batch_size": 1}},
+        evolve={"rounds": 2, "n_workers": 1, "seed": 0})
+    comp = compose(spec, repo_path=str(tmp_path / "repo"))
+    holder = comp.kwargs["aggregator_factory"].holder
+    result = comp.run()
+    agg = holder["agg"]
+    assert result.state is not None
+    assert agg.ctx.frontier.members            # seeded, even if nothing was admitted
+    assert any(
+        any(path.startswith("skills/") and path.endswith("SKILL.md")
+            for path in state)
+        for state, _ in agg.ctx.frontier.members
+    ), "the frontier never saw an induced skills/<name>/SKILL.md"
+
+
+def _evoskill_reflect(prompt):
+    if "Skill Proposer" in prompt:
+        return "create careful\nreason"
+    return "Read the task carefully."
+
+
+def test_skillopt_registers_the_strict_gate_optimizer():
+    alg = algorithms.get("skillopt")
+    assert alg.kinds == ("text",) and alg.fidelity == "mechanism_microport"
+    assert {p.name for p in alg.params} == {"max_lr", "min_lr", "total_steps", "mode"}
+    comp = compose(_spec(algorithm={"name": "skillopt",
+                                    "params": {"max_lr": 3, "min_lr": 1}}))
+    from agentdescent.algorithms.skillopt import SkillDocStrategy
+    assert isinstance(comp.kwargs["strategy"], SkillDocStrategy)
+    assert comp.kwargs["strategy"].seed
+    assert callable(comp.kwargs["aggregator_factory"])
+    assert isinstance(comp.kwargs["initial_state"], dict)
+
+
+def test_skillopt_runs_an_offline_evolve_round(tmp_path):
+    result = _run(_spec(algorithm="skillopt"), tmp_path)
+    assert sum(result.outcomes().values()) >= 1
+    assert "unknown" not in result.outcomes()
+
+
+# -- an algorithm that brings its own aggregator gets no default merge pair (#504) --
+
+_REFLECT = {"ref": "tests.test_algorithms:_dgm_reflect", "call": False}
+
+
+@pytest.mark.parametrize("name", ["gepa", "skillopt", "dgm"])
+def test_factory_algorithms_do_not_get_the_default_merge_pair(name, tmp_path):
+    comp = compose(_spec(algorithm=name, reflect=_REFLECT, allow=["tests."]),
+                   repo_path=str(tmp_path / "repo"))
+    assert comp.kwargs["aggregator_factory"] is not None
+    pol = comp.kwargs.get("policies")
+    assert pol is None or (pol.conflict is None and pol.fusion is None)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        comp.run()
+    assert not [w for w in caught if "aggregator_factory= replaces" in str(w.message)]
+
+
+def test_plain_text_spec_still_merges_by_default():
+    pol = compose(_spec(reflect=_REFLECT, allow=["tests."])).kwargs["policies"]
+    assert pol.conflict is not None and pol.fusion is not None
+
+
+def test_plan_names_merge_policies_a_factory_algorithm_replaces():
+    spec = _spec(algorithm="gepa", reflect=_REFLECT, allow=["tests."],
+                 policies={"reflective_merge": {"ref": "reflective_merge",
+                                                "complete": _REFLECT}})
+    payload = cli.plan_payload(spec)
+    joined = " ".join(payload["warnings"])
+    assert "['conflict', 'fusion']" in joined and "'gepa'" in joined
+    assert not [w for w in cli.plan_payload(_spec(algorithm="gepa", reflect=_REFLECT,
+                                                  allow=["tests."]))["warnings"]
+                if "replaced by" in w]

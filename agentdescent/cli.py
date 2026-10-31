@@ -14,12 +14,16 @@ commands on a host with no MCP.
     agentdescent watch   <run_id>                                   follow rounds
     agentdescent show    <run_id> [--diff]                          the evolved tree
     agentdescent apply   <run_id> [--to PATH] [--dry-run]           install it, backed up
+    agentdescent apply   --from PATH --to PATH [--dry-run]          install an on-disk artifact
     agentdescent cancel  <run_id>
     agentdescent resume  <run_id>
+    agentdescent portfolio [archive]                          rank layers, reallocate budget
+    agentdescent exam     [archive] --domain module:builder    re-judge adoptions with an oracle
+    agentdescent audit    <run_id> --archive PATH              trace an adoption's evidence rings
     agentdescent doctor                                             what is installed
     agentdescent --version                                          which AgentDescent this is
-    agentdescent install <dsh|claude-code|codex|opencode>           wire a host
-    agentdescent uninstall <dsh|claude-code|codex|opencode>         undo `install`
+    agentdescent install <dsh|claude-code|codex|opencode|grok-bot>  wire a host
+    agentdescent uninstall <dsh|claude-code|codex|opencode|grok-bot> undo `install`
     agentdescent algorithms list [--kind K] | show <name>           named algorithms for a spec
     agentdescent mcp                                                serve over stdio
     agentdescent serve   [--port N]                                 read-only run panel
@@ -30,13 +34,16 @@ commands on a host with no MCP.
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import difflib
 import json
 import os
+import shlex
 import shutil
 import sys
 import time
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from urllib.parse import urlparse
 
 from . import runstore
 from .evolvespec import (KINDS, EvolveSpec, SpecError, compose, estimate, load_spec,
@@ -130,14 +137,150 @@ def default_agent_ref() -> Tuple[str, bool]:
     return _PLACEHOLDER_AGENT, False
 
 
+#: What ``init`` writes where only the user knows the value (#451): the model a
+#: reflector names and, for a non-OpenAI key, its endpoint. The shipped SKILL.md
+#: says "ask the user for the endpoint and the model; never guess either", and a
+#: guessed pair (``deepseek-v4-flash`` against api.openai.com) passed ``plan``
+#: and failed every call. ``plan`` refuses a spec that still holds one.
+PLACEHOLDER_MODEL = "<your-model>"
+PLACEHOLDER_URL = "<your-endpoint-url>"
+
+
+def starter_model_block(*, model: Optional[str] = None, base_url: Optional[str] = None,
+                        key_env: Optional[str] = None,
+                        keys: Optional[Dict[str, bool]] = None) -> Dict[str, Any]:
+    """The ``openai_compatible`` block ``init`` writes, matched to the keys set here.
+
+    The same reading of the environment ``doctor`` gives (#451): with
+    ``OPENAI_API_KEY`` the adapter's defaults apply; with only another provider
+    key (``ARK_API_KEY``, ``DEEPSEEK_API_KEY``, ...) the block names it in
+    ``api_key_env`` and needs ``default_base_url`` -- otherwise that key would be
+    sent to api.openai.com. The model, and that endpoint, are the user's
+    (``--model`` / ``--base-url``) or a placeholder ``plan`` refuses; never a guess.
+    """
+    if keys is None:
+        keys = doctor_report()["provider_keys_present"]
+    if key_env is None and not keys.get("OPENAI_API_KEY"):
+        from .integrations import provider_key_names
+
+        other = [n for n in provider_key_names()
+                 if keys.get(n) and n not in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY")]
+        if other:
+            key_env = other[0]
+    block: Dict[str, Any] = {"ref": "openai_compatible", "model": model or PLACEHOLDER_MODEL}
+    if key_env and key_env != "OPENAI_API_KEY":
+        block["api_key_env"] = key_env
+        if not base_url and "OPENAI" not in key_env.upper():
+            base_url = PLACEHOLDER_URL
+    if base_url:
+        block["default_base_url"] = base_url
+    return block
+
+
+def _opencode_provider_id(base_url: str) -> str:
+    """The provider id an ``init``-written OpenCode config uses for ``base_url``.
+
+    ``ark`` for Volcengine Ark, matching docs/plugins.md; ``custom`` otherwise.
+    It is only a local name inside the file ``init`` writes, so nothing about
+    the endpoint is guessed from it.
+    """
+    from urllib.parse import urlparse
+
+    host = (urlparse(base_url).hostname or "").lower()
+    return "ark" if host.endswith("volces.com") else "custom"
+
+
+def opencode_coding_recipe(*, model: str, base_url: str, key_env: str,
+                           config_path: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """The ``agent`` block and provider-only config for an isolated OpenCode worker (#485).
+
+    The documented Coding recipe (docs/plugins.md): ``-m <provider>/<model>`` plus
+    ``env.OPENCODE_CONFIG`` naming a file that holds only a ``provider`` block,
+    with the key as ``{env:VAR}`` -- never inline. Returns ``(agent, config)``;
+    the caller writes ``config`` to ``config_path`` (an absolute path).
+    """
+    provider = _opencode_provider_id(base_url)
+    agent = {"ref": "opencode", "extra_args": ["-m", f"{provider}/{model}"],
+             "env": {"OPENCODE_CONFIG": config_path}}
+    config = {
+        "$schema": "https://opencode.ai/config.json",
+        "provider": {provider: {
+            "npm": "@ai-sdk/openai-compatible",
+            "name": "Ark" if provider == "ark" else "Custom",
+            "options": {"baseURL": base_url, "apiKey": "{env:%s}" % key_env},
+            "models": {model: {"name": model}},
+        }},
+    }
+    return agent, config
+
+
+def parse_cli_params(pairs: Optional[Sequence[str]]) -> Dict[str, Any]:
+    """``--param k=v`` -> a JSON-typed dict (bare strings when JSON cannot parse).
+
+    Repeated keys are an error: silently keeping the last one makes a typo or a
+    copied flag look applied.
+    """
+    out: Dict[str, Any] = {}
+    for item in pairs or ():
+        if "=" not in item:
+            raise ValueError(f"--param {item!r} must be KEY=VALUE")
+        key, raw = item.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise ValueError(f"--param {item!r} has an empty name")
+        if key in out:
+            raise ValueError(f"--param {key!r} was given more than once")
+        try:
+            out[key] = json.loads(raw)
+        except ValueError:
+            out[key] = raw
+    return out
+
+
+def algorithm_override(name: Optional[str], params: Optional[Mapping[str, Any]],
+                       kind: str) -> Optional[Any]:
+    """Validate ``--algorithm``/``--param`` for ``kind`` and return the spec value.
+
+    Returns ``None`` when no algorithm was named, the name itself when it takes
+    no parameters, and ``{"name": ..., "params": {...}}`` otherwise. Raises
+    :class:`~agentdescent.algorithms.AlgorithmError` for an unknown name, an
+    unsupported kind or a bad parameter -- the same errors ``plan`` would give,
+    but before a spec is written.
+    """
+    if not name:
+        if params:
+            raise ValueError("--param needs --algorithm")
+        return None
+    from . import algorithms
+
+    alg = algorithms.get(name, where="--algorithm")
+    if kind not in alg.kinds:
+        raise algorithms.AlgorithmError(
+            f"--algorithm {name!r} applies to kind {list(alg.kinds)}, not {kind!r}")
+    algorithms.resolve_params(alg, params)      # validates types/unknowns/choices
+    return name if not params else {"name": name, "params": dict(params)}
+
+
 def starter_spec(path: str, *, kind: Optional[str] = None, data: Optional[str] = None,
-                 agent: Optional[str] = None) -> Dict[str, Any]:
+                 agent: Optional[str] = None,
+                 agent_explicit: bool = False, model: Optional[str] = None,
+                 base_url: Optional[str] = None,
+                 key_env: Optional[str] = None,
+                 algorithm: Optional[str] = None,
+                 algorithm_params: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     """A spec to edit, with ``kind`` guessed from what ``path`` is.
 
     ``agent=None`` picks the worker from the CLIs on PATH (:func:`default_agent_ref`).
+    ``agent_explicit`` says the user named ``agent`` (``init --agent``): it is
+    then kept for every kind instead of being replaced by the kind's default
+    model (#456).
+    ``model`` / ``base_url`` / ``key_env`` fill the ``openai_compatible`` blocks
+    (:func:`starter_model_block`); left out, they are placeholders or follow the
+    keys in the environment.
     """
     if agent is None:
         agent = default_agent_ref()[0]
+    llm = starter_model_block(model=model, base_url=base_url, key_env=key_env)
     p = os.path.expanduser(path)
     if kind is None:
         if os.path.isfile(p):
@@ -160,31 +303,36 @@ def starter_spec(path: str, *, kind: Optional[str] = None, data: Optional[str] =
         "evolve": {"rounds": 6, "n_workers": 4},
     }
     if kind == "text":
-        spec["agent"] = {"ref": "openai_compatible", "model": "deepseek-v4-flash"}
+        if not agent_explicit or agent == "openai_compatible":
+            spec["agent"] = dict(llm)
         spec["evolve"] = {"rounds": 8, "n_workers": 8}
     if kind == "skill_dir":
-        spec["reflect"] = {"ref": "openai_compatible", "model": "deepseek-v4-flash"}
+        spec["reflect"] = dict(llm)
         if agent == "claude_code":
             spec["agent"] = {"ref": "claude_code",
                              "extra_args": ["--permission-mode", "acceptEdits"]}
     if kind == "agent_code":
         spec["entrypoint"] = ["python", "main.py"]
-        spec["reflect"] = {"ref": "openai_compatible", "model": "deepseek-v4-flash"}
+        spec["reflect"] = dict(llm)
     if kind == "plugin":
         spec["host"] = ("claude_code" if os.path.exists(os.path.join(p, ".claude-plugin"))
                         else "dsh")
-        spec["reflect"] = {"ref": "openai_compatible", "model": "deepseek-v4-flash"}
+        spec["reflect"] = dict(llm)
     if kind == "policy_slot":
         # `target` is a slot, not a path, and `data` holds refs rather than rows
         # -- an inner problem is a callable and no row format can express one.
         spec["target"] = path if path in _POLICY_SLOTS else "selection"
         spec["data"] = {"problems": data or "mypkg.problems:build", "seeds": [0]}
         spec["score"] = "auc"
-        spec["agent"] = {"ref": "openai_compatible", "model": "deepseek-v4-flash"}
+        if not agent_explicit or agent == "openai_compatible":
+            spec["agent"] = dict(llm)
         # A round is `n_workers` whole inner searches, so ask for few and budget
         # in wall clock: the recorded run asked for 8 rounds and got 2 in 90 min.
         spec["evolve"] = {"rounds": 4, "n_workers": 2, "max_seconds": 5400}
         spec["allow"] = ["mypkg"]
+    chosen = algorithm_override(algorithm, algorithm_params, spec["kind"])
+    if chosen is not None:
+        spec["algorithm"] = chosen
     return spec
 
 
@@ -213,12 +361,31 @@ def mcp_unavailable() -> Optional[str]:
     return None
 
 
-def doctor_report() -> Dict[str, Any]:
-    """What this machine can run: agent CLIs, provider keys, optional pieces."""
+def doctor_report(*, home: Optional[str] = None) -> Dict[str, Any]:
+    """What this machine can run: agent CLIs, provider keys, optional pieces.
+
+    ``home`` is the same probe directory ``install --home`` / ``uninstall --home``
+    take (#605): host skill/MCP status is read under that tree, and an explicit
+    home wins over ``CODEX_HOME`` / ``DSH_HOME`` / ``XDG_CONFIG_HOME``. Omit it
+    to keep reading the real home (and those variables).
+    """
+    # Refuse an empty home before the per-host try/except can turn it into
+    # ``state: unknown`` (#412 / #605). Same helper install/uninstall use.
+    if home is not None:
+        from .integrations import _resolve_home
+        _resolve_home(home)
     clis = {name: shutil.which(name)
             for name in ("claude", "codex", "dsh", "opencode", "git", "node", "pnpm")}
+    from .integrations import provider_key_names
+
+    # The four names this dict has always had come first, so the output keeps its
+    # order; every other key `FORWARDED_ENV` carries (``ARK_API_KEY``, ...) follows.
+    # One list, not two: it used to be a hard-coded three, and a key every
+    # installer forwards read as "no provider key" (#423).
+    key_names = provider_key_names()
     keys = {name: bool(os.environ.get(name)) for name in (
-        "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL", "DEEPSEEK_API_KEY")}
+        "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL", "DEEPSEEK_API_KEY",
+        *key_names)}
     # The *value* of the base URL, not just its presence: it is a URL and not a
     # secret, and without it a caller writing a spec cannot tell that
     # `OPENAI_API_KEY` points at some other provider entirely. Measured: an
@@ -248,13 +415,32 @@ def doctor_report() -> Dict[str, Any]:
             f"OPENAI_BASE_URL is {base_url} -- an OpenAI-compatible endpoint that "
             "is not OpenAI, so its model names are its own; ask the user which "
             "model to name in a spec rather than assuming an OpenAI one")
-    if not (keys["ANTHROPIC_API_KEY"] or keys["OPENAI_API_KEY"] or keys["DEEPSEEK_API_KEY"]):
+    present_keys = [n for n in key_names if keys[n]]
+    if not present_keys:
         problems.append("no provider key in the environment; a reflector needs one "
                         "(under dsh, forward keys in the mcp-client env block)")
     why = mcp_unavailable()
     if why:
         problems.append(why)
-    hosts, hints = _host_integrations(clis)
+    hosts, hints = _host_integrations(clis, home=home)
+    other = [n for n in present_keys if n not in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")]
+    if other and len(other) == len(present_keys):
+        # `openai_compatible` reads OPENAI_API_KEY and talks to api.openai.com unless
+        # told otherwise, so a key like ARK_API_KEY works only when the spec says so.
+        hints.append(
+            f"only {', '.join(other)} is set: use it with `openai_compatible` and "
+            f'`"api_key_env": "{other[0]}"` plus `default_base_url` (or `base_url_env`) '
+            "for its endpoint; the endpoint and the model name come from the user, "
+            "never guess them")
+    # Reflect is not the only role: an isolated `opencode` worker with a gateway
+    # key still needs the Coding recipe (#455). Same predicate as `init`
+    # (`_opencode_gateway_keys`): warn whenever a gateway key is present, even
+    # alongside OPENAI_API_KEY, so the two commands never disagree.
+    gateway = _opencode_gateway_keys(keys)
+    if gateway and clis.get("opencode"):
+        hints.append(
+            "opencode is on PATH and %s is set: for an isolated worker %s"
+            % (", ".join(gateway), _opencode_coding_recipe(gateway)))
     for name, info in hosts.items():
         if info["state"] in ("stale", "partial"):
             problems.append(
@@ -279,24 +465,27 @@ def doctor_report() -> Dict[str, Any]:
     }
 
 
-def _host_integrations(clis: Dict[str, Any]):
+def _host_integrations(clis: Dict[str, Any], *, home: Optional[str] = None):
     """Per-host install state for :func:`doctor_report`, plus the hints.
 
     A host whose CLI is on ``PATH`` but has no integration gets a *hint*, not a
     problem: ``pip install`` does not wire anything, and nobody wants every
     host on the machine touched, so the exit code stays about what is broken.
     A stale or half-written integration is a problem, because it is installed
-    and teaching the host a procedure the package no longer has."""
+    and teaching the host a procedure the package no longer has.
+    ``home`` is forwarded to :func:`host_status` so ``doctor --home`` matches
+    ``install --home`` (#605)."""
     from .integrations import HOST_CLI, host_status
 
     hosts: Dict[str, Dict[str, Any]] = {}
     hints: List[str] = []
     for name, binary in HOST_CLI.items():
         try:
-            info: Dict[str, Any] = dict(host_status(name))
+            info: Dict[str, Any] = dict(host_status(name, home=home))
         except Exception:  # noqa: BLE001 - reading a config must never fail doctor
             info = {"state": "unknown", "skill": "unknown", "mcp": "unknown", "path": ""}
-        info["cli"] = clis.get(binary)
+        # ``None`` binary: scaffold-only hosts (Grok Bot) have no desktop CLI.
+        info["cli"] = clis.get(binary) if binary else None
         hosts[name] = info
         if info["cli"] and info["state"] == "missing":
             # Installed through the host's own marketplace leaves no files here.
@@ -375,20 +564,185 @@ The skill on disk is untouched -- an evolved artifact only lands when you say so
 Your own run is the same spec with three things changed -- your directory, your
 cases.jsonl, and a real agent instead of the offline one:
 
-  agentdescent init <your-skill-dir> --data <your-cases.jsonl>
+  agentdescent init <your-skill-dir> --data <your-cases.jsonl> --out spec.json
   agentdescent doctor        # what is missing before a real run
   agentdescent plan spec.json""")
     return 0
 
 
+def _starter_model_warnings(spec: Dict[str, Any], out: str) -> List[str]:
+    """What ``init`` says about the blocks it just wrote.
+
+    One answer with ``doctor`` (#451): for ``openai_compatible`` it names the key
+    the block will read -- the one that is set here, not always OPENAI_API_KEY --
+    and every value left for the user to fill in, which ``plan`` refuses until
+    they do. For a bare ``opencode`` worker with only a gateway key (#455), it
+    points at the documented ``OPENCODE_CONFIG`` Coding recipe so ``init`` does
+    not leave a silent ``{"ref": "opencode"}`` that dies on OpenCode's built-in
+    Volcengine default under isolation.
+    """
+    lines: List[str] = []
+    for field in ("agent", "reflect"):
+        block = spec.get(field)
+        if not (isinstance(block, dict) and block.get("ref") == "openai_compatible"):
+            continue
+        key_env = _key_env(block, "OPENAI_API_KEY")
+        todo = [f"`{field}.{k}`" for k in ("model", "default_base_url")
+                if _is_placeholder(block.get(k))]
+        if todo:
+            via = (f" It reads {key_env}, the provider key set here." if key_env != "OPENAI_API_KEY"
+                   and os.environ.get(key_env) else "")
+            lines.append(
+                f"{' and '.join(todo)} in {out} {'is a placeholder' if len(todo) == 1 else 'are placeholders'}"
+                f": the model (and the endpoint for a non-OpenAI key) come from you, never "
+                f"a guess.{via} Fill {'it' if len(todo) == 1 else 'them'} in, or re-run with "
+                "`--model` / `--base-url`; `plan` refuses the spec until then")
+        if not os.environ.get(key_env):
+            # The starter reflector is a model call whatever worker CLI was found,
+            # so a machine with only `opencode` / `claude` gets one it cannot call.
+            # Run, it used to finish `done` with nothing learned (#395).
+            lines.append(
+                f"`{field}` is `openai_compatible` and {key_env} is not set, so every "
+                "call would fail" + (" and the run would learn nothing" if field == "reflect" else "")
+                + ". Export a provider key (`agentdescent doctor` lists the ones it "
+                "knows), or pass `--key-env NAME` for one that is set")
+    # Bare isolated OpenCode + gateway key: same trap `plan` already names (#455).
+    # Warn at init so the written `{"ref": "opencode"}` is not silent.
+    agent = spec.get("agent")
+    if isinstance(agent, dict) and agent.get("ref") == "opencode" and not _opencode_configured(agent):
+        keys = doctor_report()["provider_keys_present"]
+        remedy = _opencode_provider_remedy(agent, keys)
+        if remedy and not _opencode_model_arg(agent):
+            lines.append(
+                f"`agent` in {out} is bare `opencode`: {remedy}. "
+                "See docs/plugins.md (OpenCode Coding / OPENCODE_CONFIG)")
+    return lines
+
+
+#: Built-in short refs by what they resolve to; keep in step with
+#: ``evolvespec.SHORT_REFS`` / ``WORKSPACE_AGENT_REFS``. A full
+#: ``module:attribute`` ref outside these is not checked here (``plan`` does).
+_WORKSPACE_REFS = ("claude_code", "codex", "dsh", "opencode", "cli_agent")
+_PLAIN_REFS = ("openai_compatible", "host_model", "claude", "echo")
+
+
+def init_agent_mismatch(kind: str, ref: str) -> Optional[str]:
+    """Why ``plan`` would refuse agent ``ref`` for ``kind``, or None (#456).
+
+    The same two rules ``compose`` enforces, checked before ``init`` writes a
+    spec that is doomed at ``plan``: a directory kind needs a WorkspaceAgent,
+    and kind=text needs a plain Completion.
+    """
+    short = ref.split(":", 1)[1] if ref.startswith("agentdescent.agents:") else ref
+    if short == "agentdescent.host_sampling:host_model":
+        short = "host_model"
+    if kind in ("skill_dir", "agent_dir") and short in _PLAIN_REFS:
+        return (f"kind={kind!r} needs a WorkspaceAgent "
+                f"({' / '.join(_WORKSPACE_REFS)}) so the directory is put in front "
+                f"of it; `{ref}` is a plain model call")
+    if kind == "text" and short in _WORKSPACE_REFS:
+        return (f"kind='text' needs a plain Completion ({' / '.join(_PLAIN_REFS[:3])}), "
+                f"not a WorkspaceAgent; `{ref}` is a file-editing agent and would "
+                "cost a whole agent session per case")
+    return None
+
+
+#: Common column names ``init --data`` maps onto ``data.prompt`` / ``data.gold``
+#: when the cases file does not use the defaults (#561).
+_PROMPT_ALIASES = ("input", "question", "query", "problem")
+_GOLD_ALIASES = ("expected", "answer", "output", "target")
+
+
+def detect_data_columns(path: Optional[str]) -> Tuple[Dict[str, str], List[str]]:
+    """Read the first row of ``path`` and pick ``prompt``/``gold`` columns (#561).
+
+    Returns ``(mapping, notes)``: ``mapping`` holds only the fields to change
+    from the ``prompt``/``gold`` defaults, ``notes`` the lines to print (prefixed
+    ``warning:`` when nothing matched). A missing or unreadable file returns
+    nothing -- ``init`` already says what to create, and ``plan`` reports bad files.
+    """
+    if not path or not os.path.isfile(os.path.expanduser(path)):
+        return {}, []
+    try:
+        from .evolvespec import _read_rows_file
+        rows = _read_rows_file(path)
+    except Exception:            # plan reports a malformed file with line numbers
+        return {}, []
+    if not rows or not isinstance(rows[0], dict):
+        return {}, []
+    cols = [str(c) for c in rows[0]]
+    mapping: Dict[str, str] = {}
+    notes: List[str] = []
+    for field, default, aliases in (("prompt", "prompt", _PROMPT_ALIASES),
+                                    ("gold", "gold", _GOLD_ALIASES)):
+        if default in cols:
+            continue
+        hits = [c for c in aliases if c in cols]
+        if len(hits) == 1:
+            mapping[field] = hits[0]
+            notes.append(f"data.{field}: using column {hits[0]!r} from {path}")
+        else:
+            why = (f"several candidates ({', '.join(hits)})" if hits
+                   else "no known alias")
+            notes.append(f"warning: data.{field}: {path} has no {default!r} column "
+                         f"and {why}; columns: {', '.join(cols)}. Set "
+                         f'"data": {{"{field}": "<column>"}} in the spec before `plan`')
+    return mapping, notes
+
+
 def cmd_init(a: argparse.Namespace) -> int:
     agent, found = (a.agent, True) if a.agent else default_agent_ref()
-    spec = starter_spec(a.path, kind=a.kind, data=a.data, agent=agent)
+    try:
+        params = parse_cli_params(getattr(a, "param", None))
+        spec = starter_spec(a.path, kind=a.kind, data=a.data, agent=agent,
+                            agent_explicit=bool(a.agent), model=a.model,
+                            base_url=a.base_url, key_env=a.key_env,
+                            algorithm=getattr(a, "algorithm", None),
+                            algorithm_params=params)
+    except ValueError as e:      # AlgorithmError is a ValueError
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    if a.agent:
+        why = init_agent_mismatch(spec["kind"], a.agent)
+        if why:
+            # Refuse before writing: `plan` would reject this spec anyway, and a
+            # spec that silently swaps the user's --agent is worse (#456).
+            print(f"error: --agent {a.agent}: {why}; pick a matching ref "
+                  "(see `agentdescent doctor`) or omit --agent for the default",
+                  file=sys.stderr)
+            return 2
+    column_notes: List[str] = []
+    if spec["kind"] != "policy_slot" and isinstance(spec.get("data"), dict):
+        columns, column_notes = detect_data_columns(a.data)
+        spec["data"].update(columns)
     out = a.out or os.path.join(".agentdescent", f"{os.path.basename(a.path.rstrip('/')) or 'spec'}.evolve.json")
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
+    providers_out = None
+    if spec.get("agent") == {"ref": "opencode"} and a.model and a.base_url:
+        # The user named the model and endpoint, so wire them into the worker
+        # too, not only the reflector: a bare `opencode` would ignore both and
+        # fall back on OpenCode's own default (#485). Without both flags the
+        # bare ref and the #455 warning stay -- nothing is guessed.
+        llm = next((b for b in (spec.get("reflect"), spec.get("agent"))
+                    if isinstance(b, dict) and b.get("ref") == "openai_compatible"), {})
+        key_env = llm.get("api_key_env") or a.key_env or "OPENAI_API_KEY"
+        stem = os.path.splitext(os.path.basename(out))[0]
+        providers_out = os.path.join(os.path.dirname(os.path.abspath(out)),
+                                     f"{stem}.opencode-providers.json")
+        agent_block, providers = opencode_coding_recipe(
+            model=a.model, base_url=a.base_url, key_env=key_env,
+            config_path=providers_out)
+        spec["agent"] = agent_block
+        with open(providers_out, "w", encoding="utf-8") as fh:
+            json.dump(providers, fh, indent=2)
     with open(out, "w", encoding="utf-8") as fh:
         json.dump(spec, fh, indent=2)
     print(f"wrote {out}")
+    for line in column_notes:
+        print(line)
+    if providers_out:
+        print(f"wrote {providers_out} (OpenCode provider-only config for the worker; "
+              f"key read from ${key_env}, never inline)")
     if not found and spec["kind"] not in ("text", "policy_slot"):
         print(f"warning: no worker CLI (claude, codex, dsh, opencode) is on PATH; "
               f"wrote the placeholder agent `{agent}`. Run `agentdescent doctor`, "
@@ -397,17 +751,8 @@ def cmd_init(a: argparse.Namespace) -> int:
     elif a.agent is None and spec["kind"] not in ("text", "policy_slot"):
         print(f"agent: `{agent}` (the worker CLI found on PATH; "
               "override with `--agent <ref>`)")
-    reflect = spec.get("reflect")
-    if (isinstance(reflect, dict) and reflect.get("ref") == "openai_compatible"
-            and not os.environ.get("OPENAI_API_KEY")):
-        # The starter spec's reflector is a plain OpenAI-compatible call whatever
-        # worker CLI was found, so a machine with only `opencode` / `claude`
-        # gets a reflector it cannot call. Run, it used to finish `done` with
-        # nothing learned (#395); say so here, where it is cheapest to fix.
-        print("warning: `reflect` is `openai_compatible` and OPENAI_API_KEY is not set, "
-              "so every proposal would fail and the run would learn nothing. Export "
-              "OPENAI_API_KEY (and OPENAI_BASE_URL for a non-OpenAI endpoint), or "
-              f"change `reflect` in {out} before `plan`")
+    for line in _starter_model_warnings(spec, out):
+        print(f"warning: {line}")
     host = spec.get("host") if spec["kind"] == "plugin" else None
     if host in _CLI_BINARIES and not doctor_report()["agent_clis"].get(_CLI_BINARIES[host]):
         # The plugin's format fixes its host; the worker found on PATH does
@@ -465,17 +810,81 @@ def _opencode_model_arg(block: Any) -> Optional[str]:
     return None
 
 
-def _opencode_provider_remedy(block: Any) -> Optional[str]:
-    """The plan warning's remedy for an isolated ``opencode`` pinning ``-m p/m``.
+def _opencode_has_config(block: Any) -> bool:
+    """The block hands an isolated ``opencode`` its own provider config file."""
+    env = block.get("env") if isinstance(block, dict) else None
+    return isinstance(env, dict) and (
+        "OPENCODE_CONFIG" in env or "OPENCODE_CONFIG_CONTENT" in env)
 
-    ``None`` -- keep the generic remedy -- unless a model with a provider part is
-    pinned and the caller has not already pointed ``OPENCODE_CONFIG`` at a file
-    through the block's ``env``.
+
+def _opencode_configured(block: Any) -> bool:
+    """An isolated ``opencode`` that needs no login: ``-m p/m`` plus a config (#455).
+
+    The documented recipe (``docs/plugins.md``): a pinned ``provider/model`` and
+    ``env.OPENCODE_CONFIG`` naming a provider-only file whose key comes from
+    ``{env:VAR}``. Measured with Ark Coding under isolation, it answers in ~7 s
+    and a 1-round evolve made 4 calls with 0 failures, so "a login does not carry
+    over" is no warning for it.
+    """
+    return bool(_opencode_model_arg(block)) and _opencode_has_config(block)
+
+
+def _opencode_gateway_keys(keys: Optional[Dict[str, bool]]) -> List[str]:
+    """Present gateway keys: set ``*_API_KEY`` other than OpenAI / Anthropic.
+
+    OpenAI / Anthropic accounts serve their provider's default model; a gateway
+    key such as ARK_API_KEY is where OpenCode's default was unusable (#455).
+    One predicate for ``init``, ``plan`` and ``doctor``.
+    """
+    return [n for n, v in (keys or {}).items()
+            if v and n.endswith("_API_KEY")
+            and n not in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY")]
+
+
+def _opencode_coding_recipe(gateway: List[str]) -> str:
+    """The OpenCode Coding worker recipe, concrete only where it was measured.
+
+    Ark wording (Volcengine default, ``ark/deepseek-v4-flash``) only when
+    ARK_API_KEY is among the present keys; any other gateway gets the generic
+    recipe whose provider and model come from the user, never guessed.
+    """
+    if "ARK_API_KEY" in gateway:
+        return ("use the OpenCode Coding recipe in docs/plugins.md: a bare "
+                "`ref: opencode` falls back to OpenCode's built-in Volcengine "
+                "default, which a Coding-only account may not have activated "
+                "(measured with only ARK_API_KEY set: every call failed). Pin the "
+                'model and hand the worker a provider-only config: '
+                '"extra_args": ["-m", "ark/deepseek-v4-flash"], '
+                '"env": {"OPENCODE_CONFIG": "/abs/path/providers.json"} '
+                "(the file as in docs/plugins.md, keys via {env:ARK_API_KEY}, "
+                "never inline)")
+    return ("use the OpenCode Coding recipe in docs/plugins.md: pin "
+            '"extra_args": ["-m", "<provider>/<model>"] and set '
+            '"env": {"OPENCODE_CONFIG": "/abs/path/providers.json"} with the key '
+            "as {env:%s} (never inline); the provider and model come from the "
+            "user, never guess them" % gateway[0])
+
+
+def _opencode_provider_remedy(block: Any, keys: Optional[Dict[str, bool]] = None
+                              ) -> Optional[str]:
+    """The plan warning's remedy for an isolated ``opencode``.
+
+    With ``-m p/m`` pinned and no ``OPENCODE_CONFIG`` in the block's ``env``: the
+    custom-provider trap (#373). With no pin while a provider key is set: the
+    default-model trap (#455) -- OpenCode then picks its own default model for
+    that provider, which the account may not have activated. ``None`` keeps the
+    generic remedy.
     """
     model = _opencode_model_arg(block)
-    env = block.get("env") if isinstance(block, dict) else None
-    if not model or (isinstance(env, dict)
-                     and ("OPENCODE_CONFIG" in env or "OPENCODE_CONFIG_CONTENT" in env)):
+    if not model:
+        present = _opencode_gateway_keys(keys)
+        if not present:
+            return None
+        return (f"a provider key ({', '.join(present)}) is not enough on its own: "
+                "with no `-m`, OpenCode picks its own default model for that "
+                "provider, which the account may not have activated. "
+                + _opencode_coding_recipe(present))
+    if _opencode_has_config(block):
         return None
     return (f"`-m {model}` works only if that provider is built into OpenCode: a "
             "custom provider (an OpenAI-compatible endpoint, a local server, a "
@@ -573,7 +982,7 @@ def require_cli_on_path(spec: EvolveSpec) -> None:
     Shared with :func:`plan_payload` so plan and start fail closed the same way,
     before ``runstore.create`` / ``launch``.
     """
-    msgs = _missing_cli_messages(spec)
+    msgs = _missing_cli_messages(spec) + _placeholder_messages(spec)
     if msgs:
         raise SpecError("; ".join(msgs))
 
@@ -606,12 +1015,68 @@ def require_resume_host_on_path(run_id: str, *, store: Optional[str] = None) -> 
         raise SpecError(f"cannot resume {run_id}: " + "; ".join(msgs))
 
 
+def _is_placeholder(value: Any) -> bool:
+    """A value ``init`` left for the user (``<your-model>``), not a real one."""
+    return isinstance(value, str) and value.startswith("<") and value.endswith(">")
+
+
+def _placeholder_messages(spec: EvolveSpec) -> List[str]:
+    """Hard-fail messages for a starter-spec placeholder that was never filled in (#451).
+
+    ``openai_compatible(model="<your-model>")`` composes fine and fails on every
+    call, so the shape check alone would let it through to a run."""
+    msgs: List[str] = []
+    for field in ("agent", "reflect"):
+        block = getattr(spec, field, None)
+        if not isinstance(block, dict):
+            continue
+        for key, value in block.items():
+            if _is_placeholder(value):
+                msgs.append(f"{field}.{key} is still the placeholder {value!r} that `init` "
+                            "wrote; put the real value there (it comes from the user, "
+                            "never guess it)")
+    return msgs
+
+
 def _key_env(block: Any, default: str, *, field: str = "api_key_env") -> str:
     """The variable the adapter will read: the block's own ``api_key_env`` /
     ``base_url_env`` when the spec sets one, else the adapter's default. A string
     ref (``"reflect": "openai_compatible"``) has no kwargs, so it is the default."""
     name = block.get(field) if isinstance(block, dict) else None
     return name if isinstance(name, str) and name else default
+
+
+_OPENAI_HOST = "api.openai.com"
+
+
+def _key_sent_to_openai(block: Any, key_env: str, url_env: str) -> Optional[str]:
+    """Say so when ``openai_compatible`` would send a non-OpenAI key to OpenAI (#422).
+
+    The adapter's base URL is ``$base_url_env`` when that variable is set, else the
+    block's ``default_base_url``, else ``https://api.openai.com/v1``; the key is
+    sent as ``Authorization: Bearer`` to whatever that resolves to. A key variable
+    that is not OpenAI's (``ARK_API_KEY``) with no endpoint configured therefore
+    ships a third-party secret to OpenAI, and the run fails with a 401 from a host
+    the user never named. This is the part of "will run here" that a shape check
+    cannot see. Only a key that is *set* is warned about -- an unset one has its
+    own warning -- and a name containing ``OPENAI`` (``MY_OPENAI_KEY``) is taken
+    to be an OpenAI key."""
+    if key_env == "OPENAI_API_KEY" or "OPENAI" in key_env.upper():
+        return None
+    default = block.get("default_base_url") if isinstance(block, dict) else None
+    if not (isinstance(default, str) and default):
+        default = f"https://{_OPENAI_HOST}/v1"
+    base = os.environ.get(url_env, default)
+    try:
+        host = urlparse(base).hostname
+    except ValueError:
+        return None
+    if host != _OPENAI_HOST:
+        return None
+    return (f"`openai_compatible` would send {key_env} to {base} ({_OPENAI_HOST}): no "
+            f"other endpoint is configured ({url_env} is unset and `default_base_url` "
+            f"does not name another host), and {key_env} is not an OpenAI key. Set "
+            f"`default_base_url` (the endpoint URL) or export {url_env}")
 
 
 def _unusable_refs(spec: EvolveSpec) -> List[str]:
@@ -660,27 +1125,45 @@ def _unusable_refs(spec: EvolveSpec) -> List[str]:
             if missing:
                 out.append(f"{field}: `claude` is the Anthropic SDK completion (the "
                            f"CLI is `claude_code`) and needs {' and '.join(missing)}")
-        elif ref == "openai_compatible" and not os.environ.get(
-                key_env := _key_env(block, "OPENAI_API_KEY")):
+        elif ref in ("openai_compatible", "agentdescent.agents:openai_compatible"):
+            # The short name and the qualified one resolve to the same adapter, so
+            # both get the preflight (a qualified ref used to skip it).
+            key_env = _key_env(block, "OPENAI_API_KEY")
             url_env = _key_env(block, "OPENAI_BASE_URL", field="base_url_env")
-            out.append(f"{field}: `openai_compatible` needs {key_env} (and "
-                       f"{url_env} for a non-OpenAI endpoint); without it "
-                       + ("every proposal raises and the run fails after two rounds "
-                          "with nothing learned" if field == "reflect"
-                          else "every call raises"))
+            if not os.environ.get(key_env):
+                # Name what *is* set, as `doctor` does: "needs OPENAI_API_KEY" on a
+                # machine with ARK_API_KEY sent users to the wrong fix (#451).
+                # Only for the adapter's default key: a spec that named its own
+                # `api_key_env` chose it, and other keys are not the fix there.
+                present = [n for n, v in keys.items() if v and n.endswith("_KEY")
+                           and n not in (key_env, "ANTHROPIC_API_KEY")
+                           ] if key_env == "OPENAI_API_KEY" else []
+                route = (f"; {', '.join(present)} {'is' if len(present) == 1 else 'are'} "
+                         f'set -- name one with "api_key_env" plus `default_base_url` '
+                         "for its endpoint" if present else "")
+                out.append(f"{field}: `openai_compatible` needs {key_env} (and "
+                           f"{url_env} for a non-OpenAI endpoint){route}; without it "
+                           + ("every proposal raises and the run fails after two rounds "
+                              "with nothing learned" if field == "reflect"
+                              else "every call raises"))
+            else:
+                leak = _key_sent_to_openai(block, key_env, url_env)
+                if leak:
+                    out.append(f"{field}: {leak}")
         elif ref in _CLI_BINARIES:
             binary = _CLI_BINARIES[ref]
             # Missing binary is a hard error via _missing_cli_messages / plan ok
             # and require_cli_on_path (#346); only soft-warn about isolation here.
             isolate = block.get("isolate") if isinstance(block, dict) else None
             if clis.get(binary) and isolate is not False and not keys.get(
-                    _CLI_ENV_FALLBACK.get(ref, ""), False):
+                    _CLI_ENV_FALLBACK.get(ref, ""), False) and not (
+                    ref == "opencode" and _opencode_configured(block)):
                 # The trap that ate a 60-round run: `codex` was on PATH, so
                 # nothing complained, but a worker runs with the host's config
                 # directory redirected -- an interactive login does not carry
                 # over. Every rollout failed. Being present is not being usable.
                 remedy = _CLI_ENV_USELESS.get(ref) or (
-                    ref == "opencode" and _opencode_provider_remedy(block)) or (
+                    ref == "opencode" and _opencode_provider_remedy(block, keys)) or (
                     f"or export {_CLI_ENV_FALLBACK[ref]}"
                     if ref in _CLI_ENV_FALLBACK else
                     "whether a provider key in the environment is enough instead "
@@ -690,6 +1173,28 @@ def _unusable_refs(spec: EvolveSpec) -> List[str]:
                     f'interactive login does not carry over. Set "isolate": false '
                     f"to use the signed-in CLI -- {remedy}")
     return out
+
+
+def _merge_policies_replaced(comp) -> Optional[str]:
+    """Say so when the spec's merge policies will be ignored by a custom aggregator.
+
+    An ``aggregator_factory`` -- the one ``gepa``, ``skillopt`` and ``dgm`` bring --
+    replaces the shipped merge pipeline, so ``conflict``/``fusion`` the spec
+    names never run. ``evolve()`` warns about it at run time; ``plan`` is where
+    that belongs, before a detached run buries it in ``log.txt`` (#504).
+    """
+    if comp.kwargs.get("aggregator_factory") is None:
+        return None
+    installed = comp.kwargs.get("policies")
+    dropped = sorted(name for name in ("conflict", "fusion")
+                     if installed is not None and getattr(installed, name, None) is not None)
+    if not dropped:
+        return None
+    who = (f"algorithm {comp.algorithm['name']!r}" if comp.algorithm
+           else "aggregator_factory")
+    return (f"policies {dropped} are replaced by {who}'s own aggregator and will not "
+            "run; drop them from `policies` (or the algorithm) to silence evolve's "
+            "RuntimeWarning.")
 
 
 def _selection_not_merging(comp) -> Optional[str]:
@@ -732,6 +1237,9 @@ def plan_payload(spec: EvolveSpec, *, usd_per_call: Optional[float] = None) -> D
     selection = _selection_not_merging(comp)
     if selection:
         warnings.append(selection)
+    replaced = _merge_policies_replaced(comp)
+    if replaced:
+        warnings.append(replaced)
     audit = None
     if comp.audit is not None:
         audit = {"store": comp.audit.store.path,
@@ -752,6 +1260,7 @@ def plan_payload(spec: EvolveSpec, *, usd_per_call: Optional[float] = None) -> D
             f"least {_MIN_TASKS_FOR_SPLIT}, then re-run plan)"
         )
     hard_errors.extend(_missing_cli_messages(spec))
+    hard_errors.extend(_placeholder_messages(spec))
     payload = {"ok": not hard_errors, "spec": spec.to_dict(), "tasks": n_tasks,
             "warnings": warnings,
             "artifact_id": spec.artifact_id(),
@@ -766,12 +1275,47 @@ def plan_payload(spec: EvolveSpec, *, usd_per_call: Optional[float] = None) -> D
     return payload
 
 
+def _apply_algorithm_flag(spec: EvolveSpec, a: argparse.Namespace) -> None:
+    """`plan/evolve --algorithm ... --param ...` override the spec in memory.
+
+    A same-name override **merges** params (the CLI wins per key), so
+    `--param b_min=2` on a spec that already set `b_max: 3` keeps `b_max`; a
+    different name replaces the method and its params. `--param` without
+    `--algorithm` tweaks the method the spec already names.
+    """
+    name = getattr(a, "algorithm", None)
+    params = parse_cli_params(getattr(a, "param", None))
+    current = spec.algorithm
+    current_name = (current.get("name") if isinstance(current, dict) else current)
+    current_params = (dict(current.get("params") or {})
+                      if isinstance(current, dict) else {})
+    if not name:
+        if not params:
+            return
+        if not isinstance(current_name, str):
+            raise ValueError("--param needs --algorithm (this spec names none)")
+        name = current_name
+    merged = ({**current_params, **params} if name == current_name else dict(params))
+    spec.algorithm = algorithm_override(name, merged, spec.kind)
+
+
 def cmd_plan(a: argparse.Namespace) -> int:
     spec = load_spec(a.spec)
     try:
+        _apply_algorithm_flag(spec, a)
         payload = plan_payload(spec, usd_per_call=a.usd_per_call)
-    except SpecError as e:
-        _out({"ok": False, "error": str(e)}, as_json=a.json)
+    except (SpecError, ValueError) as e:
+        # JSON only on request; otherwise the same `error: ...` line on stderr
+        # that an unreadable spec file already gets (#551).
+        if a.json:
+            _out({"ok": False, "error": str(e)}, as_json=True)
+        else:
+            print(f"error: {e}", file=sys.stderr)
+        return 2
+    if not a.json and not payload.get("ok", True):
+        # A hard check failed (too few tasks, missing CLI, placeholder): same
+        # human `error: ...` line on stderr as a spec that does not compile (#553).
+        print(f"error: {payload.get('error', 'plan failed')}", file=sys.stderr)
         return 2
     _out(payload, as_json=a.json)
     return 0 if payload.get("ok", True) else 2
@@ -791,8 +1335,9 @@ def _warn_unusable(spec: EvolveSpec) -> None:
 def cmd_evolve(a: argparse.Namespace) -> int:
     spec = load_spec(a.spec)
     try:
+        _apply_algorithm_flag(spec, a)
         comp = compose(spec)                 # fail here, not in the detached child
-    except SpecError as e:
+    except (SpecError, ValueError) as e:
         print(f"spec error: {e}", file=sys.stderr)
         return 2
     # Before create/launch: a missing --usd-per-call must not leave an orphan run
@@ -950,6 +1495,148 @@ def cmd_watch(a: argparse.Namespace) -> int:
         time.sleep(a.interval)
 
 
+#: How many failing rollouts ``show`` lists, how much of each answer it keeps,
+#: and the hard ceiling on the whole ``samples`` block in bytes of JSON, so an
+#: MCP ``show`` stays small however long the agent's answers were (#452).
+SHOW_SAMPLES = 5
+SHOW_SAMPLE_CHARS = 300
+SHOW_SAMPLES_MAX_BYTES = 4096
+
+
+def _head(value: Any, limit: int = SHOW_SAMPLE_CHARS) -> Optional[str]:
+    if value is None:
+        return None
+    text = value if isinstance(value, str) else json.dumps(value, default=str)
+    return text if len(text) <= limit else text[:limit] + "..."
+
+
+def show_samples(rd: "runstore.RunDir", spec: EvolveSpec, rendered: Optional[str], *,
+                 n: int = SHOW_SAMPLES,
+                 max_bytes: int = SHOW_SAMPLES_MAX_BYTES) -> List[Dict[str, Any]]:
+    """The lowest-reward rollouts of the run's final artifact, next to their gold.
+
+    A run that learned nothing used to leave nothing to say why: the reward
+    curve shows *that* the agent missed, never *what* it answered (#452). The
+    engine already records each rollout's boundary (task id, output, reward);
+    this reads those records back. Rollouts of the final artifact come first
+    (its rendering is the record's identity, so the match is exact); if none
+    were recorded against it, every recorded rollout is a candidate. One
+    sample per task, worst first. Diagnostics: any failure yields ``[]``.
+    """
+    try:
+        from .trajectory import TrajectoryStore
+        records = list(TrajectoryStore(rd.trajectories_path).iter_records())
+    except Exception:  # noqa: BLE001 - diagnostics must never break `show`
+        return []
+    if not records:
+        return []
+    own = [r for r in records if rendered is not None and r.rendered == rendered]
+    pool = own or records
+    try:
+        from .evolvespec import build_tasks
+        gold = {t.id: t.meta.get("gold") for t in build_tasks(spec)}
+    except Exception:  # noqa: BLE001 - the dataset may have moved since the run
+        gold = {}
+    pool.sort(key=lambda r: (r.reward, r.task_id, r.purpose, r.ts))
+    out: List[Dict[str, Any]] = []
+    seen = set()
+    for r in pool:
+        if r.task_id in seen:
+            continue
+        seen.add(r.task_id)
+        raw_gold = gold.get(r.task_id)
+        out.append({"task_id": r.task_id, "reward": r.reward,
+                    "output": _head(r.output), "gold": _head(raw_gold),
+                    "output_truncated": len(str(r.output)) > SHOW_SAMPLE_CHARS,
+                    "gold_truncated": (raw_gold is not None
+                                       and len(str(raw_gold)) > SHOW_SAMPLE_CHARS),
+                    "purpose": r.purpose,
+                    "of": "final" if own else "any"})
+        if len(out) >= n:
+            break
+    while out and len(json.dumps(out, default=str).encode("utf-8")) > max_bytes:
+        out.pop()
+    return out
+
+
+#: How many rejected candidates ``show`` lists, and the byte ceiling on the
+#: block -- both files are diagnostic, so an MCP payload must stay small (#452).
+SHOW_REJECTED = 5
+SHOW_REJECTED_MAX_BYTES = 4096
+
+
+def show_rejected(rd: "runstore.RunDir", *, n: int = SHOW_REJECTED,
+                  max_bytes: int = SHOW_REJECTED_MAX_BYTES) -> List[Dict[str, Any]]:
+    """The last few diffs the merger measured and did not adopt (#452).
+
+    ``runstore.execute`` writes one line per rejected candidate: touched files,
+    a short diff, the rationale, the gated probability and the outcome. That is
+    the other half of "why did this run learn nothing" -- the rollouts say what
+    the agent answered, these say what the reflector tried to change. Read from
+    the tail so a long run stays cheap; any failure yields ``[]``.
+    """
+    try:
+        with open(rd.candidates_path, encoding="utf-8", errors="replace") as fh:
+            lines = deque(fh, maxlen=200)
+    except (OSError, AttributeError):
+        return []
+    out: List[Dict[str, Any]] = []
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(record, dict):
+            out.append(record)
+        if len(out) >= n:
+            break
+    out.reverse()
+    while out and len(json.dumps(out, default=str).encode("utf-8")) > max_bytes:
+        out.pop(0)
+    return out
+
+
+#: How many rounds a resultless ``show`` lists (the latest ones).
+SHOW_HISTORY = 20
+
+
+def _partial_show(rd: "runstore.RunDir", st: Any) -> Dict[str, Any]:
+    """What ``show`` can say about a run that has no result (#466)."""
+    out: Dict[str, Any] = {}
+    try:
+        rounds = rd.rounds()
+    except Exception:  # noqa: BLE001 - diagnostics must never break `show`
+        rounds = []
+    if rounds:
+        out["rounds"] = len(rounds)
+        keep = ("round", "held_out_reward", "committed", "rejected", "reasons",
+                "propose_errors", "propose_error")
+        out["history"] = [{k: r[k] for k in keep if r.get(k) not in (None, {})}
+                          for r in rounds[-SHOW_HISTORY:]]
+    if getattr(st, "best_reward", None) is not None:
+        out["best_reward"] = st.best_reward
+    perr = getattr(st, "propose_errors", 0) or sum(
+        int(r.get("propose_errors") or 0) for r in rounds)
+    if perr:
+        out["propose_errors"] = perr
+        out["propose_error"] = getattr(st, "propose_error", None) or next(
+            (r.get("propose_error") for r in rounds if r.get("propose_error")), None)
+    try:
+        spec = EvolveSpec.from_dict(rd.spec_dict())
+        samples = show_samples(rd, spec, None)
+    except Exception:  # noqa: BLE001
+        samples = []
+    if samples:
+        out["samples"] = samples
+    rejected = show_rejected(rd)
+    if rejected:
+        out["rejected"] = rejected
+    return out
+
+
 def show_payload(run_id: str, *, store: Optional[str] = None, diff: bool = True,
                  max_chars: int = 40_000) -> Dict[str, Any]:
     rd = runstore.get(run_id, store=store)
@@ -958,6 +1645,12 @@ def show_payload(run_id: str, *, store: Optional[str] = None, diff: bool = True,
     payload: Dict[str, Any] = {"run_id": run_id, "state": st.state,
                                "stop_reason": st.stop_reason, "error": st.error}
     if result is None:
+        # A failed, cancelled or still-running run has no artifact and no diff,
+        # but what it did is on disk: the rounds that finished, the reflector
+        # error, the recorded rollouts. Those are the runs most in need of a
+        # diagnosis, so say what is known instead of only "no result yet"
+        # (#466). A run with nothing recorded is unchanged.
+        payload.update(_partial_show(rd, st))
         payload["note"] = "no result yet"
         return payload
     payload.update(final_reward=result.final_reward, outcomes=result.outcomes(),
@@ -970,6 +1663,15 @@ def show_payload(run_id: str, *, store: Optional[str] = None, diff: bool = True,
         payload["propose_error"] = next(
             (h.propose_error for h in result.history if h.propose_error), None)
     spec = EvolveSpec.from_dict(rd.spec_dict())
+    # Why the reward is what it is (#452): the worst rollouts of the final
+    # artifact, output vs gold. Only when some were recorded, so a run with
+    # `record_rollouts: false` (or one from before #452) is unchanged.
+    samples = show_samples(rd, spec, getattr(result, "rendered", None))
+    if samples:
+        payload["samples"] = samples
+    rejected = show_rejected(rd)
+    if rejected:
+        payload["rejected"] = rejected
     # What `apply` would overwrite, on every kind. Without it the caller can see
     # the evolved artifact and still not know which file it belongs to -- and an
     # agent that cannot name the file it is about to overwrite is right to
@@ -1013,9 +1715,21 @@ def cmd_show(a: argparse.Namespace) -> int:
         _out(payload, as_json=True)
         return 0
     for k in ("run_id", "state", "stop_reason", "error", "final_reward", "outcomes",
-              "propose_errors", "propose_error", "note"):
+              "best_reward", "propose_errors", "propose_error", "note"):
         if payload.get(k) is not None:
             print(f"{k}: {payload[k]}")
+    if payload.get("history"):
+        print("rounds so far:")
+        for h in payload["history"]:
+            line = f"  round {h.get('round')}"
+            if h.get("held_out_reward") is not None:
+                line += f"  held_out_reward={h['held_out_reward']:.3f}"
+            for k in ("committed", "rejected", "propose_errors"):
+                if h.get(k):
+                    line += f"  {k}={h[k]}"
+            if h.get("propose_error"):
+                line += f"  propose_error={h['propose_error']!r}"
+            print(line)
     if "rendered" in payload:
         print("\n" + payload["rendered"])
     if payload.get("diff"):
@@ -1024,6 +1738,25 @@ def cmd_show(a: argparse.Namespace) -> int:
         print("files:", ", ".join(payload["files"]))
     if payload.get("apply_plan"):
         print("apply would:", json.dumps(payload["apply_plan"]))
+    if payload.get("samples"):
+        print("\nlowest-reward rollouts (output vs gold):")
+        for smp in payload["samples"]:
+            print(f"  {smp['task_id']}  reward={smp['reward']:.3f}  "
+                  f"output={smp['output']!r}  gold={smp['gold']!r}")
+    if payload.get("rejected"):
+        print("\nrejected candidates (what the reflector tried):")
+        for rec in payload["rejected"]:
+            head = f"  round {rec.get('round', '?')}  {rec.get('outcome', 'rejected')}"
+            if rec.get("gated_reward") is not None:
+                head += f"  p_improve={rec['gated_reward']:.3f}"
+            print(head)
+            if rec.get("rationale"):
+                print(f"    rationale: {rec['rationale']}")
+            if rec.get("files"):
+                print(f"    files: {', '.join(rec['files'])}")
+            if rec.get("diff"):
+                for line in str(rec["diff"]).splitlines()[:8]:
+                    print(f"      {line}")
     return 0
 
 
@@ -1088,14 +1821,174 @@ def apply_payload(run_id: str, *, to: Optional[str] = None, store: Optional[str]
     return plan
 
 
+def _backup_slot(dest: str) -> str:
+    n = 0
+    while os.path.exists(f"{dest}.bak-{n}"):
+        n += 1
+    return f"{dest}.bak-{n}"
+
+
+def apply_from_payload(source: str, *, to: str, dry_run: bool = False,
+                       backup: bool = True) -> Dict[str, Any]:
+    """Install an artifact that lives on disk, not in the run store (#533).
+
+    ``agentdescent campaign`` leaves its best artifact in a workspace copy and
+    keeps no run id, so ``apply <run_id>`` has nothing to point at. This takes
+    the artifact path itself and gives it the same guarantees: a dry-run plan,
+    a ``.bak-N`` backup of whatever ``to`` held, and a no-op when ``to`` already
+    matches. Files in ``to`` that the artifact does not have are reported as
+    ``extra`` and left alone.
+
+    Symlinks are refused (never dereferenced into real files). ``apply
+    <run_id>`` materialises from FileTree state, which already skips symlinks
+    at load time; a campaign workspace written by worker CLIs must not be able
+    to smuggle ``~/.ssh`` / ``/etc/hostname`` content into ``--to`` via a link.
+    """
+    src = os.path.abspath(os.path.expanduser(source))
+    dest = os.path.abspath(os.path.expanduser(to))
+    if src == dest:
+        raise runstore.RunStoreError(f"--from and --to are the same path: {src}")
+    # ``isfile`` / ``isdir`` follow the final link; catch the source itself first.
+    if os.path.islink(src):
+        raise runstore.RunStoreError(
+            f"--from {src} is a symlink; refuse to apply (would dereference)")
+    if os.path.isfile(src):
+        if os.path.isdir(dest):
+            raise runstore.RunStoreError(
+                f"{src} is a file but --to {dest} is a directory; name the file")
+        try:
+            with open(src, encoding="utf-8", newline="") as fh:
+                rendered = fh.read()
+        except (OSError, UnicodeDecodeError) as e:
+            raise runstore.RunStoreError(f"cannot read {src}: {e}") from None
+        plan = _text_plan(dest, rendered)
+        if dry_run:
+            return {**plan, "source": src, "dest": dest}
+        if plan["noop"]:
+            return {"written": [], "unchanged": [dest], "backup": [], "noop": True,
+                    "source": src, "dest": dest}
+        saved = []
+        if backup and os.path.exists(dest):
+            slot = _backup_slot(dest)
+            shutil.copy2(dest, slot)
+            saved = [slot]
+        parent = os.path.dirname(dest)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(dest, "w", encoding="utf-8", newline="") as fh:
+            fh.write(rendered)
+        return {"written": [dest], "unchanged": [], "backup": saved, "noop": False,
+                "source": src, "dest": dest}
+    if not os.path.isdir(src):
+        raise runstore.RunStoreError(f"--from {src} does not exist")
+    if os.path.isfile(dest):
+        raise runstore.RunStoreError(
+            f"{src} is a directory but --to {dest} is a file")
+
+    def _files(root: str, *, refuse_symlinks: bool = False) -> List[str]:
+        """Real files only. With ``refuse_symlinks``, raise if any link is under root.
+
+        ``os.walk`` lists symlink-to-file names in ``filenames`` and, with the
+        default ``followlinks=False``, leaves symlink dirs in ``dirnames``
+        without descending. Either form used to be fed to ``shutil.copy2``,
+        which follows the link and wrote the target's bytes into ``--to``.
+        Dest walks keep ``refuse_symlinks=False`` so a pre-existing link in
+        ``--to`` is left alone (and not listed as ``extra``).
+        """
+        out: List[str] = []
+        links: List[str] = []
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = sorted(d for d in dirnames if d not in (".git", "__pycache__"))
+            for d in list(dirnames):
+                full_d = os.path.join(dirpath, d)
+                if os.path.islink(full_d):
+                    rel_d = os.path.relpath(full_d, root).replace(os.sep, "/")
+                    links.append(rel_d + "/")
+                    dirnames.remove(d)
+            for fname in sorted(filenames):
+                full = os.path.join(dirpath, fname)
+                rel = os.path.relpath(full, root).replace(os.sep, "/")
+                if os.path.islink(full):
+                    links.append(rel)
+                else:
+                    out.append(rel)
+        if refuse_symlinks and links:
+            shown = ", ".join(links[:5]) + ("…" if len(links) > 5 else "")
+            raise runstore.RunStoreError(
+                f"--from {root} contains symlink(s) ({shown}); refuse to apply "
+                "(would dereference into real files). Remove the links or replace "
+                "them with real files, matching apply <run_id> which never "
+                "materialises symlinks.")
+        return out
+
+    def _same(a_path: str, b_path: str) -> bool:
+        try:
+            # Do not treat a dest symlink as "already matches" via its target.
+            if os.path.islink(b_path) or not os.path.isfile(b_path):
+                return False
+            with open(a_path, "rb") as fa, open(b_path, "rb") as fb:
+                if fa.read() != fb.read():
+                    return False
+            return (os.stat(a_path).st_mode & 0o111) == (os.stat(b_path).st_mode & 0o111)
+        except OSError:
+            return False
+
+    planned = _files(src, refuse_symlinks=True)
+    unchanged = [rel for rel in planned
+                 if _same(os.path.join(src, rel), os.path.join(dest, rel))]
+    changed = [rel for rel in planned if rel not in set(unchanged)]
+    # Dest extras: real files only; a stray symlink in --to is left alone.
+    extra = (sorted(set(_files(dest)) - set(planned))
+             if os.path.isdir(dest) else [])
+    plan: Dict[str, Any] = {"written": changed, "unchanged": unchanged, "extra": extra,
+                            "deleted": [], "backup": [], "noop": not changed,
+                            "source": src, "dest": dest}
+    if dry_run or plan["noop"]:
+        return plan
+    if backup and os.path.isdir(dest):
+        slot = _backup_slot(dest)
+        shutil.copytree(dest, slot, symlinks=True)
+        plan["backup"] = [slot]
+    for rel in changed:
+        out = os.path.join(dest, rel.replace("/", os.sep))
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        # Source entries are guaranteed non-links by `_files`; still refuse to
+        # follow if the tree changed under us.
+        src_path = os.path.join(src, rel.replace("/", os.sep))
+        if os.path.islink(src_path):
+            raise runstore.RunStoreError(
+                f"--from {src} contains symlink(s) ({rel}); refuse to apply "
+                "(would dereference into real files)")
+        shutil.copy2(src_path, out)
+    return plan
+
+
 def cmd_apply(a: argparse.Namespace) -> int:
-    payload = apply_payload(a.run_id, to=a.to, store=a.store, dry_run=a.dry_run,
-                            backup=not a.no_backup)
+    source = getattr(a, "source", None)
+    if source:
+        if a.run_id:
+            print("error: pass a run_id or --from PATH, not both", file=sys.stderr)
+            return 2
+        if not a.to:
+            print("error: --from needs --to PATH (where to install the artifact)",
+                  file=sys.stderr)
+            return 2
+        payload = apply_from_payload(source, to=a.to, dry_run=a.dry_run,
+                                     backup=not a.no_backup)
+        what = source
+    else:
+        if not a.run_id:
+            print("error: apply needs a run_id, or --from PATH --to PATH",
+                  file=sys.stderr)
+            return 2
+        payload = apply_payload(a.run_id, to=a.to, store=a.store, dry_run=a.dry_run,
+                                backup=not a.no_backup)
+        what = f"run {a.run_id}"
     _out(payload, as_json=True)
     if payload.get("noop"):
         # After the JSON, on stderr: stdout stays one machine-readable document.
         print(f"nothing to apply: {payload.get('dest') or '(target)'} already matches "
-              f"run {a.run_id}", file=sys.stderr)
+              f"{what}", file=sys.stderr)
     return 0
 
 
@@ -1124,22 +2017,52 @@ def cmd_resume(a: argparse.Namespace) -> int:
 
 
 def cmd_doctor(a: argparse.Namespace) -> int:
-    rep = doctor_report()
+    home = getattr(a, "home", None)
+    try:
+        rep = doctor_report(home=home) if home is not None else doctor_report()
+    except ValueError as e:        # e.g. an empty --home (#412 / #605)
+        raise SpecError(f"doctor: {e}") from None
     if a.json:
         _out(rep, as_json=True)
     else:
         for k, v in rep.items():
             if k not in ("problems", "hosts", "hints"):
                 print(f"{k}: {v}")
+        unwired: List[str] = []
         for name, info in rep["hosts"].items():
-            print(f"host {name}: {info['state']}"
-                  + (f" (cli {info['cli']})" if info["cli"] else " (cli not on PATH)"))
+            if info["state"] == "missing" and info["cli"]:
+                # The CLI is here; only the integration is not. Calling that
+                # "missing" read like the CLI was absent (#535).
+                print(f"host {name}: not installed (cli {info['cli']})"
+                      f" -> agentdescent install {name}")
+                unwired.append(name)
+            elif info["state"] == "missing":
+                # Grok Bot has no desktop CLI; "no cli on PATH" would always be true
+                # and hide the install path (#165 grok-bot scaffold).
+                if name == "grok-bot":
+                    print(f"host {name}: not installed "
+                          f"-> agentdescent install {name}")
+                else:
+                    print(f"host {name}: no cli on PATH")
+            else:
+                # skill/mcp on the host line itself so stale vs MCP-missing is
+                # inspectable without reading the problems section (#165).
+                cli_bit = (f"cli {info['cli']}" if info["cli"] else "cli not on PATH")
+                print(f"host {name}: {info['state']} "
+                      f"(skill {info['skill']}, mcp {info['mcp']}; {cli_bit})")
         for h in rep["hints"]:
             print(f"- {h}")
         for p in rep["problems"]:
             print(f"! {p}")
         if not rep["problems"]:
-            print("ok: nothing missing")
+            # "nothing missing" contradicted the host lines above whenever a
+            # CLI was present but unwired (#535).
+            summary = "ok: no blocking problems"
+            if len(unwired) == 1:
+                summary += f" (1 host can be wired: {unwired[0]})"
+            elif unwired:
+                summary += f" ({len(unwired)} hosts can be wired: {', '.join(unwired)})"
+            print(summary)
     return 0 if not rep["problems"] else 1
 
 
@@ -1165,11 +2088,269 @@ def _algorithm_card_text(card: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# The meta stack on the command line: portfolio, exam, audit
+# ---------------------------------------------------------------------------
+
+
+def _archive_root(archive: Optional[str]) -> str:
+    """The consolidation archive a meta command reads: ``--archive``, else
+    ``$AGENTDESCENT_HOME/archive``, else ``~/.agentdescent/archive``."""
+    if archive:
+        return os.path.abspath(os.path.expanduser(archive))
+    home = os.environ.get("AGENTDESCENT_HOME") or "~/.agentdescent"
+    return os.path.join(os.path.abspath(os.path.expanduser(home)), "archive")
+
+
+def _missing_archive(root: str) -> bool:
+    """Report a missing archive the way ``safety`` does and return True.
+
+    The read-only archive commands must not create ``root`` as a side effect
+    of opening it: ``ConsolidationStore`` makes its directory, so a typo'd path
+    used to come back as an empty-but-valid archive (#502). The message names
+    the only writer (#512)."""
+    if os.path.isdir(root):
+        return False
+    from .consolidation import missing_archive_message
+    print(f"error: {missing_archive_message(root)}", file=sys.stderr)
+    return True
+
+
+def _load_ref(ref: str) -> Any:
+    """Resolve ``module:attribute`` to the object it names."""
+    if ":" not in ref:
+        raise SpecError(f"expected 'module:attribute', got {ref!r}")
+    module_name, attr = ref.rsplit(":", 1)
+    try:
+        module = __import__(module_name, fromlist=[attr])
+        return getattr(module, attr)
+    except (ImportError, AttributeError) as error:
+        raise SpecError(f"cannot resolve {ref!r}: {error}") from error
+
+
+class MetaCommandError(Exception):
+    """A read-only meta command (portfolio / safety / audit trace) cannot answer.
+
+    ``code`` is the CLI exit status: 2 for a missing archive or store, an
+    unknown run or a bad argument; 1 when the archive exists but holds nothing
+    to report on. The MCP tools return the message as ``{"error": ...}``.
+    """
+
+    def __init__(self, message: str, code: int = 2) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def _require_archive(root: str) -> None:
+    """Refuse a missing archive *before* anything opens it (#502 / #512).
+
+    ``ConsolidationStore`` makes its directory by default, so a typo'd path
+    would come back as an empty-but-valid archive. The message names the only
+    writer so a plugin host does not invent a nonexistent next step."""
+    if not os.path.isdir(root):
+        from .consolidation import missing_archive_message
+        raise MetaCommandError(missing_archive_message(root))
+
+
+def _require_file(flag: str, path: str) -> None:
+    if not os.path.isfile(os.path.expanduser(path)):
+        raise MetaCommandError(f"{flag} store {path!r} does not exist")
+
+
+def _meta_error(error: MetaCommandError) -> int:
+    print(f"error: {error}" if error.code == 2 else str(error), file=sys.stderr)
+    return error.code
+
+
+def portfolio_payload(archive: Optional[str] = None, *, floor: float = 0.05,
+                      min_samples: int = 3, grow: float = 0.5,
+                      shrink: float = 0.5,
+                      cap: Optional[float] = None) -> Dict[str, Any]:
+    """What ``agentdescent portfolio --json`` prints, for the CLI and the MCP
+    ``portfolio`` tool alike. Reports a reallocation; writes nothing."""
+    from .consolidation import ConsolidationStore
+    from .portfolio import layers_from_archive, portfolio_report
+
+    root = _archive_root(archive)
+    _require_archive(root)
+    layers = layers_from_archive(ConsolidationStore(root, create=False))
+    if not layers:
+        raise MetaCommandError(
+            f"no rule records under {root} to build layers from; "
+            f"run continuous_meta_run (or a meta session) first", code=1)
+    report = portfolio_report(layers, floor=floor, min_samples=min_samples,
+                              grow=grow, shrink=shrink, cap=cap)
+    return {
+        "archive": root,
+        "total_budget": report.total_budget,
+        "layers": [{"name": l.name, "budget": l.budget, "spent": l.spent,
+                    "return_": l.return_, "samples": l.samples,
+                    "return_sd": l.return_sd,
+                    "diminishing": l.diminishing} for l in report.layers],
+        "reallocated": report.reallocated,
+        "reasons": report.reasons,
+    }
+
+
+def cmd_portfolio(a: argparse.Namespace) -> int:
+    """``agentdescent portfolio [archive]`` -- rank the archive's layers and
+    reallocate the next budget window."""
+    try:
+        payload = portfolio_payload(
+            getattr(a, "archive", None), floor=a.floor,
+            min_samples=a.min_samples, grow=a.grow, shrink=a.shrink, cap=a.cap)
+    except MetaCommandError as error:
+        return _meta_error(error)
+    if a.json:
+        _out(payload, as_json=True)
+        return 0
+    for layer in payload["layers"]:
+        spent = layer["spent"]
+        rpc = (layer["return_"] / spent) if spent > 0 else 0.0
+        new = payload["reallocated"][layer["name"]]
+        print(f"{layer['name']}: return-per-cost {rpc:.3f} "
+              f"(return {layer['return_']:.3f} / spend {spent:.1f}, "
+              f"{layer['samples']} measurements) -> budget {new:.1f}")
+        print(f"    {payload['reasons'][layer['name']]}")
+    print(f"archive: {payload['archive']}  "
+          f"(total budget {payload['total_budget']:.1f})")
+    return 0
+
+
+def cmd_exam(a: argparse.Namespace) -> int:
+    """``agentdescent exam [archive] --domain module:builder`` -- re-judge the
+    archive's adopted rules with an independent oracle."""
+    from .consolidation import ConsolidationStore
+    from .meta_exam import exam_archive
+
+    root = _archive_root(getattr(a, "archive", None))
+    if _missing_archive(root):
+        return 2
+    domain = _load_ref(a.domain)
+    built = domain() if callable(domain) and not isinstance(domain, dict) else domain
+    if not isinstance(built, Mapping):
+        raise SpecError("--domain must resolve to a builder that returns a dict "
+                        "with keys: oracle, tasks_for, run, reward, propose, "
+                        "strategy (and optionally slot, spec)")
+    store = ConsolidationStore(root, create=False)
+    config = None
+    if getattr(a, "config", None) is not None:
+        try:
+            config = json.loads(a.config)
+        except json.JSONDecodeError as error:
+            raise SpecError(f"--config must be a JSON dict, got {a.config!r}: {error}")
+        if not isinstance(config, dict):
+            raise SpecError(f"--config must be a JSON dict, got "
+                            f"{type(config).__name__}")
+    report = exam_archive(
+        store, slot=a.slot,
+        spec=built.get("spec") or _slot_spec(a.slot),
+        oracle=built["oracle"], tasks_for=built["tasks_for"],
+        run=built["run"], reward=built["reward"], propose=built["propose"],
+        strategy=built["strategy"], config=config,
+        min_gain=a.min_gain, max_flags=a.max_flags)
+    if a.json:
+        _out({"archive": root, "slot": a.slot, "passed": report.passed,
+              "flagged": report.flagged, "demoted": report.demoted,
+              "examined": [{**({"run_id": e.run_id, "oracle_gain": e.oracle_gain,
+                                "verdict": e.verdict, "reason": e.reason})}
+                           for e in report.examined]}, as_json=True)
+        return 0
+    print(f"{report.reason}  (archive: {root})")
+    for e in report.examined:
+        print(f"  {e.run_id}: {e.verdict}  (oracle gain {e.oracle_gain:+.3f}) "
+              f"{e.reason}")
+    return 0
+
+
+def _slot_spec(slot: str) -> Any:
+    from .meta import policy_source, priority_selection
+    from .meta import SLOTS
+    if slot not in SLOTS:
+        raise SpecError(f"--slot must be an evolvable slot, one of {SLOTS}; "
+                        f"got {slot!r}")
+    if slot == "selection":
+        return priority_selection()
+    return policy_source(slot)
+
+
+def audit_trace_payload(run_id: str, *, archive: Optional[str] = None,
+                        meta_audit: Optional[str] = None,
+                        inner_audit: Optional[str] = None,
+                        harness: Any = None,
+                        bias_threshold: float = 0.1) -> Dict[str, Any]:
+    """What ``agentdescent audit <run_id> --json`` prints, for the CLI and the
+    MCP ``audit_trace`` tool alike. ``harness`` is an already-resolved
+    callable: resolving a ``module:attr`` runs code, so only the CLI does it."""
+    from .chain_audit import chain_audit
+    from .consolidation import ConsolidationStore
+    from .meta_audit import MetaAuditStore
+
+    root = _archive_root(archive)
+    _require_archive(root)
+    if meta_audit:
+        _require_file("--meta-audit", meta_audit)
+    if inner_audit:
+        _require_file("--inner-audit", inner_audit)
+    store = ConsolidationStore(root, create=False)
+    meta = MetaAuditStore(meta_audit) if meta_audit else None
+    inner = None
+    if inner_audit:
+        from .audit import AuditStore
+        inner = AuditStore(inner_audit)
+    try:
+        report = chain_audit(store, run_id, meta_audit=meta, inner_audit=inner,
+                             harness_evidence=harness,
+                             bias_threshold=bias_threshold)
+    except KeyError as error:
+        # str(KeyError) wraps the message in quotes; report the message
+        # itself, as an unknown-run error like every other (#481).
+        raise MetaCommandError(
+            str(error.args[0] if error.args else error)) from None
+    return {"run_id": run_id, "verified": report.verified, "reason": report.reason,
+            "links": [{"layer": l.layer, "status": l.status,
+                       "evidence": l.evidence, "reason": l.reason}
+                      for l in report.links]}
+
+
+def cmd_audit(a: argparse.Namespace) -> int:
+    """``agentdescent audit <run_id> --archive PATH`` -- trace one adoption
+    through its evidence rings."""
+    try:
+        root = _archive_root(a.archive)
+        _require_archive(root)
+        harness = None
+        if a.harness:
+            fn = _load_ref(a.harness)
+            if not callable(fn):
+                raise SpecError(f"--harness {a.harness!r} does not resolve to a "
+                                f"callable ({type(fn).__name__})")
+            harness = fn
+        payload = audit_trace_payload(
+            a.run_id, archive=a.archive, meta_audit=a.meta_audit,
+            inner_audit=a.inner_audit, harness=harness,
+            bias_threshold=a.bias_threshold)
+    except MetaCommandError as error:
+        return _meta_error(error)
+    if a.json:
+        _out(payload, as_json=True)
+        return 0
+    print(f"run {payload['run_id']}: "
+          f"{'VERIFIED' if payload['verified'] else 'NOT VERIFIED'}")
+    print(f"  {payload['reason']}")
+    for link in payload["links"]:
+        print(f"  {link['layer']}: {link['status']}  {link['reason']}")
+    return 0
+
+
 def cmd_algorithms(a: argparse.Namespace) -> int:
     from . import algorithms
 
+    for name, error in sorted(algorithms.external_errors().items()):
+        print(f"warning: algorithm plugin {name!r} failed to load: {error}",
+              file=sys.stderr)
     as_json = a.json
-    if a.action == "list":
+    if a.action in (None, "list"):
         if a.kind is not None and a.kind not in KINDS:
             raise SpecError(f"--kind must be one of {list(KINDS)}, got {a.kind!r}")
         found = algorithms.listing(a.kind)
@@ -1182,12 +2363,217 @@ def cmd_algorithms(a: argparse.Namespace) -> int:
             for x in found:
                 print(f"{x.name:<{width}}  {x.fidelity:<19}  {','.join(x.kinds):<42}  {x.summary}")
         return 0
+    if a.kind is not None:
+        # The group accepts --kind for the bare listing; `show` names one
+        # algorithm, so a filter there would be silently ignored (#549).
+        raise SpecError("--kind filters `algorithms list`; `algorithms show` takes only a name")
     try:
         card = algorithms.get(a.name, where="show").describe()
     except algorithms.AlgorithmError as e:
         raise SpecError(str(e)) from None
     _out(card if as_json else _algorithm_card_text(card), as_json=as_json)
     return 0
+
+
+def cmd_diagnose(a: argparse.Namespace) -> int:
+    """``agentdescent diagnose`` -- why did this run end where it did?"""
+    from .diagnose import diagnose_payload
+
+    try:
+        report = diagnose_payload(a.run_id, store=a.store)
+    except runstore.RunStoreError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    if a.json:
+        _out(report.to_dict(), as_json=True)
+        return 0
+    print(f"{report.verdict}: {report.summary}")
+    if report.evidence:
+        print("evidence:", json.dumps(report.evidence, default=str)[:1200])
+    for line in report.recommendations:
+        print(f"  next: {line}")
+    return 0
+
+
+def cmd_rsi(a: argparse.Namespace) -> int:
+    """``agentdescent rsi`` -- is the archive still getting better over time?"""
+    from .rsi import rsi_report
+
+    root = _archive_root(getattr(a, "archive", None))
+    if _missing_archive(root):
+        return 2
+    try:
+        report = rsi_report(
+            root, slot=getattr(a, "slot", None),
+            stagnation_window=getattr(a, "stagnation_window", 3))
+    except (FileNotFoundError, ValueError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    if a.json:
+        _out(report.to_dict(), as_json=True)
+        return 0
+    print(f"{report.verdict}: {report.summary}")
+    if report.evidence:
+        print("evidence:", json.dumps(report.evidence, default=str)[:1200])
+    for line in report.recommendations:
+        print(f"  next: {line}")
+    return 0
+
+
+    print(f"verdict: {report.verdict}  ({report.reason})")
+    print(f"archive: {root}  rules: {report.total_rules}")
+    if not report.slots:
+        print("no adopted rules with a slot descriptor yet; run more sessions")
+        return 0
+    width = max(len(name) for name in report.slots)
+    print(f"{'slot':<{width}}  {'verdict':<10}  {'records':<7}  "
+          f"{'first':<7}  {'best':<7}  {'gain':<7}  since best")
+    for name, row in report.slots.items():
+        print(f"{name:<{width}}  {row.verdict:<10}  {row.records:<7}  "
+              f"{row.first_reward:<7.3f}  {row.best_reward:<7.3f}  "
+              f"{row.gain:<+7.3f}  {row.records_since_best}")
+    return 0
+def cmd_campaign(a: argparse.Namespace) -> int:
+    """``agentdescent campaign`` -- iterate a spec, carrying the artifact forward."""
+    from .campaign import estimate_campaign, run_campaign
+
+    try:
+        spec = load_spec(a.spec)
+        if a.dry_run:
+            est = estimate_campaign(spec, sessions=a.sessions,
+                                    rounds=a.rounds, algorithm=a.algorithm)
+            if a.json:
+                _out(est, as_json=True)
+            else:
+                print(f"kind: {est['kind']}  sessions: {est['sessions']}  "
+                      f"total calls <= {est['total_calls']}")
+                print(f"  {est['calls_per_session']} calls/session x "
+                      f"{est['sessions']} = {est['total_calls']}")
+            return 0
+        report = run_campaign(
+            spec, sessions=a.sessions, rounds=a.rounds,
+            algorithm=a.algorithm, patience=a.patience,
+            workdir=a.workdir, keep_ledgers=a.keep_ledgers)
+    except (SpecError, ValueError) as e:
+        print(f"spec error: {e}", file=sys.stderr)
+        return 2
+    # The campaign keeps no run id, so the way back to the user's file is
+    # `apply --from` (#533). Print it ready to copy, dry-run first.
+    original = os.path.abspath(os.path.expanduser(str(spec.target)))
+    apply_cmd = (f"agentdescent apply --from {shlex.quote(report.final_target)} "
+                 f"--to {shlex.quote(original)}")
+    if a.json:
+        _out({**report.to_dict(), "target": original,
+              "next": [f"{apply_cmd} --dry-run", apply_cmd]}, as_json=True)
+        return 0 if report.stopped_reason != "error" else 1
+    print(f"kind: {report.kind}  stopped: {report.stopped_reason}  "
+          f"best: {report.best_reward:.3f}")
+    print(f"{'session':<8} {'reward':<8} {'best':<8} {'improved':<9} "
+          f"{'calls':<7} stop")
+    for session in report.sessions:
+        print(f"{session.index:<8} {session.reward:<8.3f} "
+              f"{session.best_reward:<8.3f} {str(session.improved):<9} "
+              f"{session.calls:<7} {session.stop_reason}"
+              + (f"  {session.error[:120]}" if session.error else ""))
+    print(f"artifact: {report.final_target}")
+    print(f"workspace: {report.workspace}")
+    if report.stopped_reason != "error":
+        print("\nnext:")
+        print(f"  diff -ru {shlex.quote(original)} {shlex.quote(report.final_target)}"
+              "   what changed")
+        print(f"  {apply_cmd} --dry-run   what apply would write")
+        print(f"  {apply_cmd}   install it (backs up {os.path.basename(original)} "
+              "to .bak-N first)")
+        print(f"  rm -rf {shlex.quote(report.workspace)}   when you are done")
+    return 0 if report.stopped_reason != "error" else 1
+
+def cmd_tournament(a: argparse.Namespace) -> int:
+    """``agentdescent tournament`` -- run one spec under several algorithms."""
+    from .tournament import estimate_tournament, run_tournament
+
+    try:
+        spec = load_spec(a.spec)
+        if a.dry_run:
+            est = estimate_tournament(
+                spec, a.algorithm, seeds=a.seed or [0], rounds=a.rounds,
+                max_seconds=a.max_seconds)
+            if a.json:
+                _out(est, as_json=True)
+            else:
+                print(f"kind: {est['kind']}  total calls <= {est['total_calls']}")
+                for row in est["arms"]:
+                    print(f"  {row['algorithm']:<20} {row['tasks']:<4} tasks  "
+                          f"{row['calls_per_arm']:<6} calls/arm x "
+                          f"{row['seeds']} seed(s) = {row['total_calls']}")
+            return 0
+        report = run_tournament(
+            spec, a.algorithm, seeds=a.seed or [0], rounds=a.rounds,
+            max_seconds=a.max_seconds, repo_root=a.repo_root,
+            keep_repos=a.keep)
+    except (SpecError, ValueError) as e:
+        print(f"spec error: {e}", file=sys.stderr)
+        return 2
+    if a.json:
+        _out(report.to_dict(), as_json=True)
+        return 0 if report.winner is not None else 1
+    print(f"kind: {report.kind}  winner: {report.winner or '-'}  "
+          f"({report.reason})")
+    print(f"{'algorithm':<20} {'mean':<8} {'range':<15} {'calls':<7} "
+          f"seeds errors")
+    for score in report.algorithms:
+        print(f"{score.algorithm:<20} {score.mean_reward:<8.3f} "
+              f"{score.min_reward:.3f}-{score.max_reward:.3f}      "
+              f"{score.mean_calls:<7.0f} {score.seeds:<5} {score.errors}")
+    if report.tied:
+        print(f"tied: {', '.join(report.tied)}")
+    for arm in report.arms:
+        if arm.error:
+            print(f"  {arm.algorithm} seed {arm.seed}: {arm.error[:160]}")
+    return 0 if report.winner is not None else 1
+
+def safety_payload(archive: Optional[str] = None, *,
+                   audit: Optional[str] = None, bias_threshold: float = 0.1,
+                   min_exam: Optional[str] = "passed") -> Dict[str, Any]:
+    """What ``agentdescent safety --json`` prints, for the CLI and the MCP
+    ``safety`` tool alike. ``min_exam`` is ``passed``, ``flagged``, or
+    ``none`` / None for every non-demoted rule. Reads only."""
+    from .meta_audit import MetaAuditStore
+    from .safety import safety_report
+
+    root = _archive_root(archive)
+    store = None
+    if audit:
+        if not os.path.isfile(os.path.expanduser(audit)):
+            raise MetaCommandError(f"audit store {audit!r} does not exist")
+        store = MetaAuditStore(audit)
+    try:
+        report = safety_report(
+            root, audit=store, bias_threshold=bias_threshold,
+            min_exam=None if min_exam in (None, "none") else min_exam)
+    except (FileNotFoundError, ValueError) as error:
+        raise MetaCommandError(str(error)) from None
+    return {"archive": root, **report.to_dict()}
+
+
+def cmd_safety(a: argparse.Namespace) -> int:
+    """``agentdescent safety`` -- is this archive safe to keep seeding from?"""
+    try:
+        payload = safety_payload(
+            getattr(a, "archive", None), audit=getattr(a, "audit", None),
+            bias_threshold=getattr(a, "bias_threshold", 0.1),
+            min_exam=getattr(a, "min_exam", "passed"))
+    except MetaCommandError as error:
+        return _meta_error(error)
+    if a.json:
+        _out(payload, as_json=True)
+    else:
+        print(f"verdict: {payload['verdict']}  ({payload['reason']})")
+        print(f"archive: {payload['archive']}  rules: {payload['rules']}  "
+              f"unexamined: {payload['unexamined']}  "
+              f"flagged: {payload['flagged']}  demoted: {payload['demoted']}")
+        for check in payload["checks"]:
+            print(f"  [{check['status']:<4}] {check['name']:<14} {check['detail']}")
+    return {"safe": 0, "caution": 1, "unsafe": 3}.get(payload["verdict"], 1)
 
 
 def cmd_install(a: argparse.Namespace) -> int:
@@ -1197,9 +2583,16 @@ def cmd_install(a: argparse.Namespace) -> int:
         written = install(a.host, dry_run=a.dry_run, home=a.home)
     except ValueError as e:        # e.g. an empty --home (#412)
         raise SpecError(f"install: {e}") from None
-    for line in written:
-        print(line)
-    return 0
+    # A `FAILED:` line is a step `install` could not take: the host is not
+    # wired, so say so in the exit code too (#516).
+    ok = not any(line.startswith("FAILED:") for line in written)
+    if getattr(a, "json", False):
+        _out({"ok": ok, "host": a.host, "dry_run": a.dry_run, "lines": written},
+             as_json=True)
+    else:
+        for line in written:
+            print(line)
+    return 0 if ok else 1
 
 
 def cmd_uninstall(a: argparse.Namespace) -> int:
@@ -1209,11 +2602,16 @@ def cmd_uninstall(a: argparse.Namespace) -> int:
         lines = uninstall(a.host, dry_run=a.dry_run, home=a.home)
     except ValueError as e:        # e.g. an empty --home (#412)
         raise SpecError(f"uninstall: {e}") from None
-    for line in lines:
-        print(line)
     # 1 when something was kept and so is still wired: a script or an agent can
     # tell "fully removed" from "needs a manual step". Nothing installed is 0.
-    return 1 if any(line.startswith("kept ") for line in lines) else 0
+    kept = any(line.startswith("kept ") for line in lines)
+    if getattr(a, "json", False):
+        _out({"ok": not kept, "host": a.host, "dry_run": a.dry_run, "lines": lines},
+             as_json=True)
+    else:
+        for line in lines:
+            print(line)
+    return 1 if kept else 0
 
 
 def cmd_serve(a: argparse.Namespace) -> int:
@@ -1266,16 +2664,55 @@ def _mcp_import_failure(e: BaseException) -> str:
 def cmd_mcp(a: argparse.Namespace) -> int:
     # A host starts this as a subprocess and shows the user nothing but
     # "CONNECTION_CLOSED" when it dies, so the one thing that can go wrong
-    # before the protocol starts -- the SDK not being installed -- has to say so
-    # in one line on stderr rather than as a traceback nobody will see.
+    # before the protocol starts -- the SDK not being installed, or being too
+    # old for streamable-http -- has to say so in one line on stderr rather than
+    # as a traceback nobody will see.
+    #
+    # Host/port fallbacks are literals (must match mcp.DEFAULT_HTTP_*; locked by
+    # test_cli_mcp_defaults_match_module). Do not import .mcp until after these
+    # are set: a shadowed cwd makes `from .mcp import ...` raise, and that has
+    # to land in the ImportError handler below as one line, not a traceback.
+    transport = getattr(a, "transport", "stdio")
+    host = getattr(a, "host", "127.0.0.1")
+    port = getattr(a, "port", 8000)
     try:
-        from .mcp import serve
-
-        serve(store=a.store)
+        from .mcp import (DEFAULT_HTTP_HOST, STREAMABLE_HTTP_REQUIRES,
+                          is_loopback_host, serve)
     except ImportError as e:
         print(f"agentdescent mcp: cannot start the MCP server -- {_mcp_import_failure(e)}",
               file=sys.stderr)
         return 3
+    if transport != "stdio":
+        if not is_loopback_host(host):
+            if not getattr(a, "allow_remote", False):
+                print(f"agentdescent mcp: refusing to listen on non-loopback host {host!r}: "
+                      "the tools can start runs and write files (`start`, `apply`). Keep "
+                      f"--host {DEFAULT_HTTP_HOST} and expose it with a tunnel, or pass "
+                      "--allow-remote if you really mean to serve the network.",
+                      file=sys.stderr)
+                return 2
+            print(f"agentdescent mcp: WARNING: serving on {host}:{port} with no "
+                  "authentication; anyone who can reach it can start runs and write files.",
+                  file=sys.stderr)
+        print(f"agentdescent mcp: streamable-http on http://{host}:{port}/mcp",
+              file=sys.stderr)
+    try:
+        if transport == "stdio":
+            serve(store=a.store)
+        else:
+            serve(store=a.store, transport=transport, host=host, port=port)
+    except ImportError as e:
+        print(f"agentdescent mcp: cannot start the MCP server -- {_mcp_import_failure(e)}",
+              file=sys.stderr)
+        return 3
+    except RuntimeError as e:
+        # mcp < 1.8: serve() raises STREAMABLE_HTTP_REQUIRES instead of the SDK's
+        # opaque "Unknown transport" ValueError (#589).
+        if str(e) == STREAMABLE_HTTP_REQUIRES:
+            print(f"agentdescent mcp: cannot start the MCP server -- {e}",
+                  file=sys.stderr)
+            return 3
+        raise
     return 0
 
 
@@ -1313,16 +2750,43 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--agent", default=None,
                    help="worker agent short name (default: the first of claude_code, "
                         "codex, dsh, opencode whose CLI is on PATH; claude_code if none)")
+    s.add_argument("--model", default=None,
+                   help="model name for the openai_compatible reflector/agent; with "
+                        "--base-url and an `opencode` worker it is also pinned into "
+                        "the worker (-m plus a provider-only OPENCODE_CONFIG) "
+                        "(default: a placeholder plan refuses -- never guessed)")
+    s.add_argument("--base-url", dest="base_url", default=None,
+                   help="endpoint URL for that model (written as default_base_url)")
+    s.add_argument("--key-env", dest="key_env", default=None,
+                   help="environment variable holding its key (default: OPENAI_API_KEY, "
+                        "or the one other provider key that is set)")
+    s.add_argument("--algorithm", default=None,
+                   help="named method from `agentdescent algorithms list` "
+                        "(e.g. rrsi); other spec fields keep their kind "
+                        "defaults and can override the method's")
+    s.add_argument("--param", action="append", default=[], metavar="KEY=VALUE",
+                   help="algorithm parameter, repeatable; values are JSON "
+                        "when they parse, otherwise strings")
     s.add_argument("--out", help="where to write the spec")
     s.set_defaults(fn=cmd_init)
 
     s = sub.add_parser("plan", help="validate a spec and estimate its cost; runs nothing")
     s.add_argument("spec")
+    s.add_argument("--algorithm", default=None,
+                   help="override the spec's algorithm by name (the same name "
+                        "merges --param with the spec's params)")
+    s.add_argument("--param", action="append", default=[], metavar="KEY=VALUE",
+                   help="algorithm parameter for --algorithm, repeatable")
     s.add_argument("--usd-per-call", type=float, dest="usd_per_call")
     s.set_defaults(fn=cmd_plan)
 
     s = sub.add_parser("evolve", help="run a spec")
     s.add_argument("spec")
+    s.add_argument("--algorithm", default=None,
+                   help="override the spec's algorithm by name (the same name "
+                        "merges --param with the spec's params)")
+    s.add_argument("--param", action="append", default=[], metavar="KEY=VALUE",
+                   help="algorithm parameter for --algorithm, repeatable")
     s.add_argument("--detach", action="store_true", help="return at once; poll with status")
     s.add_argument("--budget", type=float, help="stop after this many dollars (needs --usd-per-call)")
     s.add_argument("--usd-per-call", type=float, dest="usd_per_call")
@@ -1357,8 +2821,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(fn=cmd_show)
 
     s = sub.add_parser("apply", help="write the evolved artifact back, backing up first")
-    s.add_argument("run_id")
-    s.add_argument("--to", help="a different destination than the spec's target")
+    s.add_argument("run_id", nargs="?")
+    s.add_argument("--to", help="a different destination than the spec's target "
+                   "(required with --from)")
+    s.add_argument("--from", dest="source", metavar="PATH",
+                   help="install an artifact from disk (e.g. a campaign's "
+                   "final_target) instead of a run's result")
     s.add_argument("--dry-run", action="store_true", dest="dry_run")
     s.add_argument("--no-backup", action="store_true", dest="no_backup")
     s.set_defaults(fn=cmd_apply)
@@ -1373,25 +2841,75 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--usd-per-call", type=float, dest="usd_per_call")
     s.set_defaults(fn=cmd_resume)
 
+    s = sub.add_parser("portfolio",
+                       help="rank the archive's layers and reallocate the next budget window")
+    s.add_argument("archive", nargs="?", default=None,
+                   help="consolidation archive directory (default $AGENTDESCENT_HOME/archive)")
+    s.add_argument("--floor", type=float, default=0.05)
+    s.add_argument("--min-samples", type=int, default=3, dest="min_samples")
+    s.add_argument("--grow", type=float, default=0.5)
+    s.add_argument("--shrink", type=float, default=0.5)
+    s.add_argument("--cap", type=float, default=None)
+    s.set_defaults(fn=cmd_portfolio)
+
+    s = sub.add_parser("exam",
+                       help="re-judge the archive's adopted rules with an independent oracle")
+    s.add_argument("archive", nargs="?", default=None,
+                   help="consolidation archive directory (default $AGENTDESCENT_HOME/archive)")
+    s.add_argument("--domain", required=True,
+                   help="module:attribute builder returning the domain dict "
+                        "(oracle, tasks_for, run, reward, propose, strategy)")
+    s.add_argument("--slot", default="task_sampler",
+                   help="the decision slot the rules evolved (default task_sampler)")
+    s.add_argument("--min-gain", type=float, default=0.0, dest="min_gain")
+    s.add_argument("--max-flags", type=int, default=2, dest="max_flags")
+    s.add_argument("--config", default=None,
+                   help="JSON config dict used to rank the archive's rules")
+    s.set_defaults(fn=cmd_exam)
+
+    s = sub.add_parser("audit",
+                       help="trace one archived adoption through its evidence rings")
+    s.add_argument("run_id")
+    s.add_argument("--archive", default=None,
+                   help="consolidation archive directory (default $AGENTDESCENT_HOME/archive)")
+    s.add_argument("--meta-audit", default=None, dest="meta_audit",
+                   help="a MetaAuditStore path for the meta-gain ring")
+    s.add_argument("--inner-audit", default=None, dest="inner_audit",
+                   help="an inner AuditStore path for the inner-reward ring")
+    s.add_argument("--harness", default=None,
+                   help="module:attribute harness_evidence callable for the harness ring")
+    s.add_argument("--bias-threshold", type=float, default=0.1, dest="bias_threshold")
+    s.set_defaults(fn=cmd_audit)
+
     s = sub.add_parser("doctor", help="which agents, keys and optional pieces are available")
+    s.add_argument("--home", help="the host's home directory (default: the real one)")
     s.set_defaults(fn=cmd_doctor)
 
     s = sub.add_parser("install", help="wire the skill and MCP server into a host")
-    s.add_argument("host", choices=("dsh", "claude-code", "codex", "opencode"))
+    s.add_argument("host", choices=("dsh", "claude-code", "codex", "opencode", "grok-bot"))
     s.add_argument("--dry-run", action="store_true", dest="dry_run")
     s.add_argument("--home", help="the host's home directory (default: the real one)")
     s.set_defaults(fn=cmd_install)
 
     s = sub.add_parser("uninstall", help="undo `install` for a host")
-    s.add_argument("host", choices=("dsh", "claude-code", "codex", "opencode"))
+    s.add_argument("host", choices=("dsh", "claude-code", "codex", "opencode", "grok-bot"))
     s.add_argument("--dry-run", action="store_true", dest="dry_run")
     s.add_argument("--home", help="the host's home directory (default: the real one)")
     s.set_defaults(fn=cmd_uninstall)
 
     s = sub.add_parser("algorithms", help="the named algorithms a spec can ask for")
-    algo_sub = s.add_subparsers(dest="action", required=True)
+    # A bare `agentdescent algorithms` lists them, like `algorithms list`.
+    s.set_defaults(fn=cmd_algorithms, kind=None)
+    s.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                   help="machine-readable output")
+    # SUPPRESS on both: a subparser default would overwrite the group's value,
+    # so `algorithms --kind text list` must not lose `text` (#549).
+    s.add_argument("--kind", default=argparse.SUPPRESS,
+                   help="only algorithms for this spec kind (as `algorithms list --kind`)")
+    algo_sub = s.add_subparsers(dest="action")
     s2 = algo_sub.add_parser("list", help="every algorithm, or those that apply to a kind")
-    s2.add_argument("--kind", help="only algorithms for this spec kind")
+    s2.add_argument("--kind", default=argparse.SUPPRESS,
+                    help="only algorithms for this spec kind")
     s2.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                     help="machine-readable output")
     s2.set_defaults(fn=cmd_algorithms)
@@ -1401,16 +2919,117 @@ def build_parser() -> argparse.ArgumentParser:
                     help="machine-readable output")
     s2.set_defaults(fn=cmd_algorithms)
 
+    s = sub.add_parser("diagnose", help="why a run learned nothing (or stopped)")
+    s.add_argument("run_id")
+    s.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                   help="machine-readable output")
+    s.set_defaults(fn=cmd_diagnose)
+
+    s = sub.add_parser("rsi", help="the archive's longitudinal self-improvement trend")
+    s.add_argument("--archive", help="consolidation archive (default: $AGENTDESCENT_HOME/archive)")
+    s.add_argument("--slot", help="only this decision slot")
+    s.add_argument("--stagnation-window", type=int, default=3,
+                   dest="stagnation_window",
+                   help="adoptions without a new best before a slot is stagnant")
+    s.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                   help="machine-readable output")
+    s.set_defaults(fn=cmd_rsi)
+    s = sub.add_parser("campaign",
+                       help="iterate a spec, carrying the evolved artifact forward")
+    s.add_argument("spec")
+    s.add_argument("--sessions", type=int, default=3,
+                   help="maximum sessions to run (default 3)")
+    s.add_argument("--rounds", type=int,
+                   help="rounds per session (default: the spec's own budget)")
+    s.add_argument("--algorithm", default=None,
+                   help="algorithm to use for every session (default: the spec's own)")
+    s.add_argument("--patience", type=int, default=1,
+                   help="non-improving sessions before stopping (default 1)")
+    s.add_argument("--workdir", help="workspace for the carried artifact")
+    s.add_argument("--keep-ledgers", action="store_true", dest="keep_ledgers",
+                   help="keep each session's ledger for diagnosis")
+    s.add_argument("--dry-run", action="store_true", dest="dry_run",
+                   help="show the total call estimate without running")
+    s.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                   help="machine-readable output")
+    s.set_defaults(fn=cmd_campaign)
+    s = sub.add_parser("tournament",
+                       help="run one spec under several named algorithms")
+    s.add_argument("spec")
+    s.add_argument("--algorithm", action="append", required=True,
+                   metavar="NAME",
+                   help="algorithm to run; use 'default' for the spec's own recipe "
+                        "(repeatable)")
+    s.add_argument("--seed", action="append", type=int, default=None,
+                   help="seed to repeat each arm on (repeatable; default 0)")
+    s.add_argument("--rounds", type=int, help="override evolve.rounds for every arm")
+    s.add_argument("--max-seconds", type=float, dest="max_seconds",
+                   help="override evolve.max_seconds for every arm")
+    s.add_argument("--repo-root", dest="repo_root",
+                   help="where the temporary ledgers live")
+    s.add_argument("--keep", action="store_true",
+                   help="keep the per-arm ledgers for diagnosis")
+    s.add_argument("--dry-run", action="store_true", dest="dry_run",
+                   help="show the per-arm plan estimate without running")
+    s.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                   help="machine-readable output")
+    s.set_defaults(fn=cmd_tournament)
+    s = sub.add_parser("safety", help="is this archive safe to keep seeding from?")
+    s.add_argument("--archive", help="consolidation archive (default: $AGENTDESCENT_HOME/archive)")
+    s.add_argument("--audit", help="MetaAuditStore JSONL to check verifier bias")
+    s.add_argument("--bias-threshold", type=float, default=0.1,
+                   dest="bias_threshold",
+                   help="worst |gain bias| allowed by the audit check")
+    s.add_argument("--min-exam", choices=("passed", "flagged", "none"),
+                   default="passed", dest="min_exam",
+                   help="seeding bar to check (default: passed)")
+    s.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                   help="machine-readable output")
+    s.set_defaults(fn=cmd_safety)
+
     s = sub.add_parser("serve", help="serve a read-only run panel on loopback, for a host UI")
     s.add_argument("--host", default=runstore.DEFAULT_HTTP_HOST)
     s.add_argument("--port", type=int, default=runstore.DEFAULT_HTTP_PORT)
     s.set_defaults(fn=cmd_serve)
 
-    s = sub.add_parser("mcp", help="serve the tools over stdio (needs agentdescent[mcp])")
+    s = sub.add_parser("mcp", help="serve the tools over MCP (stdio by default; needs agentdescent[mcp])")
+    s.add_argument("--transport", choices=("stdio", "streamable-http"), default="stdio",
+                   help="stdio for hosts that spawn a subprocess (default); streamable-http "
+                        "for URL-only hosts such as Grok Bot, behind a tunnel (needs mcp>=1.8)")
+    # Host/port literals must match mcp.DEFAULT_HTTP_*; locked by
+    # test_cli_mcp_defaults_match_module. Cannot import mcp.py here (it imports cli).
+    s.add_argument("--host", default="127.0.0.1",
+                   help="streamable-http bind address (default 127.0.0.1)")
+    s.add_argument("--port", type=int, default=8000,
+                   help="streamable-http port (default 8000)")
+    s.add_argument("--allow-remote", action="store_true",
+                   help="allow a non-loopback --host (the tools can start runs and write files)")
     s.set_defaults(fn=cmd_mcp)
 
     sub.metavar = "{" + ",".join(n for n in sub.choices if n not in _INTERNAL_COMMANDS) + "}"
+    _accept_json_after_verb(sub)
     return p
+
+
+def _accept_json_after_verb(sub: "argparse._SubParsersAction") -> None:
+    """Let ``--json`` follow the verb as well as precede it (#513).
+
+    The top-level parser owns ``--json``; each leaf subcommand also gets one
+    whose default is SUPPRESS, so a flag written after the verb sets the same
+    ``json`` attribute and a missing one leaves the top-level value alone.
+    Subcommands that already declare ``--json`` keep their own definition.
+    """
+    for parser in dict.fromkeys(sub.choices.values()):
+        nested = [a for a in parser._actions
+                  if isinstance(a, argparse._SubParsersAction)]
+        if nested:
+            for n in nested:
+                _accept_json_after_verb(n)
+            continue
+        if "--json" in parser._option_string_actions:
+            continue
+        parser.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                            help="machine-readable output")
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
