@@ -65,11 +65,11 @@ nav:
     - Set it up and test it: testing-guide.md
     - Testing the plugins: testing-the-plugins.md
   - Core concepts:
-    - Capability map: capabilities.md
     - Concepts: concepts.md
     - Architecture: architecture.md
     - The data model: data-model.md
     - Governance (L0 / L1 / L2): governance.md
+    - Capability map: capabilities.md
   - The evolve method: evolution.md
   - Modules — design and usage:
     - Module map: modules.md

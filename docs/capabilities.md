@@ -5,9 +5,10 @@ programs, workflows, harnesses and custom artifacts. It is not one algorithm: it
 is a composition surface for **what evolves**, **who proposes**, **what counts
 as better**, **what may merge**, and **what is remembered**.
 
-This page describes the current `main` branch; the published PyPI package is
-`0.6.0`. Each section names the modules you can use today and the seam they
-own.
+This page describes the current `main` branch. Read it as a map, not a second
+source of truth: [Concepts](concepts.md) and [Architecture](architecture.md)
+introduce the terms, and each section links to the detailed page. Modules added
+after this page was written are listed under *Proposed (not on main)*.
 
 ## The five primitives
 
@@ -18,6 +19,9 @@ own.
 | Evidence | `EvidenceCard`, `Trajectory`, `RunManifest` | Tasks, scores, cost and provenance behind a candidate. |
 | Gate | `Policies`, `verifier`, `trust_evidence`, `promotion` | Accept / defer / reject / rollback, fail-closed. |
 | Ledger | `Ledger`, `ConsolidationStore`, `DecisionLog` | Versioned artifact, cross-run archive and the decision trace. |
+
+See [the data model](data-model.md) and [concepts](concepts.md) for the full
+contracts.
 
 ## The evolution loop
 
@@ -30,10 +34,13 @@ own.
   graceful degradation, resume and run state.
 - `Policies`: eight swappable decisions (task sampler, selection, proposal,
   conflict, fusion, acceptance, promotion, staleness).
-- `aggregator_factory`: replace the whole merge path when an algorithm owns its
-  population or optimizer.
+- The `aggregator_factory` hook (a parameter, not a module): replace the whole
+  merge path when an algorithm owns its population or optimizer.
 - `governance`, `staleness`, `treestrategy`, `runners`: frozen paths, stale-diff
   handling, directory state and real-agent rollouts.
+
+See [evolution](evolution.md), [architecture](architecture.md),
+[parallelism](parallelism.md) and [async](async.md).
 
 ## Evaluating and verifying
 
@@ -47,10 +54,14 @@ own.
   reward hacking detection.
 - `self_model`, `process_reward`: calibrated confidence/abstention and
   step-level process rewards.
-- `planning`, `search_fabric`, `budgeted_search`: UCT/MCTS, PRM/verifier value,
-  PRM reranking and marginal-gain stopping.
+- `planning`, `search_fabric`: UCT/MCTS, PRM/verifier value and PRM reranking
+  ([search and planning](evolution.md)); marginal-gain stopping is in
+  [stopping](stopping.md).
 - `stats_eval`, `conformal`, `sequential`, `evalops`: paired bootstrap,
   split-conformal bounds, anytime-valid e-processes and continuous evaluation.
+
+See [verifier](verifier.md), [statistical evidence](stats-eval.md) and
+[budget](budget.md).
 
 ## Trusted promotion
 
@@ -59,9 +70,9 @@ own.
   calibration reports.
 - `promotion.promote()` returns `promote / defer / reject / rollback`:
   missing evidence defers, a failed gate rejects, a canary regression rolls back,
-  and only a green bundle promotes. Evidence is bound to the artifact id/hash.
-- `promotion_ledger` (recently proposed): an accepted promotion becomes a signed
-  `ArtifactManifest` and a lineage node carrying evidence and decision hashes.
+  and only a green bundle promotes. Artifact-id binding is always checked; hash
+  binding applies when `artifact_hash` is supplied. See
+  [trusted promotion](trusted-promotion.md).
 - `policy_release`, `proofs`, `safe_selfmod`, `capability_guard`, `risk_policy`,
   `approval`, `leakage`: policy-as-code, signed manifests, invariant
   certificates, capability gates, risk actions, human approval and leakage
@@ -76,25 +87,26 @@ own.
 - `workspaces`: tenant/workspace RBAC, quota reservations, scoped audit.
 - `rsi_metrics`, `rsi_telemetry`: Prometheus samples and OTel-shaped spans.
 - `ops_console`: the read model for runs, approvals, QD, lineage and cost.
-- `ops_fabric` (recently proposed): write one `LoopReport` into console,
-  lineage, telemetry and a QD snapshot.
-- `platform.RSIPlatform` (landed): one cycle of compute → loop → promote →
+- `ops_fabric` (on main): write one `LoopReport` into console, lineage,
+  telemetry and a QD snapshot.
+- `platform.RSIPlatform` (on main): one cycle of compute → loop → promote →
   foundry → experience, with `complete=False` when a configured layer produces
-  no decision.
+  no decision. See [platform](platform.md).
+
+See [runtime](runtime.md), [controller](controller.md) and
+[execution](execution.md).
 
 ## Tasks, capabilities and archives
 
 - `data_flywheel`: traces → filtered, redacted, deduplicated dataset candidates.
 - `task_foundry`: failure seeds → validated, deduplicated, contamination-checked
   train/holdout tasks.
-- `task_pipeline` (landed): the hand-off between those two, respecting the
+- `task_pipeline` (on main): the hand-off between those two, respecting the
   foundry's own verdict.
 - `tool_synthesis`: generate, validate and select tools; the generator sees
   earlier rejection reasons.
 - `capability_foundry`: validation → review → capability gate → proof → holdout
   gain → artifact registration.
-- `capability_scout` (recently proposed): failed tasks → tool synthesis →
-  capability admission.
 - `deliberation`, `society_runtime`, `agent_society`: weighted judge panels,
   blackboard runtimes and multi-agent topology evolution.
 - `quality_diversity`, `artifact_graph`, `semantic_dedup`,
@@ -102,6 +114,9 @@ own.
   detection and a capability library that keeps them in sync.
 - `openended`, `curious_replay`, `trajectory_curriculum`, `meta_curriculum`:
   task/solver co-evolution, replay-driven and meta-generated curricula.
+
+See [capability foundry](capability-foundry.md) and
+[cross-run consolidation](consolidation.md).
 
 ## Experience and continual learning
 
@@ -111,28 +126,33 @@ own.
 - `consolidation`: cross-run artifact archive with a mini-eval seed gate.
 - `counterfactual` / `credit`: replay interventions, leave-one-out and Shapley
   step attribution.
-- `counterfactual_experience` (recently proposed): step credit → experience
-  rewards.
-- `preference` / `preference_replay` (recently proposed): pairwise preference
-  reward model and preference-ranked replay.
+- `preference`: pairwise preference reward model (RLHF/DPO's reward-model half).
 - `self_improve`, `recursive`, `joint_meta`, `meta_audit`, `meta_exam`,
   `meta_population`, `verified_seed`: recursive/joint/meta self-improvement with
   examined and verified seeds.
 
-## Algorithm ports
+See [continual experience](continual-experience.md).
 
-23 runnable method ports sit on the same engine: ACE, GEPA, DGM, OpenEvolve,
-ERA, PromptBreeder, AFlow, Reflexion, Self-Refine, TextGrad, Voyager, SkillWeaver,
-Absolute Zero, R-Zero, Agent0, SICA, Gödel Agent, Genesis, RRSI and more. Each
-declares its own Strategy / Policies / optimizer and its fidelity class; they are
-examples of the engine, not the engine's limit.
+## Algorithms and ports
+
+Two surfaces are easy to confuse:
+
+- **Registry algorithms** ship in the wheel and are listed by
+  `agentdescent algorithms list` / `show`. This is the "call any algorithm"
+  path, and each entry declares its own fidelity.
+- **Example ports** live under `examples/` and are not shipped in the wheel.
+
+Both sit on the same Strategy / Policies / optimizer seams. See
+[port fidelity](port-fidelity.md) for the per-port contract rather than a
+hard-coded count.
 
 ## Interfaces
 
 `agentdescent` ships a CLI (`demo`, `init`, `plan`, `evolve`, `status`, `watch`,
-`show`, `apply`, `cancel`, `resume`, `campaign`, `tournament`, `diagnose`, `rsi`,
-`safety`, `audit`, `serve`, `mcp`, ...), an MCP server, and plugins for Claude
-Code, Codex, OpenCode and DSH. `EvolveSpec` makes a run a JSON document;
+`show`, `apply`, `cancel`, `resume`, `campaign`, `tournament`, `algorithms`,
+`diagnose`, `rsi`, `safety`, `audit`, `doctor`, `install`, `uninstall`, `serve`,
+`mcp`, ...), an MCP server, and plugins for Claude Code, Codex, OpenCode, DSH and
+Grok Bot. `EvolveSpec` makes a run a JSON document;
 `RunManifest`, `DecisionLog` and `Trajectory` make it reproducible.
 
 ## Applying it to evolving Skills and Workflows
@@ -147,7 +167,7 @@ engine and governance layer without writing another RSI loop:
 | CI tests, lint, evals | `verifier`, `verifier_ensemble`, `evalops` |
 | Real failures / PR traces | `DataFlywheel`, `TaskFoundry`, `TaskPipeline` |
 | Cross-version metrics | `stats_eval`, `conformal`, `sequential` |
-| Promotion | `trust_evidence`, `promotion`, `promotion_ledger` |
+| Promotion | `trust_evidence`, `promotion` |
 | Capability library | `QualityDiversityArchive`, `ArtifactGraph`, `CapabilityArchive` |
 | Continual learning | `ExperienceEngine`, `continual_meta` |
 | Operations | `durable_runs`, `workspaces`, `ops_fabric`, `lineage` |
@@ -163,13 +183,25 @@ A defensible rollout:
 3. **Continual operation.** Add `durable_runs` + `workspaces` + `ops_fabric`,
    `task_pipeline` for failure-driven tasks, `capability_archive` for the skill
    library, and `experience` for cross-cycle memory.
-4. **Governed autonomy.** Add `promotion_ledger` + `policy_release` + `proofs` +
-   canary/rollback and `calibrated_deferral` for answer/defer/deny routing.
+4. **Governed autonomy.** Add `policy_release` + `proofs` + canary/rollback and
+   `calibrated_deferral` for answer/defer/deny routing. A signed release receipt
+   (`promotion_ledger`) is proposed in #639.
 
 Do not use a single LLM judge as the only merge gate. Do not let candidates edit
 the evaluator, CI configuration or frozen policy. Do not accept on a point
 estimate alone; use a held-out set and a statistical gate. Do not put unbounded
 experience into a prompt.
+
+## Proposed (not on main)
+
+These are open PRs, not current `main` capabilities; keep them out of a rollout
+until they land:
+
+- `capability_scout`: failed tasks → tool synthesis → admission (#634).
+- `budgeted_search`: stop UCT when another expansion stops paying (#638).
+- `promotion_ledger`: accepted promotion → signed manifest + lineage (#639).
+- `counterfactual_experience`: Shapley step credit → experience rewards (#640).
+- `preference_replay`: preference-ranked replay selection (#641).
 
 ## Boundaries
 
