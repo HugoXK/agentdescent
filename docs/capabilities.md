@@ -31,7 +31,7 @@ seam they own.
   conflict, fusion, acceptance, promotion, staleness).
 - `aggregator_factory`: replace the whole merge path when an algorithm owns its
   population or optimizer.
-- `governance`, `staleness`, `treestrategy`, `runters`: frozen paths, stale-diff
+- `governance`, `staleness`, `treestrategy`, `runners`: frozen paths, stale-diff
   handling, directory state and real-agent rollouts.
 
 ## Evaluating and verifying
