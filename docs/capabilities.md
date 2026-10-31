@@ -1,12 +1,13 @@
-# Capability map (v0.8.0)
+# Capability map
 
 AgentDescent is a parallel, asynchronous framework for evolving prompts, skills,
 programs, workflows, harnesses and custom artifacts. It is not one algorithm: it
 is a composition surface for **what evolves**, **who proposes**, **what counts
 as better**, **what may merge**, and **what is remembered**.
 
-This page is the map. Each section names the modules you can use today and the
-seam they own.
+This page describes the current `main` branch; the published PyPI package is
+`0.6.0`. Each section names the modules you can use today and the seam they
+own.
 
 ## The five primitives
 
