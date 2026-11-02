@@ -415,6 +415,8 @@ Parse `$ARGUMENTS` (trim; empty means `list`):
   params they gave — validate with `describe_algorithm` / `show` first). Run
   `doctor`, `plan`, show the resolved algorithm card and estimate, and wait for
   my yes before `start`. Same apply/cancel/resume rules as `/evolve`.
+  Without MCP: `agentdescent algorithms run <name> <path> [cases.jsonl]
+  [--param k=v...]` (init + plan in one step; then `evolve` after yes).
 
 If they only named a method with no path, `show` it and ask whether to `run`.
 """
@@ -993,8 +995,8 @@ and it cannot drift from the package -- and its `cordis.patch.yml` adds the
 `agentdescent mcp` server, so the model gets `mcp__agentdescent__plan`,
 `__start`, `__status`, `__show`, `__apply`, `__list_algorithms`,
 `__describe_algorithm` and the rest. Named methods match
-`agentdescent algorithms list` / `show` (dsh has no slash surface; use the
-skill or those tools).
+`agentdescent algorithms list` / `show` / `run` (dsh has no slash surface; use
+the skill, those tools, or `agentdescent algorithms run NAME PATH`).
 
 Check it composed:
 
@@ -1078,8 +1080,9 @@ launcher will not reach the Bot from Cursor's backend.
 2. **Drive AgentDescent.** Prefer the CLI on the Bot's computer (the shared
    box): `agentdescent doctor`, `plan`, `evolve`, `status`, `apply`. Named
    methods: `agentdescent algorithms list` / `show <name>`, then
-   `plan`/`evolve --algorithm NAME` (or MCP `list_algorithms` /
-   `describe_algorithm` when the HTTP MCP below is wired). The skill
+   `agentdescent algorithms run NAME PATH [cases.jsonl]` (init + plan in one
+   step; `evolve` the written spec after yes) — or MCP `list_algorithms` /
+   `describe_algorithm` when the HTTP MCP below is wired. The skill
    falls back to those verbs when MCP tools are absent.
 3. **MCP (optional, not auto-wired).** Serve the tools over HTTP on loopback
    and expose them through any HTTPS tunnel, then ask the Bot to add the
@@ -1093,6 +1096,9 @@ launcher will not reach the Bot from Cursor's backend.
    # or: ngrok http 8000 --host-header=127.0.0.1:8000
    ```
 
+   If port 8000 is taken, the server exits 4 with one line saying so before
+   printing any URL; pick another `--port` and use it in the tunnel too.
+
    The server has **no authentication**: anyone holding the tunnel URL can
    start runs and `apply` files, so keep the URL private and stop the tunnel
    when done. A non-loopback `--host` is refused unless you pass
@@ -1103,9 +1109,18 @@ launcher will not reach the Bot from Cursor's backend.
 
 ## Doctor / uninstall
 
-- `agentdescent doctor` reports `host grok-bot: ok (skill ok, mcp n/a; …)`
-  when this scaffold is current. `mcp n/a` means there is no host-native MCP
-  config file to check — not that a server is running.
+- `agentdescent doctor` reports
+  `host grok-bot: ok (skill ok, mcp n/a; user skill ok|stale|missing)`.
+  `skill` is this scaffold; `user skill` is the skill Grok Bot actually loads:
+  a `SKILL.md` whose frontmatter `name:` is `agentdescent` under
+  `$AGENTDESCENT_GROK_BOT_SKILLS` (default `<home>/agent-data/workflows`, i.e.
+  `/home/box/agent-data/workflows` on the Bot's box). Its body is compared with
+  this package's skill, so after `pip install -U` a saved skill that no longer
+  matches reads `stale`: ask Grok Bot to rewrite its `agentdescent` skill from
+  the refreshed `skills/agentdescent/SKILL.md`. `doctor --json` carries
+  `user_skill` and `user_skill_path` under `hosts.grok-bot`. Both commands only
+  read that directory. `mcp n/a` means there is no host-native MCP config file
+  to check — not that a server is running.
 - `agentdescent uninstall grok-bot` removes only the files this install wrote.
 
 See also [docs/plugins.md](https://birfy.github.io/agentdescent/docs/plugins/).
@@ -1149,6 +1164,65 @@ def install_grok_bot(home: str, w: "_Writer") -> None:
     w.note("NOTE: ask Grok Bot to save skills/agentdescent/SKILL.md as a "
            "user skill; drive runs with the CLI (or `agentdescent mcp --transport "
            "streamable-http` behind an HTTPS tunnel)")
+
+
+#: Where Grok Bot keeps user skills on its box: one ``<slug>/SKILL.md`` per
+#: skill, the slug chosen by the Bot (``skill-1793578419970``), so the stable
+#: identifier is the frontmatter ``name:`` (#675). Read-only: neither
+#: ``install`` nor ``doctor`` ever writes here.
+GROK_BOT_SKILLS_ENV = "AGENTDESCENT_GROK_BOT_SKILLS"
+
+
+def grok_bot_user_skills_dir(home: str, honour_env: bool = True) -> str:
+    """``$AGENTDESCENT_GROK_BOT_SKILLS``, else ``<home>/agent-data/workflows``.
+
+    An explicit ``--home`` is the whole world (#410), so the variable is only
+    honoured for the real home."""
+    env = os.environ.get(GROK_BOT_SKILLS_ENV) if honour_env else None
+    return os.path.expanduser(env) if env else os.path.join(home, "agent-data", "workflows")
+
+
+def _frontmatter_split(text: str) -> Tuple[Dict[str, str], str]:
+    """``(flat frontmatter, body)`` of a SKILL.md; ``({}, text)`` without one."""
+    norm = text.replace("\r\n", "\n")
+    if not norm.startswith("---\n"):
+        return {}, norm
+    parts = norm.split("\n---\n", 1)
+    if len(parts) != 2:
+        return {}, norm
+    out: Dict[str, str] = {}
+    for line in parts[0][4:].splitlines():
+        if ":" in line and not line[:1].isspace():
+            key, _, value = line.partition(":")
+            out[key.strip().lower()] = value.strip().strip("\"'")
+    return out, parts[1]
+
+
+def _grok_bot_user_skill(root: str) -> Tuple[str, str]:
+    """``(ok|stale|missing, path)`` for the Grok Bot user skill named
+    ``agentdescent`` under ``root``.
+
+    Grok Bot may rewrite the frontmatter when it saves a skill (it keeps its
+    own keys), so the *body* is what is compared with this package's skill,
+    ignoring leading/trailing blank lines. Several matches: any ``ok`` wins."""
+    try:
+        slugs = sorted(os.listdir(root))
+    except OSError:
+        return "missing", ""
+    want = _skill_body().strip()
+    found: Tuple[str, str] = ("missing", "")
+    for slug in slugs:
+        path = os.path.join(root, slug, "SKILL.md")
+        text = _read(path)
+        if text is None:
+            continue
+        meta, body = _frontmatter_split(text)
+        if meta.get("name", "").lower() != "agentdescent":
+            continue
+        if body.strip() == want:
+            return "ok", path
+        found = ("stale", path)
+    return found
 
 
 def _uninstall_grok_bot(home: str, e: "_Eraser") -> None:
@@ -1301,6 +1375,8 @@ def host_status(host: str, *, home: Optional[str] = None) -> Dict[str, str]:
         # No host-native MCP config path. Presence of HOST.md means the scaffold
         # install ran; `n/a` is honest (not a running server).
         mcp = "n/a" if _read(os.path.join(root, GROK_BOT_HOST_MD)) is not None else "missing"
+        user_skill, user_skill_path = _grok_bot_user_skill(
+            grok_bot_user_skills_dir(home, honour_env))
     else:
         root = os.path.join(_host_root("XDG_CONFIG_HOME", os.path.join(home, ".config"),
                                        honour_env), "opencode")
@@ -1318,6 +1394,16 @@ def host_status(host: str, *, home: Optional[str] = None) -> Dict[str, str]:
         state = "ok"
     else:
         state = "partial"
+    if host == "grok-bot":
+        # The skill Grok Bot actually loads is the saved user skill, not the
+        # scaffold (#675): a stale one is stale whatever the scaffold says, and
+        # a current one is enough even after the scaffold was removed.
+        if user_skill == "stale":
+            state = "stale"
+        elif user_skill == "ok" and state == "missing":
+            state = "ok"
+        return {"state": state, "skill": skill_state, "mcp": mcp, "path": skill,
+                "user_skill": user_skill, "user_skill_path": user_skill_path}
     return {"state": state, "skill": skill_state, "mcp": mcp, "path": skill}
 
 

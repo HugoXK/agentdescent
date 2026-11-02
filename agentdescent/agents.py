@@ -30,6 +30,8 @@ from dataclasses import dataclass, field
 from typing import (Any, Callable, Dict, List, Mapping, Optional, Protocol,
                     Sequence, Tuple, runtime_checkable)
 
+from .evolvable import ContractError
+
 Completion = Callable[[str], str]
 
 
@@ -537,6 +539,76 @@ def echo(transform: Optional[Callable[[str], str]] = None) -> Completion:
     return complete
 
 
+class ProviderConfigError(ContractError, RuntimeError):
+    """The provider refused the request for a reason no retry can change (#635).
+
+    HTTP 401/403 (the key does not belong to this endpoint) and 404 or a body
+    saying ``UnsupportedModel`` / ``model_not_found`` (the endpoint does not
+    serve this model) answer every later request the same way. Quota / billing
+    exhaustion on a 429 is the same shape of failure and raises the
+    :class:`QuotaExhausted` subclass (#653). Treated as a transient, one such
+    run burned 25 identical 404s on a ``rounds=1, n_workers=1`` spec before
+    ending ``failed``. It is a :class:`ContractError` so the engines stop the
+    run on the first one, and a ``RuntimeError`` so callers that caught the old
+    untyped failure still do.
+    """
+
+
+class QuotaExhausted(ProviderConfigError):
+    """The account's quota or billing limit is used up until a human acts (#653).
+
+    Ark answers with HTTP 429 ``AccountQuotaExceeded`` (and a reset time);
+    OpenAI with ``insufficient_quota``. Both are permanent on the retry
+    timescale, so :func:`with_retries` must not back them off like a rate
+    limit. Real throttling (``rate_limit_exceeded``, bare 429 + ``Retry-After``)
+    stays on :class:`RateLimited`.
+    """
+
+
+#: Body markers of a deterministic refusal, for gateways that answer it with a
+#: 400 rather than 401/403/404.
+_CONFIG_ERROR_MARKERS = ("unsupportedmodel", "model_not_found", "invalid_api_key",
+                         "modelnotfound", "invalidapikey", "authenticationerror")
+
+
+#: Body markers / substrings of a permanent quota or billing exhaustion on a
+#: 429/503. Codes named explicitly so the list stays small and reviewable;
+#: the substrings ``quota`` and ``billing`` also catch phrasing such as
+#: "exceeded the weekly usage quota". Real throttling codes like
+#: ``rate_limit_exceeded`` do not match (#653).
+_QUOTA_ERROR_MARKERS = (
+    "accountquotaexceeded",   # Volcengine Ark Coding
+    "insufficient_quota",     # OpenAI
+    "insufficientquota",
+    "billing_hard_limit",
+    "billinghardlimit",
+    "exceeded_quota",
+)
+
+
+def _quota_exhausted_hint(detail: str, *, api_key_env: str) -> Optional[str]:
+    """Hint for a permanent quota/billing 429, or ``None`` for ordinary throttling."""
+    lowered = detail.lower()
+    if "quota" not in lowered and "billing" not in lowered             and not any(m in lowered for m in _QUOTA_ERROR_MARKERS):
+        return None
+    return (f"the account's quota for this model is used up: wait for the reset "
+            f"the provider names, or point {api_key_env} / model at another plan")
+
+
+def _provider_config_hint(code: int, detail: str, *, base: str, model: str,
+                          api_key_env: str, base_url_env: str) -> Optional[str]:
+    """The next step for a deterministic 4xx, or ``None`` when it is not one."""
+    lowered = detail.lower()
+    if code in (401, 403) or "invalid_api_key" in lowered or "invalidapikey" in lowered \
+            or "authenticationerror" in lowered:
+        return (f"check that {api_key_env} holds a key issued for {base} "
+                f"(or set {base_url_env} to the endpoint that key belongs to)")
+    if code == 404 or any(m in lowered for m in _CONFIG_ERROR_MARKERS):
+        return (f"endpoint {base} does not serve model {model!r}: check `model`, "
+                f"or point `default_base_url` / {base_url_env} at an endpoint that does")
+    return None
+
+
 class RateLimited(RuntimeError):
     """The provider said "too many requests", and for how long if it bothered to.
 
@@ -572,6 +644,8 @@ def with_retries(completion: Completion, attempts: int = 3,
         for i in range(attempts):
             try:
                 return completion(prompt)
+            except ProviderConfigError:
+                raise    # the same request gets the same refusal (#635)
             except Exception as e:  # noqa: BLE001 - provider-agnostic retry
                 last = e
                 if i < attempts - 1:
@@ -848,6 +922,13 @@ def openai_compatible(model: str, *, base_url_env: str = "OPENAI_BASE_URL",
             message = (f"{base} returned HTTP {e.code} for model {model!r}"
                        + (f": {detail}" if detail else ""))
             if e.code in (429, 503):
+                # Quota / billing exhaustion is permanent on this timescale
+                # (Ark AccountQuotaExceeded, OpenAI insufficient_quota); fail
+                # fast like other ProviderConfigError (#653). Real throttling
+                # keeps the RateLimited path below.
+                quota_hint = _quota_exhausted_hint(detail, api_key_env=api_key_env)
+                if quota_hint is not None:
+                    raise QuotaExhausted(f"{message} -- {quota_hint}") from e
                 # Told apart from every other 4xx so `with_retries` can wait the
                 # seconds a limiter wants instead of the half-second a transport
                 # blip wants. `Retry-After` is seconds or an HTTP date; only the
@@ -863,6 +944,11 @@ def openai_compatible(model: str, *, base_url_env: str = "OPENAI_BASE_URL",
                 except ValueError:
                     retry_after = None
                 raise RateLimited(message, retry_after) from e
+            hint = _provider_config_hint(e.code, detail, base=base, model=model,
+                                         api_key_env=api_key_env,
+                                         base_url_env=base_url_env)
+            if hint is not None:
+                raise ProviderConfigError(f"{message} -- {hint}") from e
             raise RuntimeError(message) from e
         except Exception as e:
             if usage is not None:
@@ -967,6 +1053,9 @@ def anthropic_compatible(model: str, *, base_url_env: str = "ANTHROPIC_BASE_URL"
             message = (f"{base} returned HTTP {e.code} for model {model!r}"
                        + (f": {detail}" if detail else ""))
             if e.code in (429, 503):
+                quota_hint = _quota_exhausted_hint(detail, api_key_env=api_key_env)
+                if quota_hint is not None:
+                    raise QuotaExhausted(f"{message} -- {quota_hint}") from e
                 header = ""
                 try:
                     header = (e.headers.get("Retry-After") or "").strip()
@@ -977,6 +1066,11 @@ def anthropic_compatible(model: str, *, base_url_env: str = "ANTHROPIC_BASE_URL"
                 except ValueError:
                     retry_after = None
                 raise RateLimited(message, retry_after) from e
+            hint = _provider_config_hint(e.code, detail, base=base, model=model,
+                                         api_key_env=api_key_env,
+                                         base_url_env=base_url_env)
+            if hint is not None:
+                raise ProviderConfigError(f"{message} -- {hint}") from e
             raise RuntimeError(message) from e
         except Exception as e:
             if usage is not None:

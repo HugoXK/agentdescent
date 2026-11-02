@@ -341,6 +341,7 @@ from .self_improve import (
 )
 from .leakage import LeakageGuard, LeakageReport, find_leakage
 from .stopping import MarginalGainStop
+from .budgeted_search import BudgetedSearch, BudgetedSearchReport, SearchRound
 from .stats_eval import (BootstrapResult, ContaminationReport, bootstrap_ci,
                          contamination_overlap, is_significant, paired_gain)
 from .approval import ApprovalGate, ApprovalRequest, ApprovalStore
@@ -368,6 +369,7 @@ from .loop_kernel import (
     LoopReport,
     LoopKernel,
 )
+from .promotion_ledger import PromotionLedger, ReleaseRecord
 from .promotion import (
     PromotionAction,
     PromotionRules,
@@ -400,6 +402,9 @@ from .capability_foundry import (
     CapabilityRequest,
     CapabilityStatus,
 )
+from .counterfactual_experience import CounterfactualExperience, CounterfactualExperienceReport
+from .preference_replay import PreferenceReplay, PreferenceReplayReport
+from .capability_scout import CapabilityScout, CapabilityScoutReport
 from .experience import (
     ExperienceEngine,
     ExperienceHit,
@@ -442,6 +447,8 @@ from .runners import (
 from .orchestrator import AgentDescent, RoundStat, run_fork_baseline
 from .agents import (
     AgentError,
+    ProviderConfigError,
+    QuotaExhausted,
     Completion,
     Usage,
     claude,
@@ -683,6 +690,8 @@ __all__ = [
     "cli_agent",
     "WorkspaceAgent",
     "AgentError",
+    "ProviderConfigError",
+    "QuotaExhausted",
     "Usage",
     "metered",
     "claude",
@@ -831,6 +840,9 @@ __all__ = [
     "LeakageReport",
     "find_leakage",
     "MarginalGainStop",
+    "BudgetedSearch",
+    "BudgetedSearchReport",
+    "SearchRound",
     "BootstrapResult",
     "ContaminationReport",
     "bootstrap_ci",
@@ -891,6 +903,8 @@ __all__ = [
     "PromotionRequest",
     "PromotionDecision",
     "promote",
+    "PromotionLedger",
+    "ReleaseRecord",
     "TrustEvidence",
     "build_trust_evidence",
     "ComputeAction",
@@ -910,6 +924,8 @@ __all__ = [
     "CapabilityOutcome",
     "CapabilityRequest",
     "CapabilityStatus",
+    "CapabilityScout",
+    "CapabilityScoutReport",
     "ExperienceEngine",
     "ExperienceHit",
     "ExperienceRecord",
@@ -919,6 +935,10 @@ __all__ = [
     "PlatformConfig",
     "PlatformReport",
     "RSIPlatform",
+    "CounterfactualExperience",
+    "CounterfactualExperienceReport",
+    "PreferenceReplay",
+    "PreferenceReplayReport",
     "EvaluationReport",
     "EvaluationRow",
     "evaluate",

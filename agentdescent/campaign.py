@@ -138,9 +138,8 @@ def estimate_campaign(spec: EvolveSpec, *, sessions: int = 3,
     if algorithm not in (None, "default"):
         alg = _algorithms.get(algorithm, where="campaign")
         if spec.kind not in alg.kinds:
-            raise ValueError(
-                f"algorithm {algorithm!r} applies to kind {list(alg.kinds)}, "
-                f"not {spec.kind!r}")
+            raise ValueError(_algorithms.kind_mismatch_message(
+                alg, spec.kind, target=str(spec.target)))
     arm = _arm(spec, str(spec.target), index=0, algorithm=algorithm,
                rounds=rounds)
     comp = compose(arm)
@@ -174,9 +173,8 @@ def run_campaign(spec: EvolveSpec, *, sessions: int = 3,
     if algorithm not in (None, "default"):
         alg = _algorithms.get(algorithm, where="campaign")
         if spec.kind not in alg.kinds:
-            raise ValueError(
-                f"algorithm {algorithm!r} applies to kind {list(alg.kinds)}, "
-                f"not {spec.kind!r}")
+            raise ValueError(_algorithms.kind_mismatch_message(
+                alg, spec.kind, target=str(spec.target)))
 
     if workdir is not None and os.path.isdir(os.path.expanduser(workdir)) and \
             os.listdir(os.path.expanduser(workdir)):
@@ -191,6 +189,8 @@ def run_campaign(spec: EvolveSpec, *, sessions: int = 3,
                               spec.target.rstrip(os.sep)) or "target"))
     best = -math.inf
     baseline = None
+    from .runstore import _plain_cli_warnings
+
     history: List[CampaignSession] = []
     stale = 0
     stopped = "sessions"
@@ -201,7 +201,8 @@ def run_campaign(spec: EvolveSpec, *, sessions: int = 3,
                                 dir=workspace)
         try:
             comp = compose(arm, repo_path=repo)
-            result = comp.run()
+            with _plain_cli_warnings():
+                result = comp.run()
             reward = float(result.final_reward)
             if result.error:
                 improved = None

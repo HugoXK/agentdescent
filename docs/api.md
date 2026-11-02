@@ -13,7 +13,7 @@ means the parameter has none.
 Each section links to the page that explains *why* the module is shaped the
 way it is; this page is the *what*.
 
-585 public names across 115 modules.
+598 public names across 120 modules.
 
 ---
 
@@ -837,6 +837,14 @@ Any `prompt -> text` is a completion; a `WorkspaceAgent` also has a directory. &
 ### `AgentError`
 
 A tool-using agent failed; the message carries its stderr / exit status.
+
+### `ProviderConfigError`
+
+The provider refused the request for a reason no retry can change (#635).
+
+### `QuotaExhausted`
+
+The account's quota or billing limit is used up until a human acts (#653).
 
 ### `Usage(...)`
 
@@ -3613,6 +3621,100 @@ build_trust_evidence(
 
 ---
 
+## Counterfactual experience
+
+Turn Shapley step credit into per-action experience rewards. &nbsp;·&nbsp; `agentdescent.counterfactual_experience` &nbsp;·&nbsp; [guide](continual-experience.md)
+
+### `CounterfactualExperience(...)`
+
+Convert Shapley step credit into an `ExperienceRecord` and ingest it.
+
+```python
+CounterfactualExperience(
+    lab: ReplayLab,
+    engine: ExperienceEngine,
+    action_of: Callable[[TraceStep], str],
+    *,
+    min_credit: Optional[float] = None,
+    require_positive_gain: bool = False,
+    permutations: int = 64,
+    seed: int = 0,
+    exact_limit: int = 7
+) -> None
+```
+
+### `CounterfactualExperienceReport(...)`
+
+The credit report, the record it produced and where it was ingested.
+
+```python
+CounterfactualExperienceReport(
+    record: ExperienceRecord,
+    credit: CreditReport,
+    observed: int,
+    detail: str = ''
+) -> None
+```
+
+---
+
+## Preference replay
+
+Rank stored experience with a fitted preference model and replay the preferred slice. &nbsp;·&nbsp; `agentdescent.preference_replay` &nbsp;·&nbsp; [guide](continual-experience.md)
+
+### `PreferenceReplay(...)`
+
+Rank stored experience by a preference model and replay the top slice.
+
+```python
+PreferenceReplay(
+    model: PreferenceModel,
+    store: ExperienceStore,
+    *,
+    featurize: Optional[Callable[[ExperienceRecord], Sequence[float]]] = None
+) -> None
+```
+
+### `PreferenceReplayReport(...)`
+
+The selected records, their scores and what the engine ingested.
+
+```python
+PreferenceReplayReport(
+    selected: Tuple[ExperienceRecord, ...],
+    ingested: Tuple[str, ...],
+    scores: Mapping[str, float] = None,
+    skipped: int = 0,
+    detail: str = ''
+) -> None
+```
+
+---
+
+## Promotion ledger
+
+Sign an accepted promotion into a manifest and lineage receipt. &nbsp;·&nbsp; `agentdescent.promotion_ledger` &nbsp;·&nbsp; [guide](trusted-promotion.md)
+
+### `PromotionLedger(lineage: Optional[LineageGraph] = None, *, issuer: str = 'agentdescent') -> None`
+
+Sign accepted promotions and write their lineage receipt.
+
+### `ReleaseRecord(...)`
+
+The signed manifest, its verification and the lineage node.
+
+```python
+ReleaseRecord(
+    manifest: ArtifactManifest,
+    envelope: SignedEnvelope,
+    verification: VerificationResult,
+    lineage: LineageNode,
+    detail: str = ''
+) -> None
+```
+
+---
+
 ## Capability foundry
 
 Admit a synthesized tool only after validation, review, safety, proof and a holdout gain. &nbsp;·&nbsp; `agentdescent.capability_foundry` &nbsp;·&nbsp; [guide](capability-foundry.md)
@@ -3678,6 +3780,41 @@ CapabilityRequest(
 ### `CapabilityStatus()`
 
 The closed outcome vocabulary for one capability candidate.
+
+---
+
+## Capability scout
+
+Turn failed tasks into a synthesized tool and hand it to the foundry. &nbsp;·&nbsp; `agentdescent.capability_scout` &nbsp;·&nbsp; [guide](capability-foundry.md)
+
+### `CapabilityScout(...)`
+
+Turn failure tasks into a reviewed tool via the existing seams.
+
+```python
+CapabilityScout(
+    synthesizer: ToolSynthesizer,
+    foundry: CapabilityFoundry,
+    *,
+    max_examples: int = 5,
+    max_candidates: int = 4
+) -> None
+```
+
+### `CapabilityScoutReport(...)`
+
+The failure tasks, synthesis trail and admission outcome.
+
+```python
+CapabilityScoutReport(
+    goal: str,
+    tasks: int,
+    synthesis: ToolSynthesisReport,
+    outcome: Optional[CapabilityOutcome],
+    verdict: str,
+    detail: str = ''
+) -> None
+```
 
 ---
 
@@ -3904,6 +4041,51 @@ RSIPlatform(
 
 ---
 
+## Budgeted search
+
+Stop UCT when another expansion stops buying value, using a per-expansion gain bar or MarginalGainStop. &nbsp;·&nbsp; `agentdescent.budgeted_search` &nbsp;·&nbsp; [guide](stopping.md)
+
+### `BudgetedSearch(...)`
+
+Run a search at increasing budgets and stop when the gain plateaus.
+
+```python
+BudgetedSearch(
+    fabric: SearchFabric,
+    *,
+    min_gain_per_expansion: float = 0.0001,
+    patience: int = 2,
+    stop: Optional[MarginalGainStop] = None,
+    seed: int = 0
+) -> None
+```
+
+### `BudgetedSearchReport(...)`
+
+```python
+BudgetedSearchReport(
+    rounds: Tuple[SearchRound, ...],
+    best: Optional[SearchResult],
+    stopped_reason: str,
+    detail: str = ''
+) -> None
+```
+
+### `SearchRound(...)`
+
+```python
+SearchRound(
+    budget: int,
+    result: SearchResult,
+    gain: Optional[float] = None,
+    gain_per_expansion: Optional[float] = None,
+    cumulative_expansions: int = 0,
+    stopped: bool = False
+) -> None
+```
+
+---
+
 ## Solver-challenger self-play
 
 The task distribution evolves too: challenger, frontier, curriculum. &nbsp;·&nbsp; `agentdescent.selfplay` &nbsp;·&nbsp; [guide](selfplay.md)
@@ -3947,6 +4129,7 @@ A `TaskSampler` that mixes the fixed seed tasks with a growable frontier pool th
 |---|---|
 | `count_invalid() -> None` | A validity gate refused a generated payload. |
 | `install(tasks: Sequence[Task]) -> None` | Add a freshly generated, validated frontier batch. |
+| `live_ids() -> Tuple[str, ...]` | The ids currently on the frontier. |
 | `pick(keys: Sequence[str], r: int) -> Any` | A seed id (from the shard) or a frontier Task object. |
 | `record(task_id: str, score: float) -> None` | Learn one rollout's outcome. The engine calls this for every task, seed or frontier; only frontier ids are tracked. |
 | `sweep(solved_threshold: float) -> Dict[str, float]` | Close one solver round: judge every frontier task that was attempted, return the learnability report for the challenger. |
