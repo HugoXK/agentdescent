@@ -70,9 +70,11 @@ nav:
     - The data model: data-model.md
     - Governance (L0 / L1 / L2): governance.md
     - Capability map: capabilities.md
+    - The main path: main-path.md
   - The evolve method: evolution.md
   - Modules — design and usage:
     - Module map: modules.md
+    - Experimental modules: experimental.md
     - Strategies — what evolves: strategies.md
     - Evolving a directory: directory-evolution.md
     - Agents & LLMs: agents.md
@@ -106,10 +108,18 @@ nav:
     - The RSI loop kernel: loop-kernel.md
     - Trusted promotion: trusted-promotion.md
     - Trusted evidence: trust-evidence.md
+    - Release a candidate: release.md
+    - Governed harness change: governed-harness.md
+    - Meta campaign: meta-campaign.md
+    - Tenant cycle: tenant.md
+    - Module audit: module-audit.md
     - Adaptive compute: compute-policy.md
     - Capability foundry: capability-foundry.md
     - Continual experience: continual-experience.md
     - The RSI platform cycle: platform.md
+    - Capability loop: capability-loop.md
+    - Operations console: ops.md
+    - Experience store: experience-cli.md
   - The decision plane (policies):
     - Choosing policies: policies.md
     - Using the slots — a guide: policy-guide.md

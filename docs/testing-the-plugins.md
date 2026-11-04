@@ -227,13 +227,7 @@ async def main():
 asyncio.run(main())
 ```
 
-Expected tools: `apply audit_drift audit_pending audit_recompute audit_rescan audit_resolve audit_scorecard audit_status audit_trace cancel describe_algorithm diagnose doctor list_algorithms plan portfolio resume rsi safety show start status` and a doctor report (21 total: nine run-lifecycle tools,
-seven audit tools, two algorithm-discovery tools and three read-only archive
-tools).
-audit tools, two algorithm-discovery tools, three read-only archive tools and
-the RSI trend).
-seven audit tools, two algorithm-discovery tools and three read-only archive
-tools).
+Expected tools: `algorithm_spec apply audit_drift audit_pending audit_recompute audit_rescan audit_resolve audit_scorecard audit_status audit_trace cancel capability describe_algorithm diagnose doctor experience_cycle experience_ingest experience_recall experience_replay experience_report experience_update governed_harness list_algorithms meta_campaign ops plan platform portfolio release resume rsi safety show start status tenant` and a doctor report (36 total: run lifecycle, audit, algorithm discovery and spec building, archive/meta, release, and the platform/capability/ops/experience/governed-harness/meta-campaign/tenant surfaces).
 
 ## 6. The web panel
 

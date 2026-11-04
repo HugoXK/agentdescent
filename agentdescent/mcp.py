@@ -95,6 +95,16 @@ TOOL_DESCRIPTIONS: Dict[str, str] = {
         "parameter with its type, default and bounds. Call this before setting "
         "`algorithm: {name, params}` so the values you pass are the ones plan expects. "
         "The same data is in `agentdescent algorithms show <name>`."),
+    "algorithm_spec": (
+        "Build and plan a starter spec for one named algorithm on the user's target "
+        "-- the MCP form of `agentdescent algorithms run NAME PATH [cases]`. Pass the "
+        "algorithm `name` (from list_algorithms), the absolute target `path`, and the "
+        "absolute `cases` JSONL; `params` is the algorithm's params as an object "
+        "(check describe_algorithm first), and `rounds`/`workers` = 1/1 is a quick "
+        "trial. It writes the spec file (default beside the target, never inside it) "
+        "and returns the plan estimate plus `spec`, the dict to pass to start. It "
+        "starts nothing: show the user the estimate and get a yes before start. "
+        "`model`/`base_url` come from the user, never guess them."),
     "plan": (
         "Validate an EvolveSpec and estimate its cost WITHOUT running anything. Resolves "
         "every agent/scorer/policy reference and loads the data, so a wrong field fails "
@@ -122,7 +132,8 @@ TOOL_DESCRIPTIONS: Dict[str, str] = {
         "outcomes() histogram that says why proposals were committed or refused. Explain "
         "what changed and why; do not paste the whole tree."),
     "diagnose": (
-        "Explain why a run ended where it did: solved, partial-improvement, running, "
+        "Explain why a run ended where it did: solved, seed-already-solved, "
+        "partial-improvement, running, "
         "cancelled, run-failed, reflector-error, scoring-mismatch, agent-failures, "
         "gate-rejected, no-improvement or unknown, with bounded evidence and the next "
         "step. Call this after `show` when the run learned little, instead of guessing "
@@ -184,6 +195,100 @@ TOOL_DESCRIPTIONS: Dict[str, str] = {
         "whatever prefixes the operator set in AGENTDESCENT_RESCAN_ALLOW can be named. "
         "That list is not something this tool can widen: if the reference you need is "
         "refused, tell the user which prefix to add and why."),
+    "tenant": (
+        "Run one platform cycle under a workspace registry's roles, quota and "
+        "audit. Pass a tenant spec object containing a nested `platform` spec "
+        "plus tenant/workspace/principal/roles/quota and the tokens/cost to "
+        "reserve. dry_run validates the platform refs and checks run:write "
+        "without creating the DB; the run reserves quota, executes the cycle and "
+        "commits usage. Refs use AGENTDESCENT_SURFACE_ALLOW; written paths use "
+        "AGENTDESCENT_SURFACE_WRITE_DIRS. Roles are spec-asserted, not "
+        "authenticated; the registry/quota are per-invocation and the audit "
+        "trail is not persisted."),
+    "meta_campaign": (
+        "Run continuous meta-learning as a bounded campaign: repeated "
+        "continuous_meta_run sessions over one ConsolidationStore, each in a fresh "
+        "ledger repo, with RSIController target/cost/patience/session stops. Pass a "
+        "meta-campaign spec object; dry_run validates refs and configs without "
+        "calling builders or creating the archive. Refs use "
+        "AGENTDESCENT_SURFACE_ALLOW; archive/repo_dir/out writes use "
+        "AGENTDESCENT_SURFACE_WRITE_DIRS. When repo_dir is omitted the server "
+        "uses a system temporary directory outside that allowlist; pass repo_dir "
+        "to keep every ledger confined. A rejected rule is a normal measured "
+        "session; an errored session stops the campaign with complete=false."),
+    "governed_harness": (
+        "Gate and sign one harness/code self-modification: safety (AST/capability "
+        "gate), proof invariants, human approval, canary/rollback plan and the "
+        "fail-closed promotion decision. Pass a governed-harness spec object; "
+        "dry_run validates refs and scores without running the gates. Refs are "
+        "gated by AGENTDESCENT_SURFACE_ALLOW; writes by "
+        "AGENTDESCENT_SURFACE_WRITE_DIRS. A pending/rejected approval or failed "
+        "proof never reaches promotion; only an accepted change is `promoted`."),
+    "platform": (
+        "Plan or run a durable five-layer RSI campaign (loop, compute, promotion, "
+        "capability foundry, experience). Pass a platform spec object; dry_run=true "
+        "resolves every `module:attribute` ref and validates the configs without "
+        "running, dry_run=false runs the bounded campaign and returns the per-cycle "
+        "report. Refs are refused unless the server operator allowlists their "
+        "module prefix in AGENTDESCENT_SURFACE_ALLOW (empty refuses every ref); "
+        "writes are confined to AGENTDESCENT_SURFACE_WRITE_DIRS. Optional `out` "
+        "writes the JSON report atomically."),
+    "capability": (
+        "Plan or run the failure-to-capability loop (traces -> task pipeline -> "
+        "tool synthesis -> capability foundry -> QD archive). Pass a capability spec "
+        "object; dry_run=true validates refs and loads traces, dry_run=false runs "
+        "the loop and returns the pipeline/scout/archive verdict. Refs are "
+        "refused unless the operator allowlists their module prefix in "
+        "AGENTDESCENT_SURFACE_ALLOW (empty refuses every ref); writes are "
+        "confined to AGENTDESCENT_SURFACE_WRITE_DIRS."),
+    "ops": (
+        "Plan or publish terminal runs from a SQLite run database into the "
+        "control room: console, lineage, telemetry, RSI metrics and alerts. dry_run "
+        "counts the runs first. `out` writes the JSON report; `prometheus` writes "
+        "Prometheus text. A tenant/workspace with no terminal runs is a no-op, not "
+        "an error. `out`/`prometheus` must be under "
+        "AGENTDESCENT_SURFACE_WRITE_DIRS."),
+    "experience_cycle": (
+        "Run one guarded adaptive experience cycle: ingest new records, choose "
+        "validation/anchors through the preference/recall/history cascade, and "
+        "delegate the update and forgetting guard to ExperienceEngine. Supply "
+        "action names and the feature dimension; `records`/`validation`/`anchors` "
+        "are lists or JSONL paths. `store` must be under "
+        "AGENTDESCENT_SURFACE_WRITE_DIRS. Returns the plan, ingested ids and the "
+        "update decision (accepted/rolled_back/reason)."),
+    "experience_report": (
+        "Summarise an ExperienceStore JSONL: rows, accepted count, action "
+        "histogram, mean action reward, last run id and feature dimensions. A "
+        "missing store reports zero rows; it does not create the file."),
+    "experience_ingest": (
+        "Append ExperienceRecord objects (list or JSONL path) to an experience "
+        "store, deduplicating by run_id. Returns the new ids, how many already "
+        "existed, and the updated summary. `store` must be under "
+        "AGENTDESCENT_SURFACE_WRITE_DIRS."),
+    "experience_recall": (
+        "Nearest stored ExperienceRecords to a feature vector. `features` is a list "
+        "or comma-separated string; records with a different feature dimension are "
+        "skipped. Returns distance plus the full record."),
+    "experience_update": (
+        "Run the guarded continual-meta update over validation rows with anchors, "
+        "using the same ExperienceEngine forgetting guard as the library. Supply "
+        "action names and the feature dimension; returns the update decision, "
+        "before/after/drift and whether it rolled back."),
+    "experience_replay": (
+        "Fit a Bradley-Terry preference model from pairwise preferences, rank a "
+        "source experience store, and replay the preferred slice into a separate "
+        "engine store. Source and store must be different files. Returns the "
+        "selected/ingested ids and the fitted-model replay report."),
+    "release": (
+        "Gate and sign one release from paired task scores: build the same trusted "
+        "evidence as `evolve`, run the fail-closed promotion decision, and only on "
+        "an accepted promotion write a signed `ArtifactManifest` and lineage node. "
+        "`before` and `after` are task -> score objects for the same held-out tasks; "
+        "`artifact_hash` is required and is the manifest identity. The signing "
+        "secret is read from `secret_env` (default AGENTDESCENT_RELEASE_KEY) or "
+        "`secret_file`, never from a tool argument. A reject/defer is a normal "
+        "result with `released: false`; ask the user before treating any release as "
+        "final. Pass `lineage` to persist and extend the receipt graph."),
     "safety": (
         "Read-only: is a consolidation archive (the rules meta runs adopted) safe to "
         "keep seeding new runs from? Returns `verdict` (safe / caution / unsafe), a "
@@ -219,8 +324,23 @@ class Tools:
     """The tool bodies, SDK-free. One instance per server, bound to a run store."""
 
     def __init__(self, store: Optional[str] = None, *,
-                 rescan_allow: Optional[Sequence[str]] = None) -> None:
+                 rescan_allow: Optional[Sequence[str]] = None,
+                 surface_allow: Optional[Sequence[str]] = None,
+                 surface_write_dirs: Optional[Sequence[str]] = None) -> None:
+        from .surface_common import (
+            surface_allow_from_env, surface_write_dirs_from_env,
+        )
         self.store = store
+        #: The operator's allowlist for `platform`/`capability` refs. Empty
+        #: refuses every ref: the model-filled spec is not the boundary.
+        self.surface_allow: Tuple[str, ...] = (
+            tuple(surface_allow) if surface_allow is not None
+            else surface_allow_from_env())
+        #: Where the MCP surfaces may create/overwrite files. The default is the
+        #: server's cwd and $AGENTDESCENT_HOME; an explicit empty list refuses.
+        self.surface_write_dirs: Tuple[str, ...] = (
+            tuple(surface_write_dirs) if surface_write_dirs is not None
+            else surface_write_dirs_from_env())
         #: Import prefixes `audit_rescan` may resolve beyond this package. It is
         #: read from the operator's environment and never from a tool call: see
         #: `audit_rescan` for why that distinction is the whole control.
@@ -294,6 +414,76 @@ class Tools:
             return algorithms.get(name, where="describe_algorithm").describe()
         except algorithms.AlgorithmError as e:
             return {"error": str(e)}
+
+    def algorithm_spec(self, name: str, path: str, cases: Optional[str] = None,
+                       kind: Optional[str] = None,
+                       params: Optional[Dict[str, Any]] = None,
+                       rounds: Optional[int] = None, workers: Optional[int] = None,
+                       agent: Optional[str] = None, model: Optional[str] = None,
+                       base_url: Optional[str] = None, key_env: Optional[str] = None,
+                       out: Optional[str] = None,
+                       usd_per_call: Optional[float] = None) -> Dict[str, Any]:
+        """``algorithms run`` over MCP (#723): same checks, same object."""
+        from .cli import _public, algorithms_run_payload
+
+        if params is not None and not isinstance(params, dict):
+            return {"ok": False, "error": "params must be an object of "
+                    "{parameter: value} (see describe_algorithm)"}
+        # Passed through as an object, never re-encoded as `--param k=v`
+        # strings: that split a key containing `=` and named a CLI flag the
+        # host never used (#729). Names are stripped like the CLI's.
+        clean: Dict[str, Any] = {}
+        for key, value in (params or {}).items():
+            pname = key.strip() if isinstance(key, str) else ""
+            if not pname:
+                return {"ok": False, "error": f"params key {key!r} must be a "
+                        "non-empty parameter name (see describe_algorithm)"}
+            if pname in clean:
+                return {"ok": False, "error": f"params key {pname!r} was given "
+                        "more than once"}
+            clean[pname] = value
+        # The server's cwd is not the host's, so paths are made absolute here
+        # and the default spec goes beside the target -- never inside a
+        # directory target, where it would become part of the artifact.
+        abs_path = os.path.abspath(os.path.expanduser(path))
+        abs_cases = (os.path.abspath(os.path.expanduser(cases))
+                     if cases is not None else None)
+        if out is None:
+            from . import algorithms
+
+            try:
+                registered = algorithms.get(name, where="algorithm_spec").name
+            except algorithms.AlgorithmError as e:
+                return {"ok": False, "error": str(e)}
+            out = os.path.join(os.path.dirname(abs_path.rstrip(os.sep)) or os.sep,
+                               f"agentdescent.{registered}.spec.json")
+        else:
+            out = os.path.abspath(os.path.expanduser(out))
+        try:
+            obj = algorithms_run_payload(
+                name, abs_path, kind=kind, cases=abs_cases, agent=agent,
+                model=model, base_url=base_url, key_env=key_env, params=clean,
+                out=out, rounds=rounds, workers=workers, usd_per_call=usd_per_call)
+        except SpecError as e:
+            return {"ok": False, "error": str(e)}
+        result = _public(obj)
+        if isinstance(result.get("error"), str):
+            # The CLI hint names its positional; here the field is `cases`.
+            result["error"] = result["error"].replace(
+                "the cases path you passed as the third argument",
+                "the `cases` path you passed").replace(
+                "pass a cases.jsonl as the third argument "
+                "(see `agentdescent algorithms run --help`)", "pass `cases`")
+        if isinstance(result.get("spec"), str):
+            # The CLI's legacy `spec` (a path) would read as the dict for start.
+            result.pop("spec")
+        if result.get("ok", True) and obj.get("_stage") == "done":
+            from .evolvespec import load_spec
+
+            result["spec"] = load_spec(obj["spec_path"]).to_dict()
+            result["next"] = ("show the user this estimate; after their yes, call "
+                              "start with `spec`")
+        return result
 
     def plan(self, spec: Dict[str, Any], usd_per_call: Optional[float] = None) -> Dict[str, Any]:
         try:
@@ -558,6 +748,227 @@ class Tools:
         except MetaCommandError as e:
             return {"error": str(e)}
 
+    def release(self, before: Dict[str, float], after: Dict[str, float], *,
+                artifact_id: str, artifact_hash: str, key_id: str,
+                rules: Optional[Dict[str, Any]] = None,
+                lineage: Optional[str] = None,
+                parents: Optional[Sequence[str]] = None,
+                contamination: str = "unknown",
+                approval: str = "unknown",
+                risk: Optional[float] = None,
+                min_effect: float = 0.0, max_risk: float = 1.0,
+                alpha: float = 0.05, seed: int = 0,
+                proxy_gains: Optional[Sequence[float]] = None,
+                oracle_gains: Optional[Sequence[float]] = None,
+                issuer: str = "agentdescent", run_id: str = "",
+                kind: str = "skill",
+                metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        from .release_surface import (
+            ReleaseSurfaceError, load_rules, release_payload, resolve_secret,
+        )
+
+        try:
+            self._check_write(lineage, "lineage")
+            policy = load_rules(
+                rules, min_effect=min_effect, max_risk=max_risk)
+            secret = resolve_secret()
+            return release_payload(
+                before, after, artifact_id=artifact_id,
+                artifact_hash=artifact_hash, key_id=key_id, secret=secret,
+                rules=policy, lineage=lineage, parents=parents or (),
+                contaminated=contamination, approved=approval, risk=risk,
+                min_effect=min_effect, alpha=alpha, seed=seed,
+                proxy_gains=proxy_gains, oracle_gains=oracle_gains,
+                issuer=issuer, run_id=run_id, kind=kind, metadata=metadata)
+        except (ReleaseSurfaceError, OSError, ValueError) as e:
+            return {"ok": False, "error": str(e)}
+
+    def _check_write(self, path: Optional[str], name: str) -> Optional[str]:
+        from .surface_common import ensure_write_path
+
+        return ensure_write_path(
+            path, name=name, allow=self.surface_write_dirs)
+
+    def tenant(self, spec: Dict[str, Any], *, dry_run: bool = False,
+               out: Optional[str] = None) -> Dict[str, Any]:
+        from . import surface_tenant as surface
+
+        try:
+            platform_spec = spec.get("platform") if isinstance(spec, dict) else None
+            if isinstance(platform_spec, dict):
+                self._check_write(
+                    platform_spec.get("runs_db") or platform_spec.get("store"),
+                    "runs_db")
+            if dry_run:
+                return surface.tenant_plan(spec, allow=self.surface_allow)
+            self._check_write(out, "out")
+            return surface.tenant_run(
+                spec, out=out, allow=self.surface_allow)
+        except Exception as e:  # noqa: BLE001 - a bad spec must not kill the server
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    def meta_campaign(self, spec: Dict[str, Any], *, dry_run: bool = False,
+                      out: Optional[str] = None) -> Dict[str, Any]:
+        from . import surface_meta_campaign as surface
+
+        try:
+            self._check_write(spec.get("archive"), "archive")
+            self._check_write(spec.get("repo_dir"), "repo_dir")
+            if dry_run:
+                return surface.meta_campaign_plan(spec, allow=self.surface_allow)
+            self._check_write(out, "out")
+            return surface.meta_campaign_run_surface(
+                spec, out=out, allow=self.surface_allow)
+        except Exception as e:  # noqa: BLE001 - a bad spec must not kill the server
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    def governed_harness(self, spec: Dict[str, Any], *,
+                         dry_run: bool = False,
+                         out: Optional[str] = None) -> Dict[str, Any]:
+        from . import surface_governed as surface
+
+        try:
+            approval = spec.get("approval_store") if isinstance(spec, dict) else None
+            if isinstance(approval, dict):
+                approval = approval.get("path")
+            self._check_write(approval, "approval_store")
+            if dry_run:
+                return surface.governed_plan(spec, allow=self.surface_allow)
+            self._check_write(out, "out")
+            return surface.governed_run(
+                spec, out=out, allow=self.surface_allow)
+        except Exception as e:  # noqa: BLE001 - a bad spec must not kill the server
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    def platform(self, spec: Dict[str, Any], *, dry_run: bool = False,
+                 out: Optional[str] = None) -> Dict[str, Any]:
+        from . import surface_platform as surface
+        try:
+            if dry_run:
+                return surface.platform_plan(spec, allow=self.surface_allow)
+            self._check_write(out, "out")
+            if isinstance(spec, dict):
+                self._check_write(spec.get("runs_db") or spec.get("store"),
+                                  "runs_db")
+            return surface.platform_run(
+                spec, out=out, allow=self.surface_allow)
+        except Exception as e:  # noqa: BLE001 - a bad spec must not kill the server
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    def capability(self, spec: Dict[str, Any], *, dry_run: bool = False,
+                   out: Optional[str] = None) -> Dict[str, Any]:
+        from . import surface_capability as surface
+        try:
+            if dry_run:
+                return surface.capability_plan(spec, allow=self.surface_allow)
+            self._check_write(out, "out")
+            return surface.capability_run(
+                spec, out=out, allow=self.surface_allow)
+        except Exception as e:  # noqa: BLE001 - a bad spec must not kill the server
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    def ops(self, runs_db: str, tenant: str, workspace: str, *,
+            dry_run: bool = False, min_acceptance: float = 0.0,
+            max_cost_per_accepted: Optional[float] = None,
+            out: Optional[str] = None,
+            prometheus: Optional[str] = None) -> Dict[str, Any]:
+        from . import surface_ops as surface
+        try:
+            if dry_run:
+                return surface.ops_plan(
+                    runs_db=runs_db, tenant=tenant, workspace=workspace)
+            self._check_write(out, "out")
+            self._check_write(prometheus, "prometheus")
+            return surface.ops_publish(
+                runs_db=runs_db, tenant=tenant, workspace=workspace,
+                min_acceptance=min_acceptance,
+                max_cost_per_accepted=max_cost_per_accepted,
+                out=out, prometheus=prometheus)
+        except Exception as e:  # noqa: BLE001 - a bad spec must not kill the server
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    def experience_cycle(
+            self, store: Optional[str], records: Any, validation: Any,
+            anchors: Any, actions: Any, dim: int, *,
+            learning_rate: float = 0.2, l2: float = 1e-3,
+            replay_size: int = 1000, min_gain: float = 0.0, seed: int = 0,
+            require_anchors: bool = True,
+            anchor_tolerance: float = 0.0,
+            features: Any = None, k: int = 5) -> Dict[str, Any]:
+        from . import surface_experience as surface
+
+        try:
+            self._check_write(store, "store")
+            return surface.experience_cycle(
+                store=store, records=records, validation=validation,
+                anchors=anchors, actions=actions, dim=dim,
+                learning_rate=learning_rate, l2=l2,
+                replay_size=replay_size, min_gain=min_gain, seed=seed,
+                require_anchors=require_anchors,
+                anchor_tolerance=anchor_tolerance,
+                features=features, k=k)
+        except Exception as e:  # noqa: BLE001 - a bad spec must not kill the server
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    def experience_report(self, store: Optional[str] = None) -> Dict[str, Any]:
+        from . import surface_experience as surface
+        try:
+            return surface.experience_report(store=store)
+        except Exception as e:  # noqa: BLE001 - a bad spec must not kill the server
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    def experience_ingest(self, store: Optional[str], records: Any) -> Dict[str, Any]:
+        from . import surface_experience as surface
+        try:
+            self._check_write(store, "store")
+            return surface.experience_ingest(store=store, records=records)
+        except Exception as e:  # noqa: BLE001 - a bad spec must not kill the server
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    def experience_recall(self, store: Optional[str], features: Any,
+                          k: int = 5) -> Dict[str, Any]:
+        from . import surface_experience as surface
+        try:
+            return surface.experience_recall(
+                store=store, features=features, k=k)
+        except Exception as e:  # noqa: BLE001 - a bad spec must not kill the server
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    def experience_update(
+            self, store: Optional[str], validation: Any, anchors: Any,
+            actions: Any, dim: int, *, learning_rate: float = 0.2,
+            l2: float = 1e-3, replay_size: int = 1000,
+            min_gain: float = 0.0, seed: int = 0,
+            require_anchors: bool = True,
+            anchor_tolerance: float = 0.0) -> Dict[str, Any]:
+        from . import surface_experience as surface
+        try:
+            self._check_write(store, "store")
+            return surface.experience_update(
+                store=store, validation=validation, anchors=anchors,
+                actions=actions, dim=dim, learning_rate=learning_rate, l2=l2,
+                replay_size=replay_size, min_gain=min_gain, seed=seed,
+                require_anchors=require_anchors,
+                anchor_tolerance=anchor_tolerance)
+        except Exception as e:  # noqa: BLE001 - a bad spec must not kill the server
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    def experience_replay(
+            self, source: str, store: Optional[str], pairs: Any,
+            actions: Any, dim: int, *, k: int = 5,
+            learning_rate: float = 0.2, l2: float = 1e-3,
+            replay_size: int = 1000, min_gain: float = 0.0,
+            seed: int = 0) -> Dict[str, Any]:
+        from . import surface_experience as surface
+        try:
+            self._check_write(store, "store")
+            return surface.experience_replay(
+                source=source, store=store, pairs=pairs, actions=actions,
+                dim=dim, k=k, learning_rate=learning_rate, l2=l2,
+                replay_size=replay_size, min_gain=min_gain, seed=seed)
+        except Exception as e:  # noqa: BLE001 - a bad spec must not kill the server
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
 
 def _context_class():
     """The SDK's ``Context``, whose *annotation* is how a tool asks for a session.
@@ -676,6 +1087,18 @@ def build_server(store: Optional[str] = None, *, name: str = "agentdescent",
             stagnation_window: int = 3) -> Dict[str, Any]:
         return t.rsi(archive, slot, stagnation_window)
 
+    @server.tool(description=TOOL_DESCRIPTIONS["algorithm_spec"])
+    def algorithm_spec(name: str, path: str, cases: Optional[str] = None,
+                       kind: Optional[str] = None,
+                       params: Optional[Dict[str, Any]] = None,
+                       rounds: Optional[int] = None, workers: Optional[int] = None,
+                       agent: Optional[str] = None, model: Optional[str] = None,
+                       base_url: Optional[str] = None, key_env: Optional[str] = None,
+                       out: Optional[str] = None,
+                       usd_per_call: Optional[float] = None) -> Dict[str, Any]:
+        return t.algorithm_spec(name, path, cases, kind, params, rounds, workers,
+                                agent, model, base_url, key_env, out, usd_per_call)
+
     @server.tool(description=TOOL_DESCRIPTIONS["plan"])
     def plan(spec: Dict[str, Any], usd_per_call: Optional[float] = None) -> Dict[str, Any]:
         return t.plan(spec, usd_per_call)
@@ -786,6 +1209,121 @@ def build_server(store: Optional[str] = None, *, name: str = "agentdescent",
     def safety(archive: Optional[str] = None, audit: Optional[str] = None,
                bias_threshold: float = 0.1, min_exam: str = "passed") -> Dict[str, Any]:
         return t.safety(archive, audit, bias_threshold, min_exam)
+
+    @server.tool(description=TOOL_DESCRIPTIONS["release"])
+    def release(before: Dict[str, float], after: Dict[str, float],
+                artifact_id: str, artifact_hash: str, key_id: str,
+                rules: Optional[Dict[str, Any]] = None,
+                lineage: Optional[str] = None,
+                parents: Optional[Sequence[str]] = None,
+                contamination: str = "unknown",
+                approval: str = "unknown",
+                risk: Optional[float] = None,
+                min_effect: float = 0.0, max_risk: float = 1.0,
+                alpha: float = 0.05, seed: int = 0,
+                proxy_gains: Optional[Sequence[float]] = None,
+                oracle_gains: Optional[Sequence[float]] = None,
+                issuer: str = "agentdescent", run_id: str = "",
+                kind: str = "skill",
+                metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        return t.release(
+            before, after, artifact_id=artifact_id,
+            artifact_hash=artifact_hash, key_id=key_id, rules=rules,
+            lineage=lineage, parents=parents, contamination=contamination,
+            approval=approval, risk=risk, min_effect=min_effect,
+            max_risk=max_risk, alpha=alpha, seed=seed,
+            proxy_gains=proxy_gains, oracle_gains=oracle_gains,
+            issuer=issuer, run_id=run_id, kind=kind, metadata=metadata)
+
+    @server.tool(description=TOOL_DESCRIPTIONS["tenant"])
+    def tenant(spec: Dict[str, Any], dry_run: bool = False,
+               out: Optional[str] = None) -> Dict[str, Any]:
+        return t.tenant(spec, dry_run=dry_run, out=out)
+
+    @server.tool(description=TOOL_DESCRIPTIONS["meta_campaign"])
+    def meta_campaign(spec: Dict[str, Any], dry_run: bool = False,
+                      out: Optional[str] = None) -> Dict[str, Any]:
+        return t.meta_campaign(spec, dry_run=dry_run, out=out)
+
+    @server.tool(description=TOOL_DESCRIPTIONS["governed_harness"])
+    def governed_harness(spec: Dict[str, Any], dry_run: bool = False,
+                         out: Optional[str] = None) -> Dict[str, Any]:
+        return t.governed_harness(spec, dry_run=dry_run, out=out)
+
+    @server.tool(description=TOOL_DESCRIPTIONS["platform"])
+    def platform(spec: Dict[str, Any], dry_run: bool = False,
+                 out: Optional[str] = None) -> Dict[str, Any]:
+        return t.platform(spec, dry_run=dry_run, out=out)
+
+    @server.tool(description=TOOL_DESCRIPTIONS["capability"])
+    def capability(spec: Dict[str, Any], dry_run: bool = False,
+                   out: Optional[str] = None) -> Dict[str, Any]:
+        return t.capability(spec, dry_run=dry_run, out=out)
+
+    @server.tool(description=TOOL_DESCRIPTIONS["ops"])
+    def ops(runs_db: str, tenant: str, workspace: str,
+            dry_run: bool = False, min_acceptance: float = 0.0,
+            max_cost_per_accepted: Optional[float] = None,
+            out: Optional[str] = None,
+            prometheus: Optional[str] = None) -> Dict[str, Any]:
+        return t.ops(
+            runs_db, tenant, workspace, dry_run=dry_run,
+            min_acceptance=min_acceptance,
+            max_cost_per_accepted=max_cost_per_accepted,
+            out=out, prometheus=prometheus)
+
+    @server.tool(description=TOOL_DESCRIPTIONS["experience_cycle"])
+    def experience_cycle(store: Optional[str], records: Any,
+                         validation: Any = None, anchors: Any = None,
+                         actions: Any = None, dim: int = 0,
+                         learning_rate: float = 0.2, l2: float = 1e-3,
+                         replay_size: int = 1000, min_gain: float = 0.0,
+                         seed: int = 0, require_anchors: bool = True,
+                         anchor_tolerance: float = 0.0,
+                         features: Any = None,
+                         k: int = 5) -> Dict[str, Any]:
+        return t.experience_cycle(
+            store, records, validation, anchors, actions, dim,
+            learning_rate=learning_rate, l2=l2, replay_size=replay_size,
+            min_gain=min_gain, seed=seed, require_anchors=require_anchors,
+            anchor_tolerance=anchor_tolerance, features=features, k=k)
+
+    @server.tool(description=TOOL_DESCRIPTIONS["experience_report"])
+    def experience_report(store: Optional[str] = None) -> Dict[str, Any]:
+        return t.experience_report(store)
+
+    @server.tool(description=TOOL_DESCRIPTIONS["experience_ingest"])
+    def experience_ingest(store: Optional[str], records: Any) -> Dict[str, Any]:
+        return t.experience_ingest(store, records)
+
+    @server.tool(description=TOOL_DESCRIPTIONS["experience_recall"])
+    def experience_recall(store: Optional[str], features: Any,
+                          k: int = 5) -> Dict[str, Any]:
+        return t.experience_recall(store, features, k)
+
+    @server.tool(description=TOOL_DESCRIPTIONS["experience_update"])
+    def experience_update(store: Optional[str], validation: Any, anchors: Any,
+                          actions: Any, dim: int,
+                          learning_rate: float = 0.2, l2: float = 1e-3,
+                          replay_size: int = 1000, min_gain: float = 0.0,
+                          seed: int = 0, require_anchors: bool = True,
+                          anchor_tolerance: float = 0.0) -> Dict[str, Any]:
+        return t.experience_update(
+            store, validation, anchors, actions, dim,
+            learning_rate=learning_rate, l2=l2, replay_size=replay_size,
+            min_gain=min_gain, seed=seed, require_anchors=require_anchors,
+            anchor_tolerance=anchor_tolerance)
+
+    @server.tool(description=TOOL_DESCRIPTIONS["experience_replay"])
+    def experience_replay(source: str, store: Optional[str], pairs: Any,
+                          actions: Any, dim: int, k: int = 5,
+                          learning_rate: float = 0.2, l2: float = 1e-3,
+                          replay_size: int = 1000, min_gain: float = 0.0,
+                          seed: int = 0) -> Dict[str, Any]:
+        return t.experience_replay(
+            source, store, pairs, actions, dim, k=k,
+            learning_rate=learning_rate, l2=l2, replay_size=replay_size,
+            min_gain=min_gain, seed=seed)
 
     @server.tool(description=TOOL_DESCRIPTIONS["portfolio"])
     def portfolio(archive: Optional[str] = None, floor: float = 0.05,

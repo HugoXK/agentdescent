@@ -34,6 +34,7 @@ EvolutionResult(
     final_reward: float,
     history: List[RoundInfo],
     ledger_log: List[str],
+    initial_reward: Optional[float] = None,
     error: Optional[str] = None,
     stop_reason: str = 'rounds',
     forced_refreshes: int = 0,
@@ -3571,8 +3572,8 @@ The reports one paired evaluation produced, ready for `promote()`.
 TrustEvidence(
     eval_result: EvalResult,
     canary: CanaryResult,
-    conformal: ConformalReport,
-    sequential: SequentialReport,
+    conformal: Optional[ConformalReport] = None,
+    sequential: Optional[SequentialReport] = None,
     goodhart: Optional[GoodhartReport] = None,
     metamorphic: Optional[MetamorphicReport] = None,
     verifier: Optional[EnsembleReport] = None,

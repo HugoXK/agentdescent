@@ -103,6 +103,18 @@ def _spec_error(a: argparse.Namespace, e: Exception) -> int:
     return 2
 
 
+def _surface_error(a: argparse.Namespace, error: Exception) -> int:
+    """A product-surface error: JSON under --json, one stderr line otherwise."""
+    if os.environ.get("AGENTDESCENT_DEBUG"):
+        raise error
+    message = f"{type(error).__name__}: {error}"
+    if getattr(a, "json", False):
+        _out({"ok": False, "error": message}, as_json=True)
+    else:
+        print(f"error: {message}", file=sys.stderr)
+    return 2
+
+
 def _status_line(st: runstore.RunStatus) -> str:
     reward = "" if st.best_reward is None else f" best={st.best_reward:.3f}"
     rounds = f"{st.round}/{st.rounds}" if st.rounds else f"{st.round}"
@@ -275,6 +287,47 @@ def algorithm_override(name: Optional[str], params: Optional[Mapping[str, Any]],
     return name if not params else {"name": name, "params": dict(params)}
 
 
+def missing_target_message(path: str) -> str:
+    """One-line error when ``init`` / ``algorithms run`` get a PATH that is not there (#706)."""
+    return f"target {path!r} does not exist (cwd {os.getcwd()})"
+
+
+def require_existing_target(path: str, kind: Optional[str]) -> Optional[str]:
+    """Error text when PATH must exist for this kind, else ``None``.
+
+    ``text`` and ``policy_slot`` may name a non-path (inline prompt / slot name).
+    When ``kind`` is omitted a missing PATH must not fall through ``guess_kind``
+    to ``skill_dir`` (#706).
+    """
+    if kind in ("text", "policy_slot"):
+        return None
+    if os.path.exists(os.path.expanduser(path)):
+        return None
+    return missing_target_message(path)
+
+
+def guess_kind(path: str) -> str:
+    """The spec kind ``init`` / ``algorithms run`` assume for ``path`` without ``--kind``.
+
+    A path that does not exist is never guessed as ``skill_dir``: callers must
+    report :func:`missing_target_message` first (#706).
+    """
+    p = os.path.expanduser(path)
+    if not os.path.exists(p):
+        raise ValueError(missing_target_message(path))
+    if os.path.isfile(p):
+        return "text"
+    if os.path.isdir(p) and os.path.exists(os.path.join(p, "tests")) and any(
+            f.endswith(".py") for f in os.listdir(p)):
+        return "agent_code"
+    if os.path.isdir(p) and (os.path.exists(os.path.join(p, ".claude-plugin"))
+                             or os.path.exists(os.path.join(p, "cordis.patch.yml"))):
+        return "plugin"
+    if os.path.basename(os.path.dirname(p.rstrip(os.sep))) == "agents":
+        return "agent_dir"
+    return "skill_dir"
+
+
 def starter_spec(path: str, *, kind: Optional[str] = None, data: Optional[str] = None,
                  agent: Optional[str] = None,
                  agent_explicit: bool = False, model: Optional[str] = None,
@@ -297,18 +350,7 @@ def starter_spec(path: str, *, kind: Optional[str] = None, data: Optional[str] =
     llm = starter_model_block(model=model, base_url=base_url, key_env=key_env)
     p = os.path.expanduser(path)
     if kind is None:
-        if os.path.isfile(p):
-            kind = "text"
-        elif os.path.isdir(p) and os.path.exists(os.path.join(p, "tests")) and any(
-                f.endswith(".py") for f in os.listdir(p)):
-            kind = "agent_code"
-        elif os.path.isdir(p) and (os.path.exists(os.path.join(p, ".claude-plugin"))
-                                   or os.path.exists(os.path.join(p, "cordis.patch.yml"))):
-            kind = "plugin"
-        elif os.path.basename(os.path.dirname(p.rstrip(os.sep))) == "agents":
-            kind = "agent_dir"
-        else:
-            kind = "skill_dir"
+        kind = guess_kind(path)
     spec: Dict[str, Any] = {
         "version": 1, "kind": kind, "target": path,
         "data": {"path": data or "eval/cases.jsonl", "prompt": "prompt", "gold": "gold"},
@@ -538,16 +580,35 @@ def _tree_diff(before: Dict[str, str], after: Dict[str, str]) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _demo_offline_algorithms() -> Tuple[str, ...]:
+    from . import demo as demo_mod
+    return demo_mod.OFFLINE_ALGORITHMS
+
+
 def cmd_demo(a: argparse.Namespace) -> int:
     """Build a complete example and run it, so the first thing seen works."""
     import tempfile
 
+    from . import algorithms
     from . import demo as demo_mod
 
+    algo = None
+    if getattr(a, "algorithm", None):
+        try:
+            algo = algorithms.get(a.algorithm, where="demo --algorithm").name
+        except algorithms.AlgorithmError as e:
+            raise SpecError(str(e)) from None
+        if algo not in demo_mod.OFFLINE_ALGORITHMS:
+            raise SpecError(
+                f"demo --algorithm: {algo!r} does not run against the offline demo "
+                f"agent (it needs a real model); offline: "
+                f"{list(demo_mod.OFFLINE_ALGORITHMS)}. Run it for real with "
+                f"`agentdescent algorithms run {algo} <path> <cases.jsonl>` "
+                f"(`agentdescent algorithms show {algo}` for its parameters)")
     root = os.path.abspath(os.path.expanduser(a.dir)) if a.dir else tempfile.mkdtemp(
         prefix="agentdescent-demo-")
     os.makedirs(root, exist_ok=True)
-    spec_dict = demo_mod.build(root)
+    spec_dict = demo_mod.build(root, algorithm=algo)
     skill = os.path.join(root, demo_mod.DEMO_SKILL)
     rules = os.path.join(skill, "references", "rules.md")
 
@@ -555,7 +616,10 @@ def cmd_demo(a: argparse.Namespace) -> int:
     print(f"  {demo_mod.DEMO_SKILL}/references/rules.md  ->  "
           f"{open(rules).read().strip()!r}   (wrong: `id` is a row number)")
     print("  cases.jsonl                        ->  12 CSVs with known totals")
-    print("  the agent is a local program, so this costs nothing and needs no key\n")
+    print("  the agent is a local program, so this costs nothing and needs no key")
+    if algo:
+        print(f"  algorithm: {algo}   (`agentdescent algorithms show {algo}`)")
+    print()
 
     spec = EvolveSpec.from_dict(spec_dict)
     comp = compose(spec)
@@ -571,7 +635,13 @@ def cmd_demo(a: argparse.Namespace) -> int:
         print(f"  round {info.round:>2}  reward={info.held_out_reward:.3f}  "
               f"+{info.committed}/-{info.rejected}")
 
-    print(f"\nheld-out reward: {result.final_reward:.3f}   outcomes: {result.outcomes()}")
+    init = getattr(result, "initial_reward", None)
+    if init is not None:
+        print(f"\nheld-out reward: {init:.3f} -> {result.final_reward:.3f}   "
+              f"outcomes: {result.outcomes()}")
+    else:
+        print(f"\nheld-out reward: {result.final_reward:.3f}   "
+              f"outcomes: {result.outcomes()}")
     print(f"what it learned:  rules.md -> "
           f"{result.state.get('references/rules.md', '').strip()!r}")
     if result.final_reward < 1.0:
@@ -713,6 +783,33 @@ def detect_data_columns(path: Optional[str]) -> Tuple[Dict[str, str], List[str]]
     return mapping, notes
 
 
+def _backup_existing_spec(out: str, spec: Any) -> Optional[str]:
+    """Copy an existing, different ``out`` to ``<out>.bak-N`` before it is replaced.
+
+    Returns the backup path, or ``None`` when ``out`` is new or already holds
+    exactly ``spec`` as JSON (a plain re-run is not worth a backup). Backups
+    are numbered like ``apply``'s, so a second replacement never overwrites
+    the first one's copy (#725, #727). Used for the spec and for the OpenCode
+    provider-only config written next to it.
+    """
+    if not os.path.isfile(out):
+        return None
+    try:
+        with open(out, "r", encoding="utf-8") as fh:
+            old_text = fh.read()
+    except OSError:
+        old_text = None
+    if old_text is not None:
+        try:
+            if json.loads(old_text) == json.loads(json.dumps(spec)):
+                return None
+        except ValueError:
+            pass
+    backup = _backup_slot(out)
+    shutil.copyfile(out, backup)
+    return backup
+
+
 def write_starter_spec(
     path: str,
     *,
@@ -726,6 +823,9 @@ def write_starter_spec(
     param: Optional[Sequence[str]] = None,
     out: Optional[str] = None,
     follow_up: Optional[str] = "plan",
+    params: Optional[Mapping[str, Any]] = None,
+    rounds: Optional[int] = None,
+    workers: Optional[int] = None,
 ) -> Tuple[str, Dict[str, Any], List[Tuple[str, str]], Optional[str]]:
     """Build and write a starter spec (shared by ``init`` and ``algorithms run``).
 
@@ -733,18 +833,35 @@ def write_starter_spec(
     (including :class:`~agentdescent.algorithms.AlgorithmError`) for a bad
     algorithm / param / agent mismatch. ``follow_up`` is ``"plan"`` for ``init``
     (appends ``then: agentdescent plan …``) or ``None`` when the caller will
-    plan itself (#674).
+    plan itself (#674). ``rounds`` / ``workers`` (``--rounds`` / ``--workers``)
+    replace the kind's ``evolve.rounds`` / ``evolve.n_workers`` so a cheap
+    trial needs no hand-edited JSON; left out, the kind defaults stay (#707).
+    ``params`` is an already-parsed ``{name: value}`` mapping (the MCP
+    ``algorithm_spec`` tool); it replaces ``param`` so keys and values are
+    never round-tripped through ``KEY=VALUE`` strings (#729).
     """
+    for flag, value in (("--rounds", rounds), ("--workers", workers)):
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int)
+                                  or value < 1):
+            raise ValueError(f"{flag} must be an integer >= 1, got {value!r}")
     agent_explicit = agent is not None
     if agent is None:
         agent, found = default_agent_ref()
     else:
         found = True
-    params = parse_cli_params(param)
+    # Refuse a missing PATH before kind guess / agent mismatch / writing (#706).
+    missing = require_existing_target(path, kind)
+    if missing:
+        raise ValueError(missing)
+    params = dict(params) if params is not None else parse_cli_params(param)
     spec = starter_spec(path, kind=kind, data=data, agent=agent,
                         agent_explicit=agent_explicit, model=model,
                         base_url=base_url, key_env=key_env,
                         algorithm=algorithm, algorithm_params=params)
+    if rounds is not None:
+        spec["evolve"]["rounds"] = rounds
+    if workers is not None:
+        spec["evolve"]["n_workers"] = workers
     if agent_explicit:
         why = init_agent_mismatch(spec["kind"], agent)
         if why:
@@ -764,6 +881,7 @@ def write_starter_spec(
     os.makedirs(os.path.dirname(os.path.abspath(out)) or ".", exist_ok=True)
     providers_out = None
     providers_key_env = None
+    providers_backup = None
     if spec.get("agent") == {"ref": "opencode"} and model and base_url:
         # The user named the model and endpoint, so wire them into the worker
         # too, not only the reflector: a bare `opencode` would ignore both and
@@ -779,16 +897,33 @@ def write_starter_spec(
             model=model, base_url=base_url, key_env=providers_key_env,
             config_path=providers_out)
         spec["agent"] = agent_block
+        providers_backup = _backup_existing_spec(providers_out, providers)
         with open(providers_out, "w", encoding="utf-8") as fh:
             json.dump(providers, fh, indent=2)
+    backup = _backup_existing_spec(out, spec)
     with open(out, "w", encoding="utf-8") as fh:
         json.dump(spec, fh, indent=2)
     report: List[Tuple[str, str]] = [("wrote", f"wrote {out}")]
+    if backup:
+        # Re-running init / `algorithms run` on the same --out used to drop a
+        # hand-edited spec without a word; keep the old copy and say so (#725).
+        report.append(("note", f"{out} already existed with different content; "
+                       f"the previous copy is saved as {backup}"))
     for line in column_notes:
         report.append(("note", line))
+    if spec["kind"] == "text":
+        from .evolvespec import looks_like_path_target
+        if looks_like_path_target(path) and not os.path.isfile(os.path.expanduser(path)):
+            report.append((
+                "warning",
+                f"target {path!r} is not a file; kind=text will use the path "
+                "string itself as the prompt text"))
     if providers_out:
         report.append(("wrote", f"wrote {providers_out} (OpenCode provider-only config for the worker; "
               f"key read from ${providers_key_env}, never inline)"))
+        if providers_backup:
+            report.append(("note", f"{providers_out} already existed with different "
+                           f"content; the previous copy is saved as {providers_backup}"))
     if not found and spec["kind"] not in ("text", "policy_slot"):
         report.append(("warning", "no worker CLI (claude, codex, dsh, opencode) is on PATH; "
                        f"wrote the placeholder agent `{agent}`. Run `agentdescent doctor`, "
@@ -844,7 +979,8 @@ def cmd_init(a: argparse.Namespace) -> int:
             a.path, kind=a.kind, data=a.data, agent=a.agent, model=a.model,
             base_url=a.base_url, key_env=a.key_env,
             algorithm=getattr(a, "algorithm", None),
-            param=getattr(a, "param", None), out=a.out, follow_up="plan")
+            param=getattr(a, "param", None), out=a.out, follow_up="plan",
+            rounds=getattr(a, "rounds", None), workers=getattr(a, "workers", None))
     except ValueError as e:      # AlgorithmError is a ValueError
         # Same {"ok": false, "error": ...} object under --json as plan/rsi (#660).
         if getattr(a, "json", False):
@@ -1329,6 +1465,14 @@ def plan_payload(spec: EvolveSpec, *, usd_per_call: Optional[float] = None) -> D
     replaced = _merge_policies_replaced(comp)
     if replaced:
         warnings.append(replaced)
+    # kind=text missing path-looking target: also a plan warning (#706).
+    from .evolvespec import looks_like_path_target
+    if (spec.kind == "text" and looks_like_path_target(str(spec.target))
+            and not os.path.isfile(os.path.expanduser(str(spec.target)))):
+        msg = (f"target {spec.target!r} is not a file; kind=text will use the "
+               "path string itself as the prompt text")
+        if msg not in warnings:
+            warnings.append(msg)
     audit = None
     if comp.audit is not None:
         audit = {"store": comp.audit.store.path,
@@ -1456,11 +1600,24 @@ def cmd_evolve(a: argparse.Namespace) -> int:
     except Exception as e:  # noqa: BLE001 - not BaseException: Ctrl-C stays loud
         return _run_failed(a, rd, e)
     st = rd.status()
-    _out({"run_id": rd.run_id, "state": st.state, "final_reward": result.final_reward,
-          "stop_reason": result.stop_reason, "outcomes": result.outcomes(),
-          "error": result.error, "dir": rd.path} if a.json else
-         f"{_status_line(st)}\nfinal reward: {result.final_reward:.3f}  "
-         f"outcomes: {result.outcomes()}\n{rd.path}", as_json=a.json)
+    init = getattr(result, "initial_reward", None)
+    payload = {"run_id": rd.run_id, "state": st.state, "final_reward": result.final_reward,
+               "initial_reward": init, "stop_reason": result.stop_reason,
+               "outcomes": result.outcomes(), "error": result.error, "dir": rd.path}
+    from .diagnose import SEED_SOLVED_HINT, seed_already_solved
+    seed_solved = seed_already_solved(init, result.final_reward, result.stop_reason)
+    if seed_solved:
+        payload["note"] = SEED_SOLVED_HINT
+    if init is not None:
+        plain = (f"{_status_line(st)}\n"
+                 f"held-out reward: {init:.3f} -> {result.final_reward:.3f}  "
+                 f"outcomes: {result.outcomes()}\n"
+                 + (f"{SEED_SOLVED_HINT}\n" if seed_solved else "")
+                 + f"{rd.path}")
+    else:
+        plain = (f"{_status_line(st)}\nfinal reward: {result.final_reward:.3f}  "
+                 f"outcomes: {result.outcomes()}\n{rd.path}")
+    _out(payload if a.json else plain, as_json=a.json)
     return 0 if result.error is None else 1
 
 
@@ -1740,6 +1897,8 @@ def _partial_show(rd: "runstore.RunDir", st: Any) -> Dict[str, Any]:
                 "propose_errors", "propose_error")
         out["history"] = [{k: r[k] for k in keep if r.get(k) not in (None, {})}
                           for r in rounds[-SHOW_HISTORY:]]
+    if getattr(st, "initial_reward", None) is not None:
+        out["initial_reward"] = st.initial_reward
     if getattr(st, "best_reward", None) is not None:
         out["best_reward"] = st.best_reward
     perr = getattr(st, "propose_errors", 0) or sum(
@@ -1777,7 +1936,9 @@ def show_payload(run_id: str, *, store: Optional[str] = None, diff: bool = True,
         payload.update(_partial_show(rd, st))
         payload["note"] = "no result yet"
         return payload
-    payload.update(final_reward=result.final_reward, outcomes=result.outcomes(),
+    payload.update(final_reward=result.final_reward,
+                   initial_reward=getattr(result, "initial_reward", None),
+                   outcomes=result.outcomes(),
                    rounds=len(result.history))
     # Reflector exceptions (#395). Only when there were some, so a healthy run's
     # payload is unchanged.
@@ -1838,7 +1999,8 @@ def cmd_show(a: argparse.Namespace) -> int:
     if a.json:
         _out(payload, as_json=True)
         return 0
-    for k in ("run_id", "state", "stop_reason", "error", "final_reward", "outcomes",
+    for k in ("run_id", "state", "stop_reason", "error", "initial_reward",
+              "final_reward", "outcomes",
               "best_reward", "propose_errors", "propose_error", "note"):
         if payload.get(k) is not None:
             print(f"{k}: {payload[k]}")
@@ -2525,74 +2687,153 @@ def cmd_algorithms(a: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_algorithms_run(a: argparse.Namespace) -> int:
-    """``algorithms run NAME PATH`` -- init + plan in one step; does not start a run (#674)."""
+def _algorithms_run_missing_data_hint(msg: str, *, cases: Optional[str]) -> str:
+    """Make a missing ``data.path`` failure actionable for ``algorithms run`` (#692).
+
+    ``init`` already prints ``next: create …``; ``algorithms run`` plans immediately,
+    so the same gap needs a tip on the error itself.
+    """
+    if "data.path" not in msg or "does not exist" not in msg:
+        return msg
+    if cases:
+        return (f"{msg}; check the cases path you passed as the third argument "
+                "(one JSON object per line with prompt/gold keys)")
+    return (f"{msg}; pass a cases.jsonl as the third argument "
+            "(see `agentdescent algorithms run --help`), or create that file "
+            "-- one JSON object per line with prompt/gold keys "
+            "(`agentdescent demo` writes a complete offline example to copy from)")
+
+
+def algorithms_run_payload(
+    name: str,
+    path: str,
+    *,
+    kind: Optional[str] = None,
+    cases: Optional[str] = None,
+    agent: Optional[str] = None,
+    model: Optional[str] = None,
+    base_url: Optional[str] = None,
+    key_env: Optional[str] = None,
+    param: Optional[Sequence[str]] = None,
+    out: Optional[str] = None,
+    rounds: Optional[int] = None,
+    workers: Optional[int] = None,
+    usd_per_call: Optional[float] = None,
+    params: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Write a starter spec for algorithm ``name`` on ``path`` and plan it.
+
+    The one code path behind ``algorithms run`` (#674) and the MCP
+    ``algorithm_spec`` tool (#723). Returns the ``--json`` object; the private
+    ``_report`` (init's report lines), ``_plan`` (the plan payload) and
+    ``_stage`` keys are for the CLI's text rendering and are popped before
+    anything is printed or returned to a host. Never starts a run. ``params``
+    (an already-parsed mapping, from MCP) replaces ``param`` (#729).
+    """
     from . import algorithms
 
-    as_json = getattr(a, "json", False)
     # Unknown name: same exit and tip as `algorithms show` (where="run").
+    # A case/hyphen variant resolves, and the spec and its file name use the
+    # registered name (#696).
     try:
-        algorithms.get(a.name, where="run")
+        name = algorithms.get(name, where="run").name
     except algorithms.AlgorithmError as e:
-        if as_json:
-            _out({"ok": False, "error": str(e)}, as_json=True)
-        else:
-            print(f"error: {e}", file=sys.stderr)
-        return 2
-    out = a.out or f"agentdescent.{a.name}.spec.json"
-    kind = a.kind  # None unless --kind (group or subparser)
+        return {"ok": False, "error": str(e), "_stage": "pre"}
+    out = out or f"agentdescent.{name}.spec.json"
     if kind is not None and kind not in KINDS:
         # The group-level --kind is free text; fail closed with the real choices
         # before anything is written (#688).
-        msg = f"--kind must be one of {list(KINDS)}, got {kind!r}"
-        if as_json:
-            _out({"ok": False, "error": msg}, as_json=True)
-        else:
-            print(f"error: {msg}", file=sys.stderr)
-        return 2
+        return {"ok": False, "_stage": "pre",
+                "error": f"--kind must be one of {list(KINDS)}, got {kind!r}"}
+    # The name is positional here: say so, route the one-file fix through
+    # `algorithms run`, and name --kind when the kind was only guessed (#702).
+    alg = algorithms.get(name)
+    # Missing PATH before kind guess / kind-mismatch (#706).
+    missing = require_existing_target(path, kind)
+    if missing:
+        return {"ok": False, "error": missing, "_stage": "pre"}
+    use_kind = kind if kind is not None else guess_kind(path)
+    if use_kind not in alg.kinds:
+        msg = algorithms.kind_mismatch_message(
+            alg, use_kind, target=path, prefix="algorithm", via="run")
+        dir_kinds = [k for k in alg.kinds if k != "text"]
+        if kind is None and os.path.isfile(os.path.expanduser(path)):
+            msg += (f"; {path} is a file, so its kind is 'text'; {alg.name} "
+                    f"needs a directory target (kind {dir_kinds})")
+        elif kind is None and dir_kinds:
+            # Only a directory's guess can be wrong (agent_dir vs skill_dir, a
+            # plugin without .claude-plugin), and only toward a dir kind.
+            msg += (f"; kind {use_kind!r} was guessed from {path}; if that is "
+                    f"wrong, pass --kind (one of {dir_kinds})")
+        return {"ok": False, "error": msg, "_stage": "pre"}
     try:
         out, _spec, report, providers_out = write_starter_spec(
-            a.path, kind=kind, data=getattr(a, "cases", None),
-            agent=getattr(a, "agent", None),
-            model=getattr(a, "model", None),
-            base_url=getattr(a, "base_url", None),
-            key_env=getattr(a, "key_env", None),
-            algorithm=a.name, param=getattr(a, "param", None),
-            out=out, follow_up=None)
+            path, kind=kind, data=cases, agent=agent, model=model,
+            base_url=base_url, key_env=key_env, algorithm=name, param=param,
+            out=out, follow_up=None, rounds=rounds, workers=workers,
+            params=params)
     except ValueError as e:      # kind mismatch / bad --param
-        if as_json:
-            _out({"ok": False, "error": str(e)}, as_json=True)
-        else:
-            print(f"error: {e}", file=sys.stderr)
-        return 2
+        return {"ok": False, "error": str(e), "_stage": "pre"}
+    # Once the spec is on disk, a failed plan's next step is to fix it and
+    # re-plan -- never `evolve` on a spec plan just refused (#694).
+    retry_line = f"agentdescent plan {out}"
     try:
         spec = load_spec(out)
-        payload = plan_payload(spec, usd_per_call=getattr(a, "usd_per_call", None))
+        payload = plan_payload(spec, usd_per_call=usd_per_call)
     except (SpecError, ValueError) as e:
-        if as_json:
-            _out({"ok": False, "error": str(e), "spec": out}, as_json=True)
-        else:
-            # The spec is already on disk: say so before the error (#688).
-            for kind_tag, text in report:
-                if kind_tag == "wrote":
-                    print(text)
-            print(f"error: {e}", file=sys.stderr)
-        return 2
-    next_line = f"agentdescent evolve {out}"
+        err = _algorithms_run_missing_data_hint(str(e), cases=cases)
+        # `spec` kept for compatibility; `spec_path` matches the plan shape.
+        return {"ok": False, "error": err, "spec": out, "spec_path": out,
+                "next": retry_line, "_stage": "plan", "_report": report}
+    ok = bool(payload.get("ok", True))
+    obj = dict(payload)
+    obj["spec_path"] = out
+    obj["providers_config"] = providers_out
+    obj["warnings"] = list(payload.get("warnings") or []) + [
+        t for k, t in report if k == "warning"]
+    obj["notes"] = [t for k, t in report if k == "note"]
+    obj["next"] = f"agentdescent evolve {out}" if ok else retry_line
+    obj["_stage"] = "done"
+    obj["_report"] = report
+    obj["_plan"] = payload
+    return obj
+
+
+def _public(obj: Dict[str, Any]) -> Dict[str, Any]:
+    """``obj`` without the private ``_``-keys of :func:`algorithms_run_payload`."""
+    return {k: v for k, v in obj.items() if not k.startswith("_")}
+
+
+def _cmd_algorithms_run(a: argparse.Namespace) -> int:
+    """``algorithms run NAME PATH`` -- init + plan in one step; does not start a run (#674)."""
+    as_json = getattr(a, "json", False)
+    obj = algorithms_run_payload(
+        a.name, a.path, kind=a.kind, cases=getattr(a, "cases", None),
+        agent=getattr(a, "agent", None), model=getattr(a, "model", None),
+        base_url=getattr(a, "base_url", None), key_env=getattr(a, "key_env", None),
+        param=getattr(a, "param", None), out=a.out,
+        rounds=getattr(a, "rounds", None), workers=getattr(a, "workers", None),
+        usd_per_call=getattr(a, "usd_per_call", None))
+    stage = obj["_stage"]
+    report = obj.get("_report") or []
+    ok = bool(obj.get("ok", True))
     if as_json:
         # Exactly one JSON object on stdout for success and error (#674).
-        obj = dict(payload)
-        obj["spec_path"] = out
-        obj["providers_config"] = providers_out
-        obj["warnings"] = list(payload.get("warnings") or []) + [
-            t for k, t in report if k == "warning"]
-        obj["notes"] = [t for k, t in report if k == "note"]
-        obj["next"] = next_line
-        if not obj.get("ok", True):
-            _out(obj, as_json=True)
-            return 2
-        _out(obj, as_json=True)
-        return 0
+        _out(_public(obj), as_json=True)
+        return 0 if ok else 2
+    if stage == "pre":
+        print(f"error: {obj['error']}", file=sys.stderr)
+        return 2
+    out = obj["spec_path"]
+    if stage == "plan":
+        # The spec is already on disk: say so before the error (#688).
+        for kind_tag, text in report:
+            if kind_tag == "wrote":
+                print(text)
+        print(f"error: {obj['error']}", file=sys.stderr)
+        print(f"next: fix {out}, then {obj['next']}")
+        return 2
+    payload = obj["_plan"]
     for kind_tag, text in report:
         if kind_tag == "warning":
             print(f"warning: {text}")
@@ -2600,12 +2841,23 @@ def _cmd_algorithms_run(a: argparse.Namespace) -> int:
             print(f"note: {text}")
         else:
             print(text)
-    if not payload.get("ok", True):
+    if not ok:
         print(f"error: {payload.get('error', 'plan failed')}", file=sys.stderr)
+        print(f"next: fix {out}, then {obj['next']}")
         return 2
     _out(payload, as_json=False)
-    print(f"next: {next_line}")
+    print(f"next: {obj['next']}")
+    calls = (payload.get("estimate") or {}).get("agent_calls_upper_bound")
+    if (getattr(a, "rounds", None) is None and getattr(a, "workers", None) is None
+            and isinstance(calls, (int, float)) and calls > QUICK_TRIAL_CALLS):
+        # The kind defaults plan a full run; name the one-command cheap trial (#707).
+        print("      (for a quick trial: re-run with --rounds 1 --workers 1)")
     return 0
+
+
+#: Above this many planned agent calls, a flagless ``algorithms run`` names
+#: ``--rounds 1 --workers 1`` as the quick-trial path (#707).
+QUICK_TRIAL_CALLS = 50
 
 
 def cmd_diagnose(a: argparse.Namespace) -> int:
@@ -2761,6 +3013,397 @@ def cmd_tournament(a: argparse.Namespace) -> int:
             print(f"  {arm.algorithm} seed {arm.seed}: {arm.error[:160]}")
     return 0 if report.winner is not None else 1
 
+def cmd_platform(a: argparse.Namespace) -> int:
+    """``agentdescent platform`` -- init/plan/run a five-layer campaign."""
+    from .surface_common import SurfaceError
+    from . import surface_platform as surface
+
+    try:
+        action = getattr(a, "platform_cmd", None)
+        if action == "init":
+            payload = surface.platform_init(a.out, demo=a.demo)
+        elif action == "plan":
+            payload = surface.platform_plan(a.spec)
+        elif action == "run":
+            payload = surface.platform_run(a.spec, out=a.out)
+        else:
+            raise SurfaceError("platform needs init, plan or run")
+    except Exception as error:  # noqa: BLE001 - user callbacks are part of the surface
+        return _surface_error(a, error)
+    if a.json:
+        _out(payload, as_json=True)
+    else:
+        if action == "init":
+            print(f"spec: {payload['spec']}")
+            print("next:")
+            for step in payload["next"]:
+                print(f"  {step}")
+        elif action == "plan":
+            print(f"runs_db: {payload['runs_db']}")
+            print(f"cycles: {payload['campaign']['max_cycles']}  "
+                  f"generations/cycle: {payload['platform']['max_generations']}")
+            print("next:")
+            for step in payload["next"]:
+                print(f"  {step}")
+        else:
+            report = payload["report"]
+            print(f"cycles: {len(report['cycles'])}  "
+                  f"best_cycle: {report.get('best_cycle')}  "
+                  f"complete: {report['complete']}")
+            print(f"runs_db: {payload['runs_db']}")
+            if payload.get("out"):
+                print(f"report: {payload['out']}")
+    return 0
+
+
+def cmd_capability(a: argparse.Namespace) -> int:
+    """``agentdescent capability`` -- init/plan/run a failure-to-capability loop."""
+    from .surface_common import SurfaceError
+    from . import surface_capability as surface
+
+    try:
+        action = getattr(a, "capability_cmd", None)
+        if action == "init":
+            payload = surface.capability_init(a.out, demo=a.demo)
+        elif action == "plan":
+            payload = surface.capability_plan(a.spec)
+        elif action == "run":
+            payload = surface.capability_run(a.spec, out=a.out)
+        else:
+            raise SurfaceError("capability needs init, plan or run")
+    except Exception as error:  # noqa: BLE001 - user callbacks are part of the surface
+        return _surface_error(a, error)
+    if a.json:
+        _out(payload, as_json=True)
+    else:
+        if action == "init":
+            print(f"spec: {payload['spec']}")
+            print(f"traces: {payload['traces']}")
+            print("next:")
+            for step in payload["next"]:
+                print(f"  {step}")
+        elif action == "plan":
+            print(f"traces: {payload['traces']}  goal: {payload['goal']}")
+            print("next:")
+            for step in payload["next"]:
+                print(f"  {step}")
+        else:
+            report = payload["report"]
+            print(f"verdict: {report['verdict']}  admitted: {report['admitted']}")
+            print(f"detail: {report['detail']}")
+            if payload.get("out"):
+                print(f"report: {payload['out']}")
+    return 0
+
+
+def cmd_ops(a: argparse.Namespace) -> int:
+    """``agentdescent ops`` -- plan/publish a campaign to the control room."""
+    from .surface_common import SurfaceError
+    from . import surface_ops as surface
+
+    try:
+        action = getattr(a, "ops_cmd", None)
+        if action == "plan":
+            payload = surface.ops_plan(
+                runs_db=a.runs_db, tenant=a.tenant, workspace=a.workspace)
+        elif action == "publish":
+            payload = surface.ops_publish(
+                runs_db=a.runs_db, tenant=a.tenant, workspace=a.workspace,
+                min_acceptance=a.min_acceptance,
+                max_cost_per_accepted=a.max_cost_per_accepted,
+                out=a.out, prometheus=a.prometheus)
+        else:
+            raise SurfaceError("ops needs plan or publish")
+    except Exception as error:  # noqa: BLE001 - user callbacks are part of the surface
+        return _surface_error(a, error)
+    if a.json:
+        _out(payload, as_json=True)
+    else:
+        if action == "plan":
+            print(f"runs_db: {payload['runs_db']}")
+            print(f"terminal runs: {payload['terminal_runs']}  "
+                  f"generations: {payload['generations']}")
+            print("next:")
+            for step in payload["next"]:
+                print(f"  {step}")
+        else:
+            print(f"published: {payload['published']}")
+            if "metrics" in payload:
+                metrics = payload["metrics"]
+                print(f"decisions: {metrics['decisions']}  "
+                      f"accepted: {metrics['accepted']}  "
+                      f"calls: {metrics['calls']}")
+                for alert in payload.get("alerts") or ():
+                    print(f"alert: {alert}")
+            else:
+                print(payload.get("detail", "nothing to publish"))
+            if payload.get("out"):
+                print(f"report: {payload['out']}")
+            if payload.get("prometheus"):
+                print(f"prometheus: {payload['prometheus']}")
+    return 0
+
+
+def cmd_experience(a: argparse.Namespace) -> int:
+    """``agentdescent experience`` -- report/ingest/recall/update/replay memory."""
+    from .surface_common import SurfaceError
+    from . import surface_experience as surface
+
+    action = getattr(a, "experience_cmd", None)
+    try:
+        if action == "report":
+            payload = surface.experience_report(store=a.experience_store)
+        elif action == "ingest":
+            payload = surface.experience_ingest(
+                store=a.experience_store, records=a.records)
+        elif action == "recall":
+            payload = surface.experience_recall(
+                store=a.experience_store, features=a.features, k=a.k)
+        elif action == "update":
+            payload = surface.experience_update(
+                store=a.experience_store, validation=a.validation,
+                anchors=a.anchors, actions=a.actions, dim=a.dim,
+                learning_rate=a.learning_rate, l2=a.l2,
+                replay_size=a.replay_size, min_gain=a.min_gain, seed=a.seed,
+                require_anchors=a.require_anchors,
+                anchor_tolerance=a.anchor_tolerance)
+        elif action == "cycle":
+            payload = surface.experience_cycle(
+                store=a.experience_store, records=a.records,
+                validation=a.validation, anchors=a.anchors,
+                actions=a.actions, dim=a.dim,
+                learning_rate=a.learning_rate, l2=a.l2,
+                replay_size=a.replay_size, min_gain=a.min_gain, seed=a.seed,
+                require_anchors=a.require_anchors,
+                anchor_tolerance=a.anchor_tolerance,
+                features=a.features, k=a.k)
+        elif action == "replay":
+            payload = surface.experience_replay(
+                source=a.source, store=a.experience_store, pairs=a.pairs,
+                actions=a.actions, dim=a.dim, k=a.k,
+                learning_rate=a.learning_rate, l2=a.l2,
+                replay_size=a.replay_size, min_gain=a.min_gain, seed=a.seed)
+        else:
+            raise SurfaceError("experience needs report, ingest, recall, update or replay")
+    except Exception as error:  # noqa: BLE001 - user callbacks are part of the surface
+        return _surface_error(a, error)
+    if a.json:
+        _out(payload, as_json=True)
+    else:
+        if action == "report":
+            summary = payload["summary"]
+            print(f"store: {payload['store']}  exists: {payload['exists']}")
+            print(f"rows: {summary['rows']}  accepted: {summary['accepted']}  "
+                  f"last: {summary['last_run'] or '-'}")
+            if summary["actions"]:
+                print("actions: " + ", ".join(
+                    f"{name}={count}" for name, count in summary["actions"].items()))
+        elif action == "ingest":
+            print(f"ingested: {len(payload['ingested'])}  "
+                  f"existing: {payload['existing']}  "
+                  f"rows: {payload['summary']['rows']}")
+        elif action == "recall":
+            for hit in payload["hits"]:
+                record = hit["record"]
+                print(f"{hit['distance']:.4f}  {record['run_id']}  "
+                      f"accepted={record['accepted']}")
+        elif action in ("update", "cycle"):
+            if action == "cycle":
+                report = payload["report"]
+                plan = report["plan"]
+                update = report["update"]
+                print(f"ingested: {len(report['ingested'])}  "
+                      f"validation: {len(plan['validation'])}  "
+                      f"anchors: {len(plan['anchors'])}  "
+                      f"source: {plan['source']}")
+            else:
+                update = payload["update"]
+            print(f"accepted: {update['accepted']}  "
+                  f"rolled_back: {update['rolled_back']}  version: {update['version']}")
+            print(f"before: {update['before']:.4f}  after: {update['after']:.4f}  "
+                  f"drift: {update['drift']:.4f}")
+            if update["reason"]:
+                print(f"reason: {update['reason']}")
+        elif action == "replay":
+            replay = payload["replay"]
+            print(f"selected: {len(replay['selected'])}  "
+                  f"ingested: {len(replay['ingested'])}  "
+                  f"skipped: {replay['skipped']}")
+    if (action == "cycle"
+            and not payload["report"]["update"]["accepted"]):
+        return 1
+    return 0
+
+
+def cmd_tenant(a: argparse.Namespace) -> int:
+    """``agentdescent tenant`` -- init/plan/run a quota-checked platform cycle."""
+    from .surface_common import SurfaceError
+    from . import surface_tenant as surface
+
+    action = getattr(a, "tenant_cmd", None)
+    try:
+        if action == "init":
+            payload = surface.tenant_init(a.out, demo=a.demo)
+        elif action == "plan":
+            payload = surface.tenant_plan(a.spec)
+        elif action == "run":
+            payload = surface.tenant_run(a.spec, out=a.out)
+        else:
+            raise SurfaceError("tenant needs init, plan or run")
+    except Exception as error:  # noqa: BLE001 - user callbacks are part of the surface
+        return _surface_error(a, error)
+    if a.json:
+        _out(payload, as_json=True)
+    else:
+        if action == "init":
+            print(f"spec: {payload['spec']}")
+            print("next:")
+            for step in payload["next"]:
+                print(f"  {step}")
+        elif action == "plan":
+            print(f"tenant: {payload['tenant']}  workspace: {payload['workspace']}  "
+                  f"principal: {payload['principal']}")
+            print(f"reserve: {payload['reserve']}  quota: {payload['quota']}")
+            print("next:")
+            for step in payload["next"]:
+                print(f"  {step}")
+        else:
+            report = payload["report"]
+            print(f"complete: {report['complete']}  usage: {report['usage']}")
+            if payload.get("out"):
+                print(f"report: {payload['out']}")
+    return 0 if action != "run" or payload["report"]["complete"] else 1
+
+
+def cmd_meta_campaign(a: argparse.Namespace) -> int:
+    """``agentdescent meta-campaign`` -- init/plan/run continuous meta-learning."""
+    from .surface_common import SurfaceError
+    from . import surface_meta_campaign as surface
+
+    action = getattr(a, "meta_campaign_cmd", None)
+    try:
+        if action == "init":
+            payload = surface.meta_campaign_init(a.out, demo=a.demo)
+        elif action == "plan":
+            payload = surface.meta_campaign_plan(a.spec)
+        elif action == "run":
+            payload = surface.meta_campaign_run_surface(a.spec, out=a.out)
+        else:
+            raise SurfaceError("meta-campaign needs init, plan or run")
+    except Exception as error:  # noqa: BLE001 - user callbacks are part of the surface
+        return _surface_error(a, error)
+    if a.json:
+        _out(payload, as_json=True)
+    else:
+        if action == "init":
+            print(f"spec: {payload['spec']}")
+            print("next:")
+            for step in payload["next"]:
+                print(f"  {step}")
+        elif action == "plan":
+            print(f"archive: {payload['archive']}  exists: {payload['archive_exists']}")
+            print(f"slot: {payload['slot']}  sessions: {payload['campaign']['max_sessions']}")
+            print("next:")
+            for step in payload["next"]:
+                print(f"  {step}")
+        else:
+            report = payload["report"]
+            print(f"sessions: {len(report['sessions'])}  "
+                  f"best_session: {report.get('best_session')}  "
+                  f"complete: {report['complete']}")
+            print(f"archive: {payload['archive']}  count: {report['archive_count']}")
+            if payload.get("out"):
+                print(f"report: {payload['out']}")
+    return 0 if action != "run" or payload["report"]["complete"] else 1
+
+
+def cmd_governed_harness(a: argparse.Namespace) -> int:
+    """``agentdescent governed-harness`` -- init/plan/run a governed change."""
+    from .surface_common import SurfaceError
+    from . import surface_governed as surface
+
+    action = getattr(a, "governed_cmd", None)
+    try:
+        if action == "init":
+            payload = surface.governed_init(a.out, demo=a.demo)
+        elif action == "plan":
+            payload = surface.governed_plan(a.spec)
+        elif action == "run":
+            payload = surface.governed_run(a.spec, out=a.out)
+        else:
+            raise SurfaceError("governed-harness needs init, plan or run")
+    except Exception as error:  # noqa: BLE001 - user callbacks are part of the surface
+        return _surface_error(a, error)
+    if a.json:
+        _out(payload, as_json=True)
+    else:
+        if action == "init":
+            print(f"spec: {payload['spec']}")
+            print(f"before: {payload['before']}")
+            print(f"after: {payload['after']}")
+            print("next:")
+            for step in payload["next"]:
+                print(f"  {step}")
+        elif action == "plan":
+            print(f"artifact: {payload['artifact_id']}  tasks: {payload['tasks']}")
+            print(f"gate: {payload['gate']}  prover: {payload['prover'] or '-'}")
+            print("next:")
+            for step in payload["next"]:
+                print(f"  {step}")
+        else:
+            report = payload["report"]
+            print(f"promoted: {payload['promoted']}  verdict: {report['verdict']}")
+            print(f"decision: {report['decision']['action']}")
+            if report["rollback"]:
+                print(f"rollback: {report['rollback']}")
+            if payload.get("out"):
+                print(f"report: {payload['out']}")
+    return 0 if action != "run" or payload.get("promoted") else 1
+
+
+def cmd_release(a: argparse.Namespace) -> int:
+    """``agentdescent release`` -- evidence-gated, signed release receipt."""
+    from .release_surface import (
+        ReleaseSurfaceError, load_rules, release_payload, release_text,
+        resolve_secret,
+    )
+
+    try:
+        rules = load_rules(
+            a.rules, min_effect=a.min_effect, max_risk=a.max_risk)
+        secret = resolve_secret(
+            secret_env=a.secret_env, secret_file=a.secret_file)
+        metadata = None
+        if a.metadata is not None:
+            try:
+                metadata = json.loads(a.metadata)
+            except ValueError as error:
+                raise ReleaseSurfaceError(
+                    f"--metadata is not valid JSON: {error}") from None
+            if not isinstance(metadata, dict):
+                raise ReleaseSurfaceError("--metadata must be a JSON object")
+        payload = release_payload(
+            a.before, a.after, artifact_id=a.artifact_id,
+            artifact_hash=a.artifact_hash, key_id=a.key_id, secret=secret,
+            rules=rules, lineage=a.lineage, parents=a.parents,
+            contaminated=a.contamination, approved=a.approval, risk=a.risk,
+            min_effect=a.min_effect, alpha=a.alpha, seed=a.seed,
+            proxy_gains=a.proxy_gains, oracle_gains=a.oracle_gains,
+            issuer=a.issuer, run_id=a.run_id, kind=a.kind,
+            metadata=metadata, out=a.out)
+    except (ReleaseSurfaceError, OSError, ValueError) as error:
+        if getattr(a, "json", False):
+            _out({"ok": False, "error": str(error)}, as_json=True)
+        else:
+            print(f"release error: {error}", file=sys.stderr)
+        return 2
+    if a.json:
+        _out(payload, as_json=True)
+    else:
+        print(release_text(payload))
+    return 0 if payload["released"] else 1
+
+
 def safety_payload(archive: Optional[str] = None, *,
                    audit: Optional[str] = None, bias_threshold: float = 0.1,
                    min_exam: Optional[str] = "passed") -> Dict[str, Any]:
@@ -2806,9 +3449,55 @@ def cmd_safety(a: argparse.Namespace) -> int:
     return {"safe": 0, "caution": 1, "unsafe": 3}.get(payload["verdict"], 1)
 
 
+_HOST_CHOICES = ("dsh", "claude-code", "codex", "opencode", "grok-bot")
+
+
+def _host_arg(value: str) -> str:
+    """argparse ``type`` for a host: fold aliases (``claude``, ``grok``) and case."""
+    from .integrations import canonical_host
+
+    return canonical_host(value)
+
+
+def _list_hosts(a: argparse.Namespace, verb: str) -> int:
+    """Bare ``install`` / ``uninstall``: say which hosts exist here and what to
+    run, instead of argparse's "the following arguments are required" (#721).
+    Exit 2: no host was named, so nothing was done."""
+    import shutil
+
+    from .integrations import HOST_CLI
+
+    home = getattr(a, "home", None)
+    clis = {b: shutil.which(b) for b in HOST_CLI.values() if b}
+    try:
+        hosts, _ = _host_integrations(clis, home=home)
+    except ValueError as e:        # e.g. an empty --home (#412)
+        raise SpecError(f"{verb}: {e}") from None
+    if verb == "install":
+        suggest = [n for n, i in hosts.items()
+                   if (i["cli"] and i["state"] != "ok") or i["state"] in ("stale", "partial")]
+    else:
+        suggest = [n for n, i in hosts.items() if i["state"] != "missing"]
+    commands = [f"agentdescent {verb} {n}" for n in suggest]
+    if getattr(a, "json", False):
+        _out({"ok": False, "error": f"{verb}: name a host", "hosts": hosts,
+              "suggested": commands}, as_json=True)
+        return 2
+    print(f"{verb}: name a host, one of {', '.join(_HOST_CHOICES)}", file=sys.stderr)
+    for name, info in hosts.items():
+        cli_bit = (f"cli {info['cli']}" if info["cli"]
+                   else ("no desktop cli" if HOST_CLI.get(name) is None else "cli not on PATH"))
+        print(f"  {name:<12} {info['state']:<8} ({cli_bit})", file=sys.stderr)
+    if commands:
+        print("next: " + "  |  ".join(commands), file=sys.stderr)
+    return 2
+
+
 def cmd_install(a: argparse.Namespace) -> int:
     from .integrations import install
 
+    if a.host is None:
+        return _list_hosts(a, "install")
     try:
         written = install(a.host, dry_run=a.dry_run, home=a.home)
     except ValueError as e:        # e.g. an empty --home (#412)
@@ -2828,6 +3517,8 @@ def cmd_install(a: argparse.Namespace) -> int:
 def cmd_uninstall(a: argparse.Namespace) -> int:
     from .integrations import uninstall
 
+    if a.host is None:
+        return _list_hosts(a, "uninstall")
     try:
         lines = uninstall(a.host, dry_run=a.dry_run, home=a.home)
     except ValueError as e:        # e.g. an empty --home (#412)
@@ -3094,6 +3785,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("demo", help="build a complete example and run it, offline")
     s.add_argument("--dir", help="where to build it (default: a temp directory)")
+    s.add_argument("--algorithm", metavar="NAME",
+                   help="run the demo with this named algorithm (one that works "
+                        "offline: " + ", ".join(_demo_offline_algorithms()) + ")")
     s.set_defaults(fn=cmd_demo)
 
     s = sub.add_parser("init", help="write a starter spec for a path")
@@ -3121,6 +3815,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--param", action="append", default=[], metavar="KEY=VALUE",
                    help="algorithm parameter, repeatable; values are JSON "
                         "when they parse, otherwise strings")
+    s.add_argument("--rounds", type=int, default=None,
+                   help="evolve rounds (default: the kind's; --rounds 1 --workers 1 "
+                        "is a quick trial)")
+    s.add_argument("--workers", type=int, default=None,
+                   help="candidates per round, written as evolve.n_workers "
+                        "(default: the kind's)")
     s.add_argument("--out", help="where to write the spec")
     s.set_defaults(fn=cmd_init)
 
@@ -3240,13 +3940,17 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(fn=cmd_doctor)
 
     s = sub.add_parser("install", help="wire the skill and MCP server into a host")
-    s.add_argument("host", choices=("dsh", "claude-code", "codex", "opencode", "grok-bot"))
+    # Aliases (`claude`, `grok`, `deepseek-harness`, any case) fold to the
+    # canonical name before the choices check; bare `install` lists hosts (#721).
+    s.add_argument("host", nargs="?", type=_host_arg, choices=_HOST_CHOICES,
+                   help="host to wire; omit to list hosts and their state")
     s.add_argument("--dry-run", action="store_true", dest="dry_run")
     s.add_argument("--home", help="the host's home directory (default: the real one)")
     s.set_defaults(fn=cmd_install)
 
     s = sub.add_parser("uninstall", help="undo `install` for a host")
-    s.add_argument("host", choices=("dsh", "claude-code", "codex", "opencode", "grok-bot"))
+    s.add_argument("host", nargs="?", type=_host_arg, choices=_HOST_CHOICES,
+                   help="host to unwire; omit to list hosts and their state")
     s.add_argument("--dry-run", action="store_true", dest="dry_run")
     s.add_argument("--home", help="the host's home directory (default: the real one)")
     s.set_defaults(fn=cmd_uninstall)
@@ -3296,6 +4000,13 @@ def build_parser() -> argparse.ArgumentParser:
                     help="spec kind (default: guessed from PATH, as init --kind)")
     s2.add_argument("--out", help="where to write the spec "
                     "(default: ./agentdescent.<name>.spec.json)")
+    s2.add_argument("--rounds", type=int, default=None,
+                   help="evolve rounds (default: the kind's; --rounds 1 --workers 1 "
+                        "is a quick trial)")
+    s2.add_argument("--workers", type=int, default=None,
+                   help="candidates per round, written as evolve.n_workers "
+                        "(default: the kind's)")
+
     s2.add_argument("--usd-per-call", type=float, dest="usd_per_call",
                     help="optional dollar estimate for plan")
     s2.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
@@ -3369,6 +4080,258 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                    help="machine-readable output")
     s.set_defaults(fn=cmd_safety)
+
+    s = sub.add_parser(
+        "release",
+        help="gate paired evidence and sign an accepted release receipt")
+    s.add_argument("--before", required=True, metavar="PATH",
+                   help="JSON object of task -> incumbent score, or '-' for stdin")
+    s.add_argument("--after", required=True, metavar="PATH",
+                   help="JSON object of task -> candidate score, or '-' for stdin")
+    s.add_argument("--artifact-id", required=True, dest="artifact_id",
+                   help="the released artifact id")
+    s.add_argument("--artifact-hash", required=True, dest="artifact_hash",
+                   help="content hash of the artifact (also the manifest identity)")
+    s.add_argument("--key-id", required=True, dest="key_id",
+                   help="signing key id written into the manifest")
+    s.add_argument("--secret-env", dest="secret_env", default=None,
+                   help="environment variable holding the HMAC secret "
+                        "(default: AGENTDESCENT_RELEASE_KEY)")
+    s.add_argument("--secret-file", dest="secret_file", default=None,
+                   help="file holding the HMAC secret (never pass it on argv)")
+    s.add_argument("--lineage", help="lineage JSON to load and extend on release")
+    s.add_argument("--out", help="write the JSON report here as well")
+    s.add_argument("--rules", help="PromotionRules JSON object (overrides the flags)")
+    s.add_argument("--min-effect", type=float, default=0.0,
+                   dest="min_effect", help="minimum eval delta (default 0.0)")
+    s.add_argument("--max-risk", type=float, default=1.0,
+                   dest="max_risk", help="highest risk the rules accept (default 1.0)")
+    s.add_argument("--risk", type=float, default=None,
+                   help="this candidate's risk in [0, 1]")
+    s.add_argument("--contamination", choices=("unknown", "clean", "contaminated"),
+                   default="unknown", help="held-out contamination status")
+    s.add_argument("--clean", dest="contamination", action="store_const",
+                   const="clean", help="mark the held-out set clean (shortcut)")
+    s.add_argument("--contaminated", dest="contamination", action="store_const",
+                   const="contaminated", help="mark the held-out set contaminated")
+    s.add_argument("--approval", choices=("unknown", "approved", "rejected"),
+                   default="unknown", help="human approval status")
+    s.add_argument("--approved", dest="approval", action="store_const",
+                   const="approved", help="mark the candidate human-approved")
+    s.add_argument("--rejected", dest="approval", action="store_const",
+                   const="rejected", help="mark the candidate human-rejected")
+    s.add_argument("--alpha", type=float, default=0.05,
+                   help="statistical alpha (default 0.05)")
+    s.add_argument("--seed", type=int, default=0, help="bootstrap seed")
+    s.add_argument("--proxy-gains", dest="proxy_gains", default=None,
+                   help="JSON array of proxy gain observations (Goodhart check)")
+    s.add_argument("--oracle-gains", dest="oracle_gains", default=None,
+                   help="JSON array of oracle gain observations (Goodhart check)")
+    s.add_argument("--parents", default="",
+                   help="comma-separated parent artifact ids")
+    s.add_argument("--run-id", dest="run_id", default="", help="source run id")
+    s.add_argument("--kind", default="skill", help="artifact kind (default skill)")
+    s.add_argument("--issuer", default="agentdescent",
+                   help="manifest issuer (default agentdescent)")
+    s.add_argument("--metadata", default=None,
+                   help="JSON object stored with the manifest")
+    s.set_defaults(fn=cmd_release)
+
+    s = sub.add_parser(
+        "platform",
+        help="run a durable five-layer RSI campaign (loop/compute/foundry/experience)")
+    platform_sub = s.add_subparsers(dest="platform_cmd", required=True)
+    sp = platform_sub.add_parser("init", help="write a platform spec")
+    sp.add_argument("--out", required=True, help="where to write the spec")
+    sp.add_argument("--demo", action="store_true",
+                   help="write the runnable offline example")
+    sp.set_defaults(fn=cmd_platform)
+    sp = platform_sub.add_parser("plan", help="validate a spec and resolve every ref")
+    sp.add_argument("--spec", required=True, help="platform JSON spec")
+    sp.set_defaults(fn=cmd_platform)
+    sp = platform_sub.add_parser("run", help="run the campaign")
+    sp.add_argument("--spec", required=True, help="platform JSON spec")
+    sp.add_argument("--out", help="write the full JSON report here")
+    sp.set_defaults(fn=cmd_platform)
+
+    s = sub.add_parser(
+        "capability",
+        help="turn failure traces into an admitted, archived capability")
+    capability_sub = s.add_subparsers(dest="capability_cmd", required=True)
+    sp = capability_sub.add_parser("init", help="write a capability spec")
+    sp.add_argument("--out", required=True, help="where to write the spec")
+    sp.add_argument("--demo", action="store_true",
+                   help="write the runnable offline example and traces")
+    sp.set_defaults(fn=cmd_capability)
+    sp = capability_sub.add_parser("plan", help="validate a spec and load traces")
+    sp.add_argument("--spec", required=True, help="capability JSON spec")
+    sp.set_defaults(fn=cmd_capability)
+    sp = capability_sub.add_parser("run", help="run the capability loop")
+    sp.add_argument("--spec", required=True, help="capability JSON spec")
+    sp.add_argument("--out", help="write the full JSON report here")
+    sp.set_defaults(fn=cmd_capability)
+
+    s = sub.add_parser(
+        "ops", help="publish finished runs to the control room")
+    ops_sub = s.add_subparsers(dest="ops_cmd", required=True)
+    sp = ops_sub.add_parser("plan", help="count what would be published")
+    sp.add_argument("--runs-db", required=True, dest="runs_db",
+                   help="SQLite run database written by platform/loop")
+    sp.add_argument("--tenant", required=True)
+    sp.add_argument("--workspace", required=True)
+    sp.set_defaults(fn=cmd_ops)
+    sp = ops_sub.add_parser("publish", help="record the campaign and return metrics")
+    sp.add_argument("--runs-db", required=True, dest="runs_db")
+    sp.add_argument("--tenant", required=True)
+    sp.add_argument("--workspace", required=True)
+    sp.add_argument("--min-acceptance", type=float, default=0.0,
+                   dest="min_acceptance", help="alert below this acceptance rate")
+    sp.add_argument("--max-cost-per-accepted", type=float, default=None,
+                   dest="max_cost_per_accepted",
+                   help="alert above this calls/accepted value")
+    sp.add_argument("--out", help="write the full JSON report here")
+    sp.add_argument("--prometheus", help="write Prometheus text here")
+    sp.set_defaults(fn=cmd_ops)
+
+    s = sub.add_parser(
+        "experience", help="inspect and update cross-run experience memory")
+    experience_sub = s.add_subparsers(dest="experience_cmd", required=True)
+    sp = experience_sub.add_parser("report", help="summarise the experience store")
+    sp.add_argument("--store", dest="experience_store", default=None,
+                   help="experience JSONL (default: $AGENTDESCENT_HOME/experience.jsonl)")
+    sp.set_defaults(fn=cmd_experience)
+    sp = experience_sub.add_parser("ingest", help="append new ExperienceRecords")
+    sp.add_argument("--store", dest="experience_store", default=None)
+    sp.add_argument("--records", required=True,
+                   help="ExperienceRecord JSONL or JSON array")
+    sp.set_defaults(fn=cmd_experience)
+    sp = experience_sub.add_parser("recall", help="nearest experience by features")
+    sp.add_argument("--store", dest="experience_store", default=None)
+    sp.add_argument("--features", required=True,
+                   help="comma-separated feature vector")
+    sp.add_argument("--k", type=int, default=5)
+    sp.set_defaults(fn=cmd_experience)
+    sp = experience_sub.add_parser("update", help="guarded learner update")
+    sp.add_argument("--store", dest="experience_store", default=None)
+    sp.add_argument("--validation", required=True,
+                   help="validation ExperienceRecord JSONL")
+    sp.add_argument("--anchors", default=None,
+                   help="anchor ExperienceRecord JSONL")
+    sp.add_argument("--actions", required=True,
+                   help="comma-separated action names")
+    sp.add_argument("--dim", type=int, required=True,
+                   help="feature dimension")
+    sp.add_argument("--learning-rate", type=float, default=0.2,
+                   dest="learning_rate")
+    sp.add_argument("--l2", type=float, default=1e-3)
+    sp.add_argument("--replay-size", type=int, default=1000, dest="replay_size")
+    sp.add_argument("--min-gain", type=float, default=0.0, dest="min_gain")
+    sp.add_argument("--seed", type=int, default=0)
+    sp.add_argument("--anchor-tolerance", type=float, default=0.0,
+                   dest="anchor_tolerance")
+    sp.add_argument("--require-anchors", action="store_true", default=True,
+                   dest="require_anchors")
+    sp.add_argument("--no-require-anchors", action="store_false",
+                   dest="require_anchors")
+    sp.set_defaults(fn=cmd_experience)
+    sp = experience_sub.add_parser(
+        "cycle", help="ingest, plan anchors and run one guarded adaptive cycle")
+    sp.add_argument("--store", dest="experience_store", default=None)
+    sp.add_argument("--records", default=None,
+                    help="new ExperienceRecord JSONL/JSON array")
+    sp.add_argument("--validation", default=None,
+                    help="optional validation ExperienceRecord JSONL")
+    sp.add_argument("--anchors", default=None,
+                    help="optional anchor ExperienceRecord JSONL")
+    sp.add_argument("--actions", required=True,
+                    help="comma-separated action names")
+    sp.add_argument("--dim", type=int, required=True,
+                    help="feature dimension")
+    sp.add_argument("--learning-rate", type=float, default=0.2,
+                    dest="learning_rate")
+    sp.add_argument("--l2", type=float, default=1e-3)
+    sp.add_argument("--replay-size", type=int, default=1000, dest="replay_size")
+    sp.add_argument("--min-gain", type=float, default=0.0, dest="min_gain")
+    sp.add_argument("--seed", type=int, default=0)
+    sp.add_argument("--anchor-tolerance", type=float, default=0.0,
+                    dest="anchor_tolerance")
+    sp.add_argument("--require-anchors", action="store_true", default=True,
+                    dest="require_anchors")
+    sp.add_argument("--no-require-anchors", action="store_false",
+                    dest="require_anchors")
+    sp.add_argument("--features", default=None,
+                    help="optional feature vector for recall anchors")
+    sp.add_argument("--k", type=int, default=5)
+    sp.set_defaults(fn=cmd_experience)
+
+    sp = experience_sub.add_parser("replay", help="preference-ranked replay")
+    sp.add_argument("--source", required=True,
+                   help="source ExperienceRecord JSONL")
+    sp.add_argument("--store", dest="experience_store", default=None,
+                   help="engine replay JSONL (must differ from --source)")
+    sp.add_argument("--pairs", required=True,
+                   help="PreferencePair JSONL/JSON array")
+    sp.add_argument("--actions", required=True)
+    sp.add_argument("--dim", type=int, required=True)
+    sp.add_argument("--k", type=int, default=5)
+    sp.add_argument("--learning-rate", type=float, default=0.2,
+                   dest="learning_rate")
+    sp.add_argument("--l2", type=float, default=1e-3)
+    sp.add_argument("--replay-size", type=int, default=1000, dest="replay_size")
+    sp.add_argument("--min-gain", type=float, default=0.0, dest="min_gain")
+    sp.add_argument("--seed", type=int, default=0)
+    sp.set_defaults(fn=cmd_experience)
+
+    s = sub.add_parser(
+        "governed-harness",
+        help="gate and sign one harness/code self-modification")
+    governed_sub = s.add_subparsers(dest="governed_cmd", required=True)
+    sp = governed_sub.add_parser("init", help="write a governed-harness spec")
+    sp.add_argument("--out", required=True, help="where to write the spec")
+    sp.add_argument("--demo", action="store_true",
+                    help="write the runnable offline example")
+    sp.set_defaults(fn=cmd_governed_harness)
+    sp = governed_sub.add_parser("plan", help="validate a spec without running the gates")
+    sp.add_argument("--spec", required=True, help="governed-harness JSON spec")
+    sp.set_defaults(fn=cmd_governed_harness)
+    sp = governed_sub.add_parser("run", help="run the governed change")
+    sp.add_argument("--spec", required=True, help="governed-harness JSON spec")
+    sp.add_argument("--out", help="write the full JSON report here")
+    sp.set_defaults(fn=cmd_governed_harness)
+
+    s = sub.add_parser(
+        "meta-campaign",
+        help="run continuous meta-learning as a bounded campaign")
+    meta_campaign_sub = s.add_subparsers(dest="meta_campaign_cmd", required=True)
+    sp = meta_campaign_sub.add_parser("init", help="write a meta-campaign spec")
+    sp.add_argument("--out", required=True, help="where to write the spec")
+    sp.add_argument("--demo", action="store_true",
+                    help="write the runnable offline example")
+    sp.set_defaults(fn=cmd_meta_campaign)
+    sp = meta_campaign_sub.add_parser("plan", help="validate a spec without running")
+    sp.add_argument("--spec", required=True, help="meta-campaign JSON spec")
+    sp.set_defaults(fn=cmd_meta_campaign)
+    sp = meta_campaign_sub.add_parser("run", help="run the campaign")
+    sp.add_argument("--spec", required=True, help="meta-campaign JSON spec")
+    sp.add_argument("--out", help="write the full JSON report here")
+    sp.set_defaults(fn=cmd_meta_campaign)
+
+    s = sub.add_parser(
+        "tenant",
+        help="run one platform cycle under workspace roles and quota")
+    tenant_sub = s.add_subparsers(dest="tenant_cmd", required=True)
+    sp = tenant_sub.add_parser("init", help="write a tenant spec")
+    sp.add_argument("--out", required=True, help="where to write the spec")
+    sp.add_argument("--demo", action="store_true",
+                    help="write the runnable offline example")
+    sp.set_defaults(fn=cmd_tenant)
+    sp = tenant_sub.add_parser("plan", help="validate a spec without running")
+    sp.add_argument("--spec", required=True, help="tenant JSON spec")
+    sp.set_defaults(fn=cmd_tenant)
+    sp = tenant_sub.add_parser("run", help="run one quota-checked cycle")
+    sp.add_argument("--spec", required=True, help="tenant JSON spec")
+    sp.add_argument("--out", help="write the full JSON report here")
+    sp.set_defaults(fn=cmd_tenant)
 
     s = sub.add_parser("serve", help="serve a read-only run panel on loopback, for a host UI")
     s.add_argument("--host", default=runstore.DEFAULT_HTTP_HOST)

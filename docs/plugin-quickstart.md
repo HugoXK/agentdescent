@@ -103,11 +103,21 @@ diagnostics on disk; `record_rollouts: false` keeps neither.
 
 Pass `--dir ./somewhere` to keep the demo's files around and poke at them.
 
+Pass `--algorithm archive_selection` to watch a named algorithm (from
+`agentdescent algorithms list`) run the same offline example end to end. Only
+algorithms that work against the offline agent are accepted; any other name is
+refused with the `agentdescent algorithms run NAME <path> <cases.jsonl>` command
+that runs it for real with your model.
+
 ## 3. Put it in your agent
 
 ```bash
 agentdescent install claude-code    # or: dsh, codex, opencode, grok-bot
 ```
+
+Not sure which host is wired? A bare `agentdescent install` lists every host
+with its state and the command to run. Common aliases work too: `claude`,
+`grok`, `deepseek-harness` (any case).
 
 #### Grok Bot
 

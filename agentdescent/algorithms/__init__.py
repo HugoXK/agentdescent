@@ -211,14 +211,44 @@ def external_errors() -> Dict[str, str]:
     return dict(_EXTERNAL_ERRORS)
 
 
+def _fold(name: str) -> str:
+    return name.strip().casefold().replace("-", "_")
+
+
+def _resolve_alias(name: str, pool: Any = None) -> str:
+    """The name in ``pool`` (default: the registry) ``name`` means, ignoring
+    case and ``-`` vs ``_``.
+
+    Only a single match resolves; an ambiguous or unknown name is returned
+    unchanged so the caller reports it as unknown.
+    """
+    folded = _fold(name)
+    matches = [n for n in (_REGISTRY if pool is None else pool)
+               if _fold(n) == folded]
+    return matches[0] if len(matches) == 1 else name
+
+
 def get(name: Any, *, where: str = "algorithm") -> Algorithm:
-    """The named algorithm, or an :class:`AlgorithmError` listing the valid names."""
+    """The named algorithm, or an :class:`AlgorithmError` listing the valid names.
+
+    A name that matches exactly one registered algorithm once case and
+    ``-``/``_`` are ignored resolves to it (``GEPA``, ``archive-selection``).
+    """
     _load_builtin()
     _load_external()
     if (isinstance(name, str) and name in _EXTERNAL_ERRORS
             and name not in _REGISTRY):
         raise AlgorithmError(
             f"{where}: algorithm {name!r} failed to load: {_EXTERNAL_ERRORS[name]}")
+    if isinstance(name, str) and name not in _REGISTRY:
+        name = _resolve_alias(name)
+    if isinstance(name, str) and name not in _REGISTRY:
+        # A variant of a broken plugin's name reports its load error (#698).
+        broken = _resolve_alias(name, [n for n in _EXTERNAL_ERRORS
+                                       if n not in _REGISTRY])
+        if broken in _EXTERNAL_ERRORS and broken not in _REGISTRY:
+            raise AlgorithmError(f"{where}: algorithm {broken!r} failed to load: "
+                                 f"{_EXTERNAL_ERRORS[broken]}")
     if not isinstance(name, str) or name not in _REGISTRY:
         raise AlgorithmError(
             f"{where}: unknown algorithm {name!r}; available: {sorted(_REGISTRY)} "
@@ -243,13 +273,18 @@ def listing(kind: Optional[str] = None, *,
 
 def kind_mismatch_message(algorithm: Algorithm, kind: str, *,
                           target: Optional[str] = None,
-                          prefix: str = "algorithm") -> str:
+                          prefix: str = "algorithm",
+                          via: str = "init") -> str:
     """One error text for "``algorithm`` does not apply to ``kind``".
 
     Names the algorithms that do apply (computed from the registry, so a
     plugin-registered algorithm shows up too) and, when the algorithm runs on
     ``text`` and ``target`` is a skill directory holding ``SKILL.md`` (or a
     single file), how to run it on that one file instead.
+
+    ``via="run"`` phrases that route as ``agentdescent algorithms run NAME
+    FILE --kind text`` (the name is positional there, #702); the default is
+    the ``init ... --algorithm NAME`` form.
     """
     import os
 
@@ -271,8 +306,12 @@ def kind_mismatch_message(algorithm: Algorithm, kind: str, *,
         elif os.path.isfile(path):
             one = str(target)
         if one is not None:
-            msg += (f"; to run {name} on one file, target it as text: "
-                    f"agentdescent init {one} --kind text ... --algorithm {name}")
+            if via == "run":
+                msg += (f"; to run {name} on one file, target it as text: "
+                        f"agentdescent algorithms run {name} {one} --kind text")
+            else:
+                msg += (f"; to run {name} on one file, target it as text: "
+                        f"agentdescent init {one} --kind text ... --algorithm {name}")
     return msg
 
 
