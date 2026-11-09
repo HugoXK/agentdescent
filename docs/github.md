@@ -91,10 +91,11 @@ read-only.
 
 ## What this is not yet
 
-This is the first half of the GitHub control plane. It does not ingest review
-comments, run a merge queue, or post a live dashboard; those are the follow-up
-PR (review constraints, review loop, merge queue and visualization). It is also
-not a GitHub App: a self-hosted token is enough for one repository.
+This is not the whole GitHub control plane, but both halves are on this page: the
+publisher, which `main` carries (merged as `27c43ee4dc03`), and review ingestion,
+documented below. What is still missing is the merge queue, a live dashboard and
+a visualization of the review packet. It is also not a GitHub App: a self-hosted
+token is enough for one repository.
 
 ## Review ingestion and readiness
 
