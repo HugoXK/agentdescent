@@ -246,6 +246,8 @@ def test_publish_updates_an_existing_branch_with_an_encoded_ref(monkeypatch):
     assert [path for _, path, _ in update_calls] == [
         "/repos/o/r/git/refs/heads%2Fagent%2Fskill-csv"]
     assert all(payload.get("force") is False for _, _, payload in update_calls)
+    assert not any(method == "POST" and path == "/git/refs"
+                   for method, path, _ in fake.calls)
     assert fake.refs["agent/skill-csv"] == payload["head"]
 
 
@@ -282,7 +284,7 @@ def test_publish_refuses_a_non_fast_forward_rewrite(monkeypatch):
         publish_proposal(
             GitHubConfig("o", "r"), _proposal(), dry_run=False, transport=fake)
     assert fake.refs["agent/skill-csv"] == "old-head"
-    assert not any(method == "POST" and path == "/pulls"
+    assert not any(method == "POST" and path in ("/git/refs", "/pulls")
                    for method, path, _ in fake.calls)
 
 

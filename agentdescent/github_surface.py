@@ -444,15 +444,20 @@ def publish_proposal(config: GitHubConfig, proposal: Proposal, *,
                         "sha": blob})
     tree = client.create_tree(base_tree, entries)
     commit = client.create_commit(proposal.title, tree, [base_sha])
+    # Decide the ref write from a read: an existing branch is updated (and only
+    # fast-forward), a missing one is created. No try/except around create_ref,
+    # so a race with another publisher is the only 422 the create path can see.
     try:
-        client.create_ref(proposal.branch, commit)
+        client.get_ref(proposal.branch)
     except GitHubError as error:
-        if error.status != 422:
+        if error.status != 404:
             raise
+        client.create_ref(proposal.branch, commit)
+    else:
         try:
             client.update_ref(proposal.branch, commit)
-        except GitHubError as update_error:
-            if update_error.status != 422:
+        except GitHubError as error:
+            if error.status != 422:
                 raise
             raise GitHubError(
                 f"cannot update proposal branch {proposal.branch!r}: commit {commit} "

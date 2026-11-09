@@ -61,13 +61,13 @@ The publisher creates blobs, a tree over the base tree, a commit whose parent is
 the base head, the proposal branch, the PR (or updates an existing PR for the
 same head/base) and the labels/check. Before the first write it reads
 `GET /repos/{owner}/{repo}` and refuses a proposal branch that is the proposal
-base, the configured base or the API's `default_branch`. A second publish moves
-only the proposal branch, and only on a fast-forward: a commit that would rewrite
-the branch is refused with one `GitHubError` and nothing is written, because the
-publisher never sends `force: true`. An existing PR's title and body are
-refreshed, but its draft state is left alone. Label and check-run failures after
-the branch/PR exist are reported under `warnings` instead of aborting a
-half-written publish.
+base, the configured base or the API's `default_branch`. Before the ref write it
+reads the proposal ref: a missing branch is created, an existing one is moved
+only on a fast-forward. A commit that would rewrite the branch is refused with
+one `GitHubError` and nothing is written, because the publisher never sends
+`force: true`. An existing PR's title and body are refreshed, but its draft state
+is left alone. Label and check-run failures after the branch/PR exist are
+reported under `warnings` instead of aborting a half-written publish.
 
 ## Status
 
