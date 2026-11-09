@@ -18,11 +18,13 @@ from agentdescent.github_surface import (
 
 
 class FakeGitHub:
-    def __init__(self, *, existing_pull=None):
+    def __init__(self, *, existing_pull=None, default_branch="main"):
         self.calls = []
-        self.refs = {"main": "base123"}
+        self.refs = {"main": "base123", "develop": "dev123"}
         self.pulls = []
         self.existing_pull = existing_pull
+        self.default_branch = default_branch
+        self.parents = {}
         self.labels = []
         self.checks = []
         self._n = 0
@@ -31,11 +33,26 @@ class FakeGitHub:
         self._n += 1
         return f"{prefix}{self._n}"
 
+    def _is_ancestor(self, ancestor, sha):
+        seen = set()
+        stack = [sha]
+        while stack:
+            current = stack.pop()
+            if current == ancestor:
+                return True
+            if current in seen:
+                continue
+            seen.add(current)
+            stack.extend(self.parents.get(current, ()))
+        return False
+
     def request(self, method, path, payload=None):
         self.calls.append((method, path, payload))
         root = "/repos/o/r"
         assert path.startswith(root), path
         path = path[len(root):]
+        if method == "GET" and path == "":
+            return {"full_name": "o/r", "default_branch": self.default_branch}
         if method == "GET" and path.startswith("/git/ref/heads"):
             ref = urllib.parse.unquote(path[len("/git/ref/"):])
             branch = ref.split("heads/", 1)[1]
@@ -49,7 +66,9 @@ class FakeGitHub:
         if method == "POST" and path == "/git/trees":
             return {"sha": self._next("tree")}
         if method == "POST" and path == "/git/commits":
-            return {"sha": self._next("commit")}
+            sha = self._next("commit")
+            self.parents[sha] = list(payload.get("parents") or ())
+            return {"sha": sha}
         if method == "POST" and path == "/git/refs":
             ref = payload["ref"].split("/", 2)[-1]
             if ref in self.refs:
@@ -59,8 +78,14 @@ class FakeGitHub:
         if method == "PATCH" and path.startswith("/git/refs/heads"):
             ref = urllib.parse.unquote(path[len("/git/refs/"):])
             branch = ref.split("heads/", 1)[1]
-            self.refs[branch] = payload["sha"]
-            return {"ref": f"refs/heads/{branch}", "object": {"sha": payload["sha"]}}
+            new_sha = payload["sha"]
+            current = self.refs.get(branch)
+            if (payload.get("force") is True or current is None
+                    or self._is_ancestor(current, new_sha)):
+                self.refs[branch] = new_sha
+                return {"ref": f"refs/heads/{branch}",
+                        "object": {"sha": new_sha}}
+            raise GitHubError("Update is not a fast forward", status=422)
         if method == "GET" and path.startswith("/pulls?"):
             return [self.existing_pull] if self.existing_pull else []
         if method == "POST" and path == "/pulls":
@@ -213,10 +238,61 @@ def test_cli_publish_dry_run_and_missing_proposal(tmp_path, capsys):
 def test_publish_updates_an_existing_branch_with_an_encoded_ref(monkeypatch):
     monkeypatch.setenv("AGENTDESCENT_GITHUB_TOKEN", "secret-token")
     fake = FakeGitHub()
-    fake.refs["agent/skill-csv"] = "old-head"
+    fake.refs["agent/skill-csv"] = fake.refs["main"]  # fast-forward
     payload = publish_proposal(
         GitHubConfig("o", "r"), _proposal(), dry_run=False, transport=fake)
-    update_calls = [path for method, path, _ in fake.calls
-                    if method == "PATCH" and "/git/refs/" in path]
-    assert update_calls == ["/repos/o/r/git/refs/heads%2Fagent%2Fskill-csv"]
+    update_calls = [call for call in fake.calls
+                    if call[0] == "PATCH" and "/git/refs/" in call[1]]
+    assert [path for _, path, _ in update_calls] == [
+        "/repos/o/r/git/refs/heads%2Fagent%2Fskill-csv"]
+    assert all(payload.get("force") is False for _, _, payload in update_calls)
     assert fake.refs["agent/skill-csv"] == payload["head"]
+
+
+def test_publish_refuses_a_default_branch_written_as_a_dev_base(monkeypatch):
+    monkeypatch.setenv("AGENTDESCENT_GITHUB_TOKEN", "secret-token")
+    fake = FakeGitHub()  # default_branch is "main"
+    with pytest.raises(GitHubError, match="repository default branch"):
+        publish_proposal(
+            GitHubConfig("o", "r"),
+            _proposal(base="develop", branch="main"),
+            dry_run=False, transport=fake)
+    assert [call for call in fake.calls if call[0] != "GET"] == []
+    assert "refs/heads%2Fmain" not in json.dumps(fake.calls)
+
+
+def test_publish_refuses_the_api_default_branch_outside_the_configured_base(
+        monkeypatch):
+    monkeypatch.setenv("AGENTDESCENT_GITHUB_TOKEN", "secret-token")
+    fake = FakeGitHub(default_branch="trunk")
+    fake.refs["trunk"] = "trunk-old"
+    with pytest.raises(GitHubError, match="repository default branch"):
+        publish_proposal(
+            GitHubConfig("o", "r"), _proposal(branch="trunk"),
+            dry_run=False, transport=fake)
+    assert fake.refs["trunk"] == "trunk-old"
+    assert [call for call in fake.calls if call[0] != "GET"] == []
+
+
+def test_publish_refuses_a_non_fast_forward_rewrite(monkeypatch):
+    monkeypatch.setenv("AGENTDESCENT_GITHUB_TOKEN", "secret-token")
+    fake = FakeGitHub()
+    fake.refs["agent/skill-csv"] = "old-head"
+    with pytest.raises(GitHubError, match="not a fast-forward"):
+        publish_proposal(
+            GitHubConfig("o", "r"), _proposal(), dry_run=False, transport=fake)
+    assert fake.refs["agent/skill-csv"] == "old-head"
+    assert not any(method == "POST" and path == "/pulls"
+                   for method, path, _ in fake.calls)
+
+
+def test_dry_run_does_not_read_the_repository(monkeypatch):
+    monkeypatch.delenv("AGENTDESCENT_GITHUB_TOKEN", raising=False)
+    fake = FakeGitHub()
+    payload = publish_proposal(
+        GitHubConfig("o", "r"),
+        _proposal(base="develop", branch="main"),
+        dry_run=True, transport=fake)
+    assert payload["dry_run"] is True
+    assert payload["base"] == "develop"
+    assert fake.calls == []

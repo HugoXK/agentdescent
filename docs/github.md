@@ -16,9 +16,10 @@ agentdescent github publish --proposal proposal.json \
 
 Without `--apply` the command is a **plan**: it validates the proposal and
 prints the branch, base, files and labels, but makes no API call and needs no
-token. The token is read only from `--token-env` (default
-`AGENTDESCENT_GITHUB_TOKEN`); it is never accepted on argv, stored in the
-proposal or printed.
+token. The plan can only compare the branch with the proposal/configured base;
+the repository's `default_branch` is read on the real run. The token is read only
+from `--token-env` (default `AGENTDESCENT_GITHUB_TOKEN`); it is never accepted on
+argv, stored in the proposal or printed.
 
 ## Proposal JSON
 
@@ -47,7 +48,8 @@ proposal or printed.
 }
 ```
 
-- `branch` must not be the base branch; the publisher never writes the base.
+- `branch` must not be the proposal/configured base or the repository's
+  `default_branch`; the publisher never writes either.
 - `files` maps repo-relative paths to text; paths that are absolute or contain
   `..` are refused. A list of `{"path", "content"}` objects is also accepted.
 - `labels`, `run_id`, `artifact_id` and `evidence` are optional; evidence is
@@ -57,11 +59,15 @@ proposal or printed.
 
 The publisher creates blobs, a tree over the base tree, a commit whose parent is
 the base head, the proposal branch, the PR (or updates an existing PR for the
-same head/base) and the labels/check. A second publish force-updates only the
-proposal branch; the base branch is never touched. An existing PR's title and
-body are refreshed, but its draft state is left alone. Label and check-run
-failures after the branch/PR exist are reported under `warnings` instead of
-aborting a half-written publish.
+same head/base) and the labels/check. Before the first write it reads
+`GET /repos/{owner}/{repo}` and refuses a proposal branch that is the proposal
+base, the configured base or the API's `default_branch`. A second publish moves
+only the proposal branch, and only on a fast-forward: a commit that would rewrite
+the branch is refused with one `GitHubError` and nothing is written, because the
+publisher never sends `force: true`. An existing PR's title and body are
+refreshed, but its draft state is left alone. Label and check-run failures after
+the branch/PR exist are reported under `warnings` instead of aborting a
+half-written publish.
 
 ## Status
 
@@ -86,8 +92,10 @@ read-only.
   code in the existing sandbox/runner, never on the publisher host with secrets.
 - **Secrets.** The token is read from the environment at request time. Do not put
   it in a proposal, a commit, a check summary or a log.
-- **Base branch.** Only `proposal.branch` is created/force-updated; a proposal
-  whose branch equals the base is refused.
+- **Base branch.** `publish` reads the repository before any write and refuses a
+  proposal branch equal to the proposal base, the configured base or the
+  repository `default_branch`. Only `proposal.branch` is created or moved, and
+  only on a fast-forward; a rewritten history is an error, never a force-push.
 
 ## What this is not yet
 

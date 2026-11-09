@@ -23,8 +23,9 @@ engine:
 
 The token is read from an environment variable named by ``token_env`` and is
 never accepted as a command-line argument, written into the proposal or printed.
-A proposal branch may be force-updated (it is the agent's own branch); the base
-branch is never written.
+A proposal branch is only fast-forwarded: a rewritten history is refused rather
+than force-pushed. The base branch and the repository's ``default_branch`` are
+never written, whatever the proposal calls them.
 """
 
 from __future__ import annotations
@@ -274,6 +275,10 @@ class GitHubClient:
                  payload: Optional[Mapping[str, Any]] = None) -> Any:
         return self.transport.request(method, self.root + path, payload)
 
+    def get_repo(self) -> Dict[str, Any]:
+        """The repository record; ``default_branch`` is the branch never to write."""
+        return self._request("GET", "")
+
     def get_ref(self, ref: str) -> Dict[str, Any]:
         encoded = urllib.parse.quote(f"heads/{ref}", safe="")
         return self._request("GET", f"/git/ref/{encoded}")
@@ -304,10 +309,12 @@ class GitHubClient:
         return self._request("POST", "/git/refs", {
             "ref": f"refs/heads/{branch}", "sha": sha})
 
-    def update_ref(self, branch: str, sha: str) -> Any:
+    def update_ref(self, branch: str, sha: str, *, force: bool = False) -> Any:
+        # force stays False: a non-fast-forward update must be a GitHub 422 the
+        # caller turns into one actionable error, never a silent rewrite.
         encoded = urllib.parse.quote(f"heads/{branch}", safe="")
         return self._request("PATCH", f"/git/refs/{encoded}", {
-            "sha": sha, "force": True})
+            "sha": sha, "force": force})
 
     def find_pull(self, branch: str, base: str) -> Optional[Dict[str, Any]]:
         query = urllib.parse.urlencode({
@@ -400,7 +407,8 @@ def publish_proposal(config: GitHubConfig, proposal: Proposal, *,
     """Create/update a proposal branch, commit, PR and optional check run.
 
     ``dry_run=True`` makes no network call and needs no token. The base branch
-    is never written; only ``proposal.branch`` may be force-updated.
+    and the repository's ``default_branch`` are never written; only
+    ``proposal.branch`` may move, and then only fast-forward.
     """
     if not isinstance(config, GitHubConfig):
         raise GitHubError("config must be a GitHubConfig")
@@ -413,6 +421,17 @@ def publish_proposal(config: GitHubConfig, proposal: Proposal, *,
         return _dry_run_payload(proposal, config)
 
     client = GitHubClient(config, transport=transport)
+    repository = client.get_repo()
+    default_branch = (repository.get("default_branch")
+                      if isinstance(repository, Mapping) else None)
+    protected = {base, config.base}
+    if isinstance(default_branch, str) and default_branch:
+        protected.add(default_branch)
+    if proposal.branch in protected:
+        raise GitHubError(
+            f"refusing to publish proposal branch {proposal.branch!r}: it is the "
+            "base branch or the repository default branch; publish to a "
+            "dedicated agent/ branch")
     base_ref = client.get_ref(base)
     base_sha = base_ref["object"]["sha"]
     base_commit = client.get_commit(base_sha)
@@ -430,7 +449,16 @@ def publish_proposal(config: GitHubConfig, proposal: Proposal, *,
     except GitHubError as error:
         if error.status != 422:
             raise
-        client.update_ref(proposal.branch, commit)
+        try:
+            client.update_ref(proposal.branch, commit)
+        except GitHubError as update_error:
+            if update_error.status != 422:
+                raise
+            raise GitHubError(
+                f"cannot update proposal branch {proposal.branch!r}: commit {commit} "
+                "is not a fast-forward of the existing branch and the publisher "
+                "never force-pushes; delete the branch or replay it from its "
+                "current head", status=422) from None
 
     body = _body(proposal)
     existing = client.find_pull(proposal.branch, base)
