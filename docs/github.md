@@ -95,3 +95,31 @@ This is the first half of the GitHub control plane. It does not ingest review
 comments, run a merge queue, or post a live dashboard; those are the follow-up
 PR (review constraints, review loop, merge queue and visualization). It is also
 not a GitHub App: a self-hosted token is enough for one repository.
+
+## Review ingestion and readiness
+
+`agentdescent github review` reads a PR's reviews, inline comments and check
+runs into one packet. It extracts **review constraints** — the actionable
+requests in review bodies and inline comments — classifies them (`test`,
+`security`, `api`, `docs`, `style`, `behavior`) and reports whether the PR is
+ready for a human click:
+
+```bash
+agentdescent github review --pr 772 --owner Birfy --repo agentdescent --json
+```
+
+The packet contains:
+
+- `reviews` — counts of approved / changes_requested / commented / dismissed;
+- `checks_state` and `checks` — success, failure, pending or none;
+- `constraints` — id, kind, text, source (`review:<id>` / `comment:<id>`), path,
+  severity (`blocking` / `suggestion`) and `resolved`;
+- `merge_readiness` — `ready`, `requires_human_click: true`, the blockers and
+  the next step.
+
+A `CHANGES_REQUESTED` review (and its inline comments) is blocking; a plain
+"thanks" is a note and is not turned into a task. REST does not expose thread
+resolution, so pass `--resolved review:1,comment:2` for ids you know are
+resolved. This command **never writes, approves or merges**; `ready` only means
+the evidence is green and no blocking constraint is known. The actual merge is
+still an authorized human/owner action under the repo's risk-tier rule.

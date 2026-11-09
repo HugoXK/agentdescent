@@ -30,8 +30,10 @@ branch is never written.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -44,10 +46,13 @@ __all__ = [
     "GitHubConfig",
     "CheckSpec",
     "Proposal",
+    "ReviewConstraint",
+    "extract_review_constraints",
     "UrllibTransport",
     "GitHubClient",
     "publish_proposal",
     "github_status",
+    "github_review",
     "load_proposal",
 ]
 
@@ -223,6 +228,135 @@ def load_proposal(value: Any) -> Proposal:
     )
 
 
+@dataclass(frozen=True)
+class ReviewConstraint:
+    """One actionable request extracted from a review or inline comment."""
+
+    id: str
+    kind: str
+    text: str
+    source: str
+    path: str = ""
+    severity: str = "suggestion"
+    resolved: bool = False
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "kind": self.kind,
+            "text": self.text,
+            "source": self.source,
+            "path": self.path,
+            "severity": self.severity,
+            "resolved": self.resolved,
+        }
+
+
+_ACTION = re.compile(
+    r"\b(must|blocking|required?|please|needs?|cannot|can't|don't|do not|"
+    r"fix|add|remove|rename|refuse|handle|avoid|ensure|update|revert)\b",
+    re.IGNORECASE)
+_TEST = re.compile(r"\b(test|tests|pytest|coverage|regression|fixture)\b",
+                   re.IGNORECASE)
+_SECURITY = re.compile(
+    r"\b(secret|token|credential|permission|auth|injection|sanitize|leak|"
+    r"escape|traversal)\b", re.IGNORECASE)
+_API = re.compile(
+    r"\b(api|compat|backward|deprecat|signature|rename|schema|contract)\b",
+    re.IGNORECASE)
+_DOCS = re.compile(r"\b(doc|docs|readme|docstring|comment|typo)\b",
+                   re.IGNORECASE)
+_STYLE = re.compile(r"\b(lint|format|typing|type hint|naming|style)\b",
+                    re.IGNORECASE)
+_PATH = re.compile(r"`([^`\n]+\.[A-Za-z0-9_]+)`")
+_WS = re.compile(r"\s+")
+
+
+def _constraint_kind(text: str) -> str:
+    if _SECURITY.search(text):
+        return "security"
+    if _TEST.search(text):
+        return "test"
+    if _API.search(text):
+        return "api"
+    if _DOCS.search(text):
+        return "docs"
+    if _STYLE.search(text):
+        return "style"
+    if _ACTION.search(text):
+        return "behavior"
+    return "note"
+
+
+def _constraint_text(value: Any) -> str:
+    return _WS.sub(" ", str(value or "")).strip()
+
+
+def _constraint_id(kind: str, text: str, path: str) -> str:
+    payload = json.dumps([kind, text.lower(), path], ensure_ascii=False)
+    return "rc_" + hashlib.sha1(payload.encode()).hexdigest()[:12]
+
+
+def extract_review_constraints(
+        reviews: Sequence[Mapping[str, Any]],
+        comments: Sequence[Mapping[str, Any]], *,
+        resolved_ids: Sequence[str] = ()) -> Tuple[ReviewConstraint, ...]:
+    """Turn review bodies and inline comments into deduplicated constraints.
+
+    REST does not expose whether a review thread is resolved, so ``resolved``
+    is false unless the caller passes the ids it knows are resolved. A
+    ``CHANGES_REQUESTED`` review (or one of its inline comments) is a blocking
+    constraint; other comments are suggestions unless they use a must/blocker
+    phrase. Plain "thanks" notes are dropped rather than becoming tasks.
+    """
+    resolved = {str(value) for value in resolved_ids}
+    review_state = {}
+    for review in reviews:
+        if isinstance(review, Mapping):
+            review_state[str(review.get("id", ""))] = str(
+                review.get("state", "")).upper()
+    found: Dict[str, ReviewConstraint] = {}
+    for review in reviews:
+        if not isinstance(review, Mapping):
+            continue
+        text = _constraint_text(review.get("body"))
+        if not text:
+            continue
+        kind = _constraint_kind(text)
+        if kind == "note":
+            continue
+        source = f"review:{review.get('id', '')}"
+        severity = "blocking" if str(
+            review.get("state", "")).upper() == "CHANGES_REQUESTED" else "suggestion"
+        if _ACTION.search(text) and severity == "suggestion":
+            severity = "blocking"
+        rc_id = _constraint_id(kind, text, "")
+        found.setdefault(rc_id, ReviewConstraint(
+            id=rc_id, kind=kind, text=text, source=source,
+            severity=severity, resolved=source in resolved))
+    for comment in comments:
+        if not isinstance(comment, Mapping):
+            continue
+        text = _constraint_text(comment.get("body"))
+        if not text:
+            continue
+        kind = _constraint_kind(text)
+        if kind == "note":
+            continue
+        path = str(comment.get("path", "") or "")
+        source = f"comment:{comment.get('id', '')}"
+        parent = str(comment.get("pull_request_review_id", ""))
+        severity = ("blocking"
+                    if review_state.get(parent) == "CHANGES_REQUESTED"
+                    or _ACTION.search(text) else "suggestion")
+        rc_id = _constraint_id(kind, text, path)
+        found.setdefault(rc_id, ReviewConstraint(
+            id=rc_id, kind=kind, text=text, source=source, path=path,
+            severity=severity, resolved=source in resolved))
+    return tuple(sorted(found.values(), key=lambda row: (
+        row.severity != "blocking", row.kind, row.path, row.text)))
+
+
 class UrllibTransport:
     """The default HTTP transport. Tests inject their own instead."""
 
@@ -345,6 +479,12 @@ class GitHubClient:
 
     def list_check_runs(self, ref: str) -> Any:
         return self._request("GET", f"/commits/{ref}/check-runs?per_page=100")
+
+    def list_reviews(self, number: int) -> Any:
+        return self._request("GET", f"/pulls/{number}/reviews?per_page=100")
+
+    def list_review_comments(self, number: int) -> Any:
+        return self._request("GET", f"/pulls/{number}/comments?per_page=100")
 
 
 def _evidence_text(proposal: Proposal) -> str:
@@ -506,4 +646,109 @@ def github_status(config: GitHubConfig, number: int, *,
         "base": pull.get("base", {}).get("ref", ""),
         "url": pull.get("html_url", ""),
         "checks": checks,
+    }
+
+def _checks_state(checks: Sequence[Mapping[str, Any]]) -> str:
+    if not checks:
+        return "none"
+    conclusions = {str(row.get("conclusion") or "").lower() for row in checks}
+    statuses = {str(row.get("status") or "").lower() for row in checks}
+    if conclusions & {"failure", "timed_out", "cancelled", "action_required"}:
+        return "failure"
+    if "in_progress" in statuses or "queued" in statuses or "" in statuses:
+        return "pending"
+    if conclusions <= {"success", "skipped", "neutral"}:
+        return "success"
+    return "pending"
+
+
+def _review_counts(reviews: Sequence[Mapping[str, Any]]) -> Dict[str, int]:
+    counts = {"approved": 0, "changes_requested": 0, "commented": 0,
+              "dismissed": 0, "pending": 0, "other": 0}
+    for review in reviews:
+        if not isinstance(review, Mapping):
+            continue
+        state = str(review.get("state", "")).upper()
+        key = {
+            "APPROVED": "approved", "CHANGES_REQUESTED": "changes_requested",
+            "COMMENTED": "commented", "DISMISSED": "dismissed",
+            "PENDING": "pending",
+        }.get(state, "other")
+        counts[key] += 1
+    return counts
+
+
+def github_review(config: GitHubConfig, number: int, *,
+                  transport: Any = None,
+                  resolved_ids: Sequence[str] = ()) -> Dict[str, Any]:
+    """Read a PR's reviews, inline comments and checks into one review packet.
+
+    Extracted review constraints are *evidence*, not an approval: the packet
+    reports whether the PR is ready for a human click and why it is blocked.
+    This function never writes, approves or merges.
+    """
+    if isinstance(number, bool) or not isinstance(number, int) or number < 1:
+        raise GitHubError("pr must be an int >= 1")
+    client = GitHubClient(config, transport=transport)
+    pull = client.get_pull(number)
+    head = pull.get("head", {}).get("sha", "")
+    reviews = client.list_reviews(number)
+    comments = client.list_review_comments(number)
+    raw_checks = client.list_check_runs(head) if head else {"check_runs": []}
+    check_rows = raw_checks.get("check_runs", []) if isinstance(raw_checks, dict) else []
+    checks = [{
+        "name": row.get("name", ""),
+        "status": row.get("status", ""),
+        "conclusion": row.get("conclusion", ""),
+    } for row in check_rows if isinstance(row, Mapping)]
+    constraints = extract_review_constraints(
+        reviews if isinstance(reviews, list) else [],
+        comments if isinstance(comments, list) else [],
+        resolved_ids=resolved_ids)
+    counts = _review_counts(reviews if isinstance(reviews, list) else [])
+    state = _checks_state(check_rows)
+    blockers = []
+    if str(pull.get("state", "")) != "open":
+        blockers.append("pull request is not open")
+    if pull.get("draft"):
+        blockers.append("pull request is a draft")
+    if pull.get("mergeable") is False:
+        blockers.append("GitHub reports merge conflicts")
+    if counts["changes_requested"]:
+        blockers.append(f"{counts['changes_requested']} reviewer(s) requested changes")
+    unresolved = [row for row in constraints
+                  if row.severity == "blocking" and not row.resolved]
+    if unresolved:
+        blockers.append(f"{len(unresolved)} unresolved blocking review constraint(s)")
+    if state == "failure":
+        blockers.append("a check failed")
+    elif state == "pending":
+        blockers.append("checks are still running")
+    elif state == "none":
+        blockers.append("no check runs on the head")
+    ready = not blockers
+    return {
+        "schema_version": GITHUB_SCHEMA_VERSION,
+        "ok": True,
+        "owner": config.owner,
+        "repo": config.repo,
+        "pull_request": number,
+        "title": pull.get("title", ""),
+        "state": pull.get("state", ""),
+        "draft": bool(pull.get("draft", False)),
+        "mergeable": pull.get("mergeable"),
+        "head": head,
+        "base": pull.get("base", {}).get("ref", ""),
+        "url": pull.get("html_url", ""),
+        "reviews": counts,
+        "checks_state": state,
+        "checks": checks,
+        "constraints": [row.to_dict() for row in constraints],
+        "merge_readiness": {
+            "ready": ready,
+            "requires_human_click": True,
+            "blockers": blockers,
+            "next": (["ready for an authorized reviewer/owner click; this surface "
+                      "never merges"] if ready else blockers),
+        },
     }

@@ -11,6 +11,8 @@ from agentdescent.github_surface import (
     GitHubConfig,
     GitHubError,
     Proposal,
+    extract_review_constraints,
+    github_review,
     github_status,
     load_proposal,
     publish_proposal,
@@ -25,6 +27,8 @@ class FakeGitHub:
         self.existing_pull = existing_pull
         self.labels = []
         self.checks = []
+        self.reviews = []
+        self.review_comments = []
         self._n = 0
 
     def _next(self, prefix):
@@ -85,6 +89,10 @@ class FakeGitHub:
             return check
         if method == "GET" and path == "/pulls/7":
             return self.pulls[0]
+        if method == "GET" and path.startswith("/pulls/7/reviews"):
+            return self.reviews
+        if method == "GET" and path.startswith("/pulls/7/comments"):
+            return self.review_comments
         if method == "GET" and path.startswith("/commits/") and "/check-runs" in path:
             return {"check_runs": self.checks}
         raise AssertionError(f"unexpected call {method} {path}")
@@ -209,6 +217,75 @@ def test_cli_publish_dry_run_and_missing_proposal(tmp_path, capsys):
                      "--repo", "r", "--json"]) == 2
     assert json.loads(capsys.readouterr().out)["ok"] is False
 
+
+def test_review_extracts_constraints_and_blocks_readiness(monkeypatch):
+    monkeypatch.setenv("AGENTDESCENT_GITHUB_TOKEN", "secret-token")
+    fake = FakeGitHub()
+    fake.pulls = [{"number": 7, "html_url": "https://github.com/o/r/pull/7",
+                   "title": "feat", "state": "open", "draft": False,
+                   "head": {"sha": "abc"}, "base": {"ref": "main"},
+                   "mergeable": True}]
+    fake.reviews = [{"id": 1, "state": "CHANGES_REQUESTED", "body": "Please add a test for empty input"}]
+    fake.review_comments = [
+        {"id": 2, "body": "This must handle the timeout path.",
+         "path": "src/f.py", "pull_request_review_id": 1},
+        {"id": 3, "body": "Thanks!", "path": "src/f.py", "pull_request_review_id": 1},
+    ]
+    fake.checks = [{"name": "build", "status": "completed", "conclusion": "success"}]
+    payload = github_review(GitHubConfig("o", "r"), 7, transport=fake)
+    kinds = {row["kind"] for row in payload["constraints"]}
+    assert "test" in kinds and "behavior" in kinds
+    assert all(row["severity"] == "blocking" for row in payload["constraints"])
+    assert len(payload["constraints"]) == 2  # "Thanks!" is a note, not a task
+    assert payload["merge_readiness"]["ready"] is False
+    assert payload["merge_readiness"]["requires_human_click"] is True
+    assert any("changes" in b for b in payload["merge_readiness"]["blockers"])
+    assert any("constraint" in b for b in payload["merge_readiness"]["blockers"])
+
+
+def test_review_ready_only_when_checks_green_and_no_changes(monkeypatch):
+    monkeypatch.setenv("AGENTDESCENT_GITHUB_TOKEN", "secret-token")
+    fake = FakeGitHub()
+    fake.pulls = [{"number": 7, "html_url": "https://github.com/o/r/pull/7",
+                   "title": "feat", "state": "open", "draft": False,
+                   "head": {"sha": "abc"}, "base": {"ref": "main"},
+                   "mergeable": True}]
+    fake.reviews = [{"id": 1, "state": "APPROVED", "body": "Looks good"}]
+    fake.review_comments = []
+    fake.checks = [{"name": "build", "status": "completed", "conclusion": "success"}]
+    payload = github_review(GitHubConfig("o", "r"), 7, transport=fake)
+    assert payload["constraints"] == []
+    assert payload["merge_readiness"]["ready"] is True
+    assert payload["merge_readiness"]["requires_human_click"] is True
+
+
+def test_review_failed_check_blocks_even_with_approval(monkeypatch):
+    monkeypatch.setenv("AGENTDESCENT_GITHUB_TOKEN", "secret-token")
+    fake = FakeGitHub()
+    fake.pulls = [{"number": 7, "html_url": "https://github.com/o/r/pull/7",
+                   "title": "feat", "state": "open", "draft": False,
+                   "head": {"sha": "abc"}, "base": {"ref": "main"},
+                   "mergeable": True}]
+    fake.reviews = [{"id": 1, "state": "APPROVED", "body": ""}]
+    fake.checks = [{"name": "test", "status": "completed", "conclusion": "failure"}]
+    payload = github_review(GitHubConfig("o", "r"), 7, transport=fake)
+    assert payload["checks_state"] == "failure"
+    assert payload["merge_readiness"]["ready"] is False
+
+
+def test_review_resolved_ids_clear_a_blocking_constraint():
+    constraints = extract_review_constraints(
+        [], [{"id": 2, "body": "must add a test", "path": "a.py"}],
+        resolved_ids=["comment:2"])
+    assert constraints[0].resolved is True
+
+
+def test_cli_review_requires_a_token(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("AGENTDESCENT_GITHUB_TOKEN", raising=False)
+    code = cli.main(["github", "review", "--pr", "7", "--owner", "o",
+                     "--repo", "r", "--json"])
+    assert code == 2
+    assert "token is not set" in json.loads(capsys.readouterr().out)["error"]
 
 def test_publish_updates_an_existing_branch_with_an_encoded_ref(monkeypatch):
     monkeypatch.setenv("AGENTDESCENT_GITHUB_TOKEN", "secret-token")
