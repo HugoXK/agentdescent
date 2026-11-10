@@ -12,43 +12,21 @@ The design record — why it is shaped this way and what was considered — is
 
 ## Install
 
-Install **0.8.0** from PyPI:
+First time? [Start here — the plugin, step by step](plugin-quickstart.md) covers
+installing, the offline demo and the Python 3.9 caveat; this section is the
+reference for what each host gets.
 
 ```bash
-pip install "agentdescent[mcp]>=0.8.0"                 # the MCP server needs this extra (and Python >= 3.10)
-agentdescent demo                      # a complete evolution, offline, no key
-agentdescent doctor                    # which agent CLIs, keys and optional pieces are here
-agentdescent install dsh               # or: claude-code, codex, opencode, grok-bot (scaffold; needs a tunnel, not one-click)
+pip install "agentdescent[mcp]>=0.9.0"   # the MCP server needs this extra (and Python >= 3.10)
+agentdescent install dsh                 # or: claude-code, codex, opencode, grok-bot
 ```
-
-Or clone the repository as described in [install and first run](install.md) and
-install the MCP extra from that checkout:
-
-```bash
-pip install -e ".[mcp]"
-```
-
-Research demos beyond `agentdescent demo` use the
-[source examples](install.md#source-examples).
-
-The MCP SDK requires Python >= 3.10; AgentDescent supports 3.9. On 3.9 the
-extra installs nothing and the tool surface is unavailable — the CLI verbs are
-the whole API, which is what the shipped `SKILL.md` falls back to. `doctor` and
-`install` both say so rather than letting it surface as a host reporting
-`CONNECTION_CLOSED`.
-
-If you have never run one, do `demo` before `install`: it builds a skill that is
-wrong on purpose, twelve cases with known answers and a local program as the
-agent, then runs the real loop — same staging, ledger, workers, merge and
-held-out gate, only the model replaced. [Start here — the plugin in three
-commands](plugin-quickstart.md) walks the whole path.
 
 `install` writes the shared skill and the host's manifest, and nothing else:
 
 | host | what it writes | how to load it |
 |---|---|---|
 | `dsh` | `~/.dsh/skills/agentdescent/SKILL.md` + `hooks.json`; an `@deepseek-ai/dsh-mcp-client` entry and the `hooks-claude-code` bridge appended to `~/.dsh/cordis.patch.yml` | restart `dsh`; check with `dsh --profile web --dump-config \| grep agentdescent` |
-| `claude-code` | a plugin directory at `~/.agentdescent/plugins/claude-code/` (`plugin.json`, skill, `/agentdescent:evolve`, `/agentdescent:algorithms`, `.mcp.json`, a `SessionStart` hook) | `claude --plugin-dir ~/.agentdescent/plugins/claude-code`, or `/plugin marketplace add Birfy/agentdescent` then `/plugin install agentdescent@agentdescent` |
+| `claude-code` | a plugin directory at `~/.agentdescent/plugins/claude-code/` (`plugin.json`, skill, `/agentdescent:evolve`, `/agentdescent:algorithms`, `.mcp.json`, a `SessionStart` hook) | `claude --plugin-dir ~/.agentdescent/plugins/claude-code`, or `/plugin marketplace add ThinkFlowLab/agentdescent` then `/plugin install agentdescent@agentdescent` |
 | `codex` | `~/.codex/skills/agentdescent/SKILL.md`; `/prompts:evolve` and `/prompts:algorithms` as `~/.codex/prompts/{evolve,algorithms}.md` (same bodies as Claude `/agentdescent:evolve` / `/agentdescent:algorithms`); an `[mcp_servers.agentdescent]` block appended to `~/.codex/config.toml` | restart Codex; check with `codex mcp list`. **Or skip `install` entirely** and use the plugin — see below |
 | `opencode` | `~/.config/opencode/skill/agentdescent/SKILL.md`; `/agentdescent/evolve` and `/agentdescent/algorithms` under `~/.config/opencode/command/agentdescent/` (legacy singular `command/`, nested to mirror Claude's namespaced slash); an `mcp.agentdescent` entry merged into `~/.config/opencode/opencode.jsonc` (into `opencode.json` beside it when your `opencode.jsonc` has comments; OpenCode merges the two) | restart OpenCode; check with `opencode mcp list` |
 | `grok-bot` | scaffold under `~/.agentdescent/plugins/grok-bot/` (`SKILL.md`, `HOST.md`, `mcp.example.json`) — **not** a one-click wire-up: Grok Bot has no public plugin API for local skill+stdio MCP; `HOST.md` names `algorithms list`/`show`/`run` and MCP discovery | read `HOST.md`; ask Grok Bot to save the skill as a user skill; drive runs with the CLI (`algorithms run` = init+plan), or run `agentdescent mcp --transport streamable-http` behind an HTTPS tunnel and add the URL as a custom MCP server. `doctor` reports `mcp n/a` when the scaffold is current |
@@ -78,20 +56,15 @@ leaves no files here, so it reads `missing` and the hint names that route too.
 Only presence is checked: a launcher pinned to an interpreter that has since
 been deleted still reads `ok`.
 
-Supported hosts today are DeepSeek Harness (`dsh`), Claude Code, Codex,
-OpenCode, and a **Grok Bot scaffold** (`agentdescent install grok-bot`). The
-Grok Bot path writes the shared skill plus `HOST.md` / `mcp.example.json`
-under `~/.agentdescent/plugins/grok-bot/`; it does **not** edit a host config,
-because Grok Bot has no public one-click plugin API for local skill directories
-or stdio MCP (custom connectors need public HTTPS). For those, run
-`agentdescent mcp --transport streamable-http` (loopback, port 8000, path
-`/mcp`) and expose it through an HTTPS tunnel; the server has no auth, and a
-non-loopback `--host` needs `--allow-remote`. If the port cannot be bound
-(already in use, for example) the command prints one line naming the port and
-exits 4 before announcing any URL, so pick another `--port` (exit 3 stays
-reserved for a missing or too-old MCP SDK, 2 for a refused `--host`). `doctor` reports
-`mcp n/a` for that host when the scaffold is current. A future one-click route
-(if/when a host-native API appears) is still tracked on #165.
+**Grok Bot over HTTP.** The scaffold edits no host config, because Grok Bot has
+no public one-click plugin API for local skill directories or stdio MCP (custom
+connectors need public HTTPS). Run `agentdescent mcp --transport streamable-http`
+(loopback, port 8000, path `/mcp`) and expose it through an HTTPS tunnel; the
+server has no auth, and a non-loopback `--host` needs `--allow-remote`. If the
+port cannot be bound the command prints one line naming the port and exits 4
+before announcing any URL, so pick another `--port` (exit 3 stays reserved for a
+missing or too-old MCP SDK, 2 for a refused `--host`). A future one-click route
+is tracked on [#165](https://github.com/ThinkFlowLab/agentdescent/issues/165).
 
 ### Uninstall
 
@@ -144,7 +117,7 @@ this repository already publishes installs there in one command — and brings
 the MCP server with it, so none of the file edits above are needed:
 
 ```bash
-codex plugin marketplace add Birfy/agentdescent      # or a local checkout path
+codex plugin marketplace add ThinkFlowLab/agentdescent      # or a local checkout path
 codex plugin add agentdescent@agentdescent
 codex plugin list                                    # installed, enabled
 codex mcp list                                       # agentdescent ... enabled
@@ -174,7 +147,7 @@ run status into the chat — which is not what this integration does.
 ### DeepSeek Harness: a native plugin, or the files
 
 `install dsh` writes files and needs no npm. The alternative is the Cordis
-plugin in [`integrations/dsh-agentdescent`](https://github.com/Birfy/agentdescent/tree/main/integrations/dsh-agentdescent):
+plugin in [`integrations/dsh-agentdescent`](https://github.com/ThinkFlowLab/agentdescent/tree/main/integrations/dsh-agentdescent):
 
 ```bash
 dsh plugin --profile web add link:/path/to/dsh-agentdescent
@@ -197,7 +170,11 @@ agentdescent serve &            # http://127.0.0.1:8787/ -- GET only
 The panel is a plain browser page as well, so it is useful without dsh. The
 server answers a cross-origin read **only for a loopback `Origin`**, so the dsh
 page on `:3080` can read it and a website you happen to visit cannot; without
-the server running the panel just says how to start it.
+the server running the panel just says how to start it. A host that needs to
+follow a run without polling can read `GET /api/runs/<id>/events`, a
+Server-Sent Events stream of status changes and new rounds; event ids are the
+round index, so a reconnect can send `Last-Event-ID` and resume. It is
+read-only and loopback-only like the JSON endpoints.
 
 Two things a dsh plugin needs that are easy to miss, both found by installing it
 for real: `package.json` must carry `"dsh": {"bundle": {"patch":
@@ -247,6 +224,12 @@ enforces its shape:
 ```
 doctor  →  write a spec  →  plan (show the user)  →  start  →  status (once a round)  →  show  →  ask  →  apply
 ```
+
+That loop is **Path A** — the default MCP tool listing and the verbs to teach a
+host first ([MCP Path A](mcp-path-a.md)). Audit / release / platform /
+experience and the other satellites stay available behind
+`agentdescent mcp --advanced` (or `AGENTDESCENT_MCP_ADVANCED=1`); do not present
+all ~39 tools as the primary path.
 
 * **`plan` is separate from `start`.** `plan` resolves every reference, loads
   the data and builds the policy bundle without running anything, then returns
@@ -317,9 +300,13 @@ line for line:
 |---|---|---|---|---|---|---|
 | `text` | `SingleSlot(target)` | `model(template)` | `reflector` | `scorer` | L2 | rounds 8, patience 3, target 0.98 |
 | `skill_dir` | `FileTree(load_tree(target))` | `tree_runner` | `tree_reflector` | `scorer` | L2 | rounds 6, `self_verify=False`, `cheap_eval_tasks=4` |
+| `skill_library` | same (≥2 `*/SKILL.md`) | `tree_runner(layout="skill_library")` | same | same | L2 | same; see `examples.skill_library_evolution` |
 | `agent_dir` | same | `tree_runner(layout="claude_agent")` | same | same | L1 | same |
 | `agent_code` | same, tests frozen | `code_runner(entrypoint, test_cmd)` | same | `gated_reward(scorer)` | L1 | same |
 | `plugin` | same, hooks frozen | `plugin_runner(host)` | same | `gated_reward(scorer)` | L1 | same, container advised |
+| `policy_slot` | `SlotSpec` | one inner search | `slot_reflector` | `meta_reward` | L1 | wall-clock budget |
+
+For `kind: skill_library`, install the evolved tree into a host skills root with `agentdescent apply <run_id> --install-to ~/.claude/skills` (same as `--to`; does not prune unrelated host skills).
 
 The other fields:
 
@@ -372,15 +359,18 @@ The other fields:
   ```json
   "reflect": {"ref": "openai_compatible", "model": "deepseek-v4-flash",
               "api_key_env": "ARK_API_KEY",
-              "default_base_url": "https://ark.cn-beijing.volces.com/api/coding/v3"}
+              "default_base_url": "https://ark.cn-beijing.volces.com/api/coding/v3",
+              "stream": true}
   ```
 
   Every other keyword (`temperature`, `thinking`, ...) goes into the request body.
-  A **reasoning model** (Ark `doubao-seed-code` thinks by default) sends nothing
-  while it thinks, so a non-streaming call can hit the 120 s `"timeout"`: set
-  `"stream": true` on the block, raise `"timeout"`, or pass the provider's own
-  switch (`"thinking": {"type": "disabled"}` on Ark). A timeout is reported with
-  the endpoint, model and seconds, not as a bare `TimeoutError`.
+  A **reasoning model** (Ark `doubao-seed-code` / `deepseek-v4-flash` thinks by
+  default) sends nothing while it thinks, so a non-streaming call can hit the
+  120 s `"timeout"`: set `"stream": true` on the block, raise `"timeout"`, or
+  pass the provider's own switch (`"thinking": {"type": "disabled"}` on Ark).
+  `init` / `algorithms run` with an Ark `--base-url` write `"stream": true`
+  automatically; `plan` warns when a hand-edited Ark block omits it. A timeout
+  is reported with the endpoint, model and seconds, not as a bare `TimeoutError`.
   A spec that writes `base_url`, `api_key` or a similar guess is **refused** by
   `plan`, `evolve` and MCP `start` with the spelling to use; `plan` also warns when
   a non-OpenAI `api_key_env` has no endpoint configured. A key is never written in
@@ -553,7 +543,9 @@ back to the CLI route rather than failing.
   parameters and defaults, its extra cost, and a fidelity label
   (`benchmark_faithful`, `mechanism_microport`, or `preset` for an engine
   component under an algorithm's name). The registry lives in the package, so
-  it works from the wheel; today it ships `rrsi` (`text`; screen, proposal and
+  it works from the wheel. **Cards vs ports:** Path A runs cards
+  only; `examples/<algo>/` ports stay CLI modules — same name ≠ same
+  fidelity ([decision tree](algorithm-decision-tree.md), #384); today it ships `rrsi` (`text`; screen, proposal and
   acceptance policies, see [RRSI](algo-rrsi.md)) and `archive_selection` (any
   kind; DGM-style archive parent sampling). Unknown names, unknown or
   mistyped parameters and a kind the algorithm does not apply to fail in
@@ -575,7 +567,8 @@ back to the CLI route rather than failing.
   run and shown to the user, so it never carries code or secrets.
 
 `agentdescent init <path>` writes a starter spec with `kind` guessed from what
-the path is.
+the path is (a directory with two or more `*/SKILL.md` and no root `SKILL.md`
+is guessed as `skill_library`; pass `--kind` to override).
 
 Relative paths (`target`, `data.path`, a `cmd` grader) are resolved **when the
 spec is read**, not when it runs: the detached run has the run directory as its
@@ -645,6 +638,9 @@ false` in the spec to record nothing; `show` then has no `samples` key.
 A dollar budget (`--budget` with `--usd-per-call`, or `budget_usd` on `start`)
 uses `evolve(stop_when=)`: the run stops between rounds once
 `calls × price` crosses the line and reports the spend it actually incurred.
+One round (plus the seed held-out scan) can overshoot by up to its call bound;
+`plan` / `evolve` / MCP `start` warn when the budget is already below that
+bound so the first round alone can blow past it.
 
 ## Evolving the plugins themselves
 
@@ -752,7 +748,7 @@ result = comp.run()            # == evolve(comp.tasks, comp.reward, **comp.kwarg
 
 ## Next
 
-* [Testing the plugins](testing-the-plugins.md) — what to run for each host,
+* [Set it up and test it](testing-guide.md) — what to run for each host,
   and what no test can tell you
 * [Quickstart — evolve a directory](quickstart-directory.md) — the Python call
   the `skill_dir` kind composes
