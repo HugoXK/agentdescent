@@ -38,7 +38,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Any, Dict, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Mapping, Optional, Sequence, Set, Tuple, Union
 
 __all__ = [
     "GITHUB_SCHEMA_VERSION",
@@ -306,19 +306,24 @@ def extract_review_constraints(
     REST does not expose whether a review thread is resolved, so ``resolved``
     is false unless the caller passes the ids it knows are resolved. A
     ``CHANGES_REQUESTED`` review (or one of its inline comments) is a blocking
-    constraint; other comments are suggestions unless they use a must/blocker
-    phrase. Plain "thanks" notes are dropped rather than becoming tasks.
+    constraint; any other review or comment is a suggestion unless its text
+    carries an action phrase (``please``, ``add``, ``update``, ``fix``, ...),
+    which promotes it to blocking. Plain "thanks" notes are dropped rather than
+    becoming tasks. Only a reviewer's latest review decides: an earlier review
+    from the same author is superseded, so a change request that reviewer later
+    approved stays as a suggestion instead of blocking (#774).
     """
     resolved = {str(value) for value in resolved_ids}
+    mapped = [review for review in reviews if isinstance(review, Mapping)]
+    superseded = _superseded_review_ids(mapped)
     review_state = {}
-    for review in reviews:
-        if isinstance(review, Mapping):
-            review_state[str(review.get("id", ""))] = str(
-                review.get("state", "")).upper()
-    found: Dict[str, ReviewConstraint] = {}
-    for review in reviews:
-        if not isinstance(review, Mapping):
+    for review in mapped:
+        if str(review.get("id", "")) in superseded:
             continue
+        review_state[str(review.get("id", ""))] = str(
+            review.get("state", "")).upper()
+    found: Dict[str, ReviewConstraint] = {}
+    for review in mapped:
         text = _constraint_text(review.get("body"))
         if not text:
             continue
@@ -326,12 +331,14 @@ def extract_review_constraints(
         if kind == "note":
             continue
         source = f"review:{review.get('id', '')}"
-        severity = "blocking" if str(
-            review.get("state", "")).upper() == "CHANGES_REQUESTED" else "suggestion"
-        if _ACTION.search(text) and severity == "suggestion":
+        stale = str(review.get("id", "")) in superseded
+        severity = ("blocking"
+                    if str(review.get("state", "")).upper() == "CHANGES_REQUESTED"
+                    and not stale else "suggestion")
+        if _ACTION.search(text) and severity == "suggestion" and not stale:
             severity = "blocking"
         rc_id = _constraint_id(kind, text, "")
-        found.setdefault(rc_id, ReviewConstraint(
+        _add_constraint(found, ReviewConstraint(
             id=rc_id, kind=kind, text=text, source=source,
             severity=severity, resolved=source in resolved))
     for comment in comments:
@@ -346,15 +353,25 @@ def extract_review_constraints(
         path = str(comment.get("path", "") or "")
         source = f"comment:{comment.get('id', '')}"
         parent = str(comment.get("pull_request_review_id", ""))
+        stale = parent in superseded
         severity = ("blocking"
                     if review_state.get(parent) == "CHANGES_REQUESTED"
-                    or _ACTION.search(text) else "suggestion")
+                    or (_ACTION.search(text) and not stale) else "suggestion")
         rc_id = _constraint_id(kind, text, path)
-        found.setdefault(rc_id, ReviewConstraint(
+        _add_constraint(found, ReviewConstraint(
             id=rc_id, kind=kind, text=text, source=source, path=path,
             severity=severity, resolved=source in resolved))
     return tuple(sorted(found.values(), key=lambda row: (
         row.severity != "blocking", row.kind, row.path, row.text)))
+
+
+def _add_constraint(found: Dict[str, ReviewConstraint],
+                    row: ReviewConstraint) -> None:
+    """Keep the strongest row for a duplicated request; blocking wins."""
+    current = found.get(row.id)
+    if current is None or (current.severity != "blocking"
+                           and row.severity == "blocking"):
+        found[row.id] = row
 
 
 class UrllibTransport:
@@ -706,12 +723,56 @@ def _checks_state(checks: Sequence[Mapping[str, Any]]) -> str:
     return "pending"
 
 
-def _review_counts(reviews: Sequence[Mapping[str, Any]]) -> Dict[str, int]:
-    counts = {"approved": 0, "changes_requested": 0, "commented": 0,
-              "dismissed": 0, "pending": 0, "other": 0}
+def _review_sort_key(review: Mapping[str, Any]) -> Tuple[str, int]:
+    try:
+        ident = int(review.get("id") or 0)
+    except (TypeError, ValueError):
+        ident = 0
+    return (str(review.get("submitted_at") or ""), ident)
+
+
+def _review_author(review: Mapping[str, Any]) -> str:
+    user = review.get("user")
+    login = str(user.get("login", "")) if isinstance(user, Mapping) else ""
+    # A review without a login cannot supersede anyone: keep it its own author so
+    # the packet stays fail-closed instead of dropping a change request.
+    return login or f"review:{review.get('id', '')}"
+
+
+def _latest_reviews(
+        reviews: Sequence[Mapping[str, Any]]) -> Dict[str, Mapping[str, Any]]:
+    """Keep only each reviewer's last review: a later one supersedes it.
+
+    GitHub keeps every review event, so ``CHANGES_REQUESTED`` followed by
+    ``APPROVED`` from the same reviewer would otherwise block forever, which is
+    the "please re-review" flow this repository actually runs on (#774).
+    A pending review has no ``submitted_at`` and therefore never supersedes a
+    submitted one.
+    """
+    latest: Dict[str, Mapping[str, Any]] = {}
     for review in reviews:
         if not isinstance(review, Mapping):
             continue
+        author = _review_author(review)
+        current = latest.get(author)
+        if current is None or _review_sort_key(review) >= _review_sort_key(current):
+            latest[author] = review
+    return latest
+
+
+def _superseded_review_ids(reviews: Sequence[Mapping[str, Any]]) -> Set[str]:
+    known = {str(review.get("id", "")) for review in reviews
+             if isinstance(review, Mapping)}
+    latest = {str(review.get("id", ""))
+              for review in _latest_reviews(reviews).values()}
+    return known - latest
+
+
+def _review_counts(reviews: Sequence[Mapping[str, Any]]) -> Dict[str, int]:
+    """Count review states, one per reviewer: the latest review wins."""
+    counts = {"approved": 0, "changes_requested": 0, "commented": 0,
+              "dismissed": 0, "pending": 0, "other": 0}
+    for review in _latest_reviews(reviews).values():
         state = str(review.get("state", "")).upper()
         key = {
             "APPROVED": "approved", "CHANGES_REQUESTED": "changes_requested",
