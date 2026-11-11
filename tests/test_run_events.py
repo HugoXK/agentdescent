@@ -7,6 +7,9 @@ drive a live server on an ephemeral port and read the event stream.
 
 import json
 import os
+import socket
+import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -90,6 +93,70 @@ def test_stream_emits_rounds_then_terminal_status(live):
     assert [event["id"] for event in rounds] == ["0", "1"]
     assert events[-1]["event"] == "status"
     assert events[-1]["data"]["state"] == "done"
+
+
+def test_a_stalled_run_closes_with_a_terminal_status(tmp_path, monkeypatch):
+    """A run whose process died must end the stream, not leave it polling.
+
+    ``status()`` already rewrites a ``running`` run whose pid is gone as
+    ``failed``; the stream has to follow that terminal state and close, or a
+    panel following a killed run keeps a dead connection open forever.
+    """
+    monkeypatch.setenv("AGENTDESCENT_HOME", str(tmp_path / "home"))
+    store = str(tmp_path / "runs")
+    rd = runstore.create(_dir_spec(str(tmp_path)).to_dict(), store=store)
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()
+    rd.update_status(state="running", rounds=3, pid=dead.pid)
+    httpd = runstore.serve_http(
+        host="127.0.0.1", port=0, store=store, serve_forever=False,
+        event_poll=0.02,
+    )
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        events = _read_events(
+            f"http://127.0.0.1:{httpd.server_address[1]}"
+            f"/api/runs/{rd.run_id}/events",
+        )
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+    assert events[-1]["event"] == "status"
+    assert events[-1]["data"]["state"] == "failed"
+    assert "without reporting" in events[-1]["data"]["error"]
+
+
+def test_a_garbage_last_event_id_replays_every_round(live):
+    base, rd = live
+    rd.append_round(_round(0))
+    rd.append_round(_round(1))
+    rd.update_status(state="done", stop_reason="rounds")
+
+    events = _read_events(f"{base}/api/runs/{rd.run_id}/events",
+                          headers={"Last-Event-ID": "not-a-number"})
+    rounds = [event["data"]["round"] for event in events
+              if event["event"] == "round"]
+    assert rounds == [0, 1]
+
+
+def test_a_quiet_stream_sends_keep_alive_comments(live, monkeypatch):
+    base, rd = live
+    monkeypatch.setattr(runstore, "EVENT_KEEPALIVE_SECONDS", 0.05)
+    request = urllib.request.Request(f"{base}/api/runs/{rd.run_id}/events")
+    saw = False
+    with urllib.request.urlopen(request, timeout=5) as response:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                line = response.readline()
+            except socket.timeout:
+                break
+            if b": keep-alive" in line:
+                saw = True
+                break
+    assert saw
 
 
 def test_last_event_id_resumes_after_that_round(live):

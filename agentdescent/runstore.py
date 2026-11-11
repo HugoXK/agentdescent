@@ -907,6 +907,25 @@ DEFAULT_HTTP_PORT = 8787
 #: endpoint, and it keeps the server read-only. Tests pass a smaller value.
 EVENT_POLL_SECONDS = 0.5
 
+#: How long an idle stream waits before writing a ``: keep-alive`` comment.
+#: A module constant rather than a literal so a test can exercise the branch;
+#: proxies and browsers otherwise drop a connection that says nothing for a
+#: while, and the client would silently stop following a run with long rounds.
+EVENT_KEEPALIVE_SECONDS = 15.0
+
+
+def _run_id_in(rest: str) -> Optional[str]:
+    """The run id in the path after ``/api/runs/``, or ``None`` if it is not one.
+
+    A run id indexes a directory under the store, so a separator or a dot entry
+    is a traversal attempt. Both endpoints that take an id use this one check so
+    the SSE route and the JSON route cannot drift apart.
+    """
+    if not rest or "/" in rest or rest in (".", ".."):
+        return None
+    return rest
+
+
 _PANEL_HTML = """<!doctype html>
 <meta charset="utf-8"><title>AgentDescent runs</title>
 <style>
@@ -1073,7 +1092,7 @@ def _http_handler(store: Optional[str], event_poll: float):
                     if state.state in ("done", "failed", "cancelled"):
                         self.close_connection = True
                         return
-                    if time.monotonic() - last_keepalive >= 15.0:
+                    if time.monotonic() - last_keepalive >= EVENT_KEEPALIVE_SECONDS:
                         self.wfile.write(b": keep-alive\n\n")
                         self.wfile.flush()
                         last_keepalive = time.monotonic()
@@ -1091,14 +1110,12 @@ def _http_handler(store: Optional[str], event_poll: float):
             if path.startswith("/api/runs/"):
                 rest = path[len("/api/runs/"):]
                 if rest.endswith("/events"):
-                    run_id = rest[:-len("/events")]
-                    if not run_id or "/" in run_id or run_id in (".", ".."):
+                    run_id = _run_id_in(rest[:-len("/events")])
+                    if run_id is None:
                         return self._json(400, {"error": "bad run id"})
                     return self._events(run_id)
-                run_id = rest
-                # The id indexes a directory, so anything with a separator in it
-                # is a traversal attempt rather than a run.
-                if not run_id or "/" in run_id or run_id in (".", ".."):
+                run_id = _run_id_in(rest)
+                if run_id is None:
                     return self._json(400, {"error": "bad run id"})
                 try:
                     rd = get(run_id, store=store)
