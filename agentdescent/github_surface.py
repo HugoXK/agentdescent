@@ -309,9 +309,10 @@ def extract_review_constraints(
     constraint; any other review or comment is a suggestion unless its text
     carries an action phrase (``please``, ``add``, ``update``, ``fix``, ...),
     which promotes it to blocking. Plain "thanks" notes are dropped rather than
-    becoming tasks. Only a reviewer's latest review decides: an earlier review
-    from the same author is superseded, so a change request that reviewer later
-    approved stays as a suggestion instead of blocking (#774).
+    becoming tasks. Each reviewer's representative review decides (see
+    ``_latest_reviews``): a change request that reviewer later approved or had
+    dismissed stays as a suggestion instead of blocking, while a plain later
+    comment neither lifts nor weakens the block (#774).
     """
     resolved = {str(value) for value in resolved_ids}
     mapped = [review for review in reviews if isinstance(review, Mapping)]
@@ -739,24 +740,40 @@ def _review_author(review: Mapping[str, Any]) -> str:
     return login or f"review:{review.get('id', '')}"
 
 
+_DECISIVE_REVIEW_STATES = frozenset({"APPROVED", "CHANGES_REQUESTED", "DISMISSED"})
+
+
 def _latest_reviews(
         reviews: Sequence[Mapping[str, Any]]) -> Dict[str, Mapping[str, Any]]:
-    """Keep only each reviewer's last review: a later one supersedes it.
+    """Keep each reviewer's representative review.
 
     GitHub keeps every review event, so ``CHANGES_REQUESTED`` followed by
     ``APPROVED`` from the same reviewer would otherwise block forever, which is
     the "please re-review" flow this repository actually runs on (#774).
-    A pending review has no ``submitted_at`` and therefore never supersedes a
-    submitted one.
+
+    The representative is the author's latest ``APPROVED``,
+    ``CHANGES_REQUESTED`` or ``DISMISSED`` review: those are the states that
+    settle a block. A plain ``COMMENTED`` review never overrides one of them,
+    because GitHub keeps a change request until an approval or a dismissal, so
+    a later comment must not read as if the block were lifted (#774). An author
+    with no such review keeps the latest review of any state. A pending review
+    has no ``submitted_at`` and therefore never supersedes a submitted one.
     """
     latest: Dict[str, Mapping[str, Any]] = {}
+    decisive: Dict[str, Mapping[str, Any]] = {}
     for review in reviews:
         if not isinstance(review, Mapping):
             continue
         author = _review_author(review)
+        key = _review_sort_key(review)
         current = latest.get(author)
-        if current is None or _review_sort_key(review) >= _review_sort_key(current):
+        if current is None or key >= _review_sort_key(current):
             latest[author] = review
+        if str(review.get("state", "")).upper() in _DECISIVE_REVIEW_STATES:
+            settled = decisive.get(author)
+            if settled is None or key >= _review_sort_key(settled):
+                decisive[author] = review
+    latest.update(decisive)
     return latest
 
 

@@ -112,7 +112,8 @@ agentdescent github review --pr 772 --owner Birfy --repo agentdescent --json
 The packet contains:
 
 - `reviews` — counts of approved / changes_requested / commented / dismissed,
-  one per reviewer (that reviewer's latest review wins);
+  one per reviewer (that reviewer's decisive review wins, so a later plain
+  comment does not erase a block);
 - `checks_state` and `checks` — success, failure, pending or none;
 - `constraints` — id, kind, text, source (`review:<id>` / `comment:<id>`), path,
   severity (`blocking` / `suggestion`) and `resolved`;
@@ -122,8 +123,10 @@ The packet contains:
 A `CHANGES_REQUESTED` review (and its inline comments) is blocking; any other
 review or comment is a suggestion unless it uses an action word such as
 `please`, `add` or `update`, which promotes it to blocking. Only a reviewer's
-latest review decides, so a change request that reviewer later approved no
-longer blocks and its constraints stay as suggestions. A plain "thanks" is a
+decisive review counts: the author's latest approval, change request or
+dismissal, so a change request that reviewer later approved (or had dismissed)
+no longer blocks and its constraints stay as suggestions, while a later
+plain comment neither lifts nor weakens the block. A plain "thanks" is a
 note and is not turned into a task. REST does not expose thread
 resolution, so pass `--resolved review:1,comment:2` for ids you know are
 resolved. This command **never writes, approves or merges**; `ready` only means

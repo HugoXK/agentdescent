@@ -453,3 +453,83 @@ def test_another_reviewers_change_request_still_blocks(monkeypatch):
     blocking = {row["text"] for row in payload["constraints"]
                 if row["severity"] == "blocking"}
     assert blocking == {"Please rename the flag"}
+
+
+def test_a_plain_comment_does_not_clear_a_change_request(monkeypatch):
+    # GitHub keeps a change request until an approval or a dismissal, so a
+    # later COMMENTED review must not read as if the block were lifted.
+    monkeypatch.setenv("AGENTDESCENT_GITHUB_TOKEN", "secret-token")
+    fake = FakeGitHub()
+    fake.pulls = [{"number": 7, "html_url": "https://github.com/o/r/pull/7",
+                   "title": "feat", "state": "open", "draft": False,
+                   "head": {"sha": "abc"}, "base": {"ref": "main"},
+                   "mergeable": True}]
+    fake.reviews = [
+        {"id": 1, "state": "CHANGES_REQUESTED",
+         "body": "Please add a test for the empty input",
+         "user": {"login": "alice"}, "submitted_at": "2026-11-10T02:00:00Z"},
+        {"id": 2, "state": "COMMENTED", "body": "Please fix the typo in the docstring",
+         "user": {"login": "alice"}, "submitted_at": "2026-11-11T02:00:00Z"},
+    ]
+    fake.checks = _green_checks()
+    payload = github_review(GitHubConfig("o", "r"), 7, transport=fake)
+    readiness = payload["merge_readiness"]
+    assert payload["reviews"]["changes_requested"] == 1
+    assert payload["reviews"]["commented"] == 0
+    assert readiness["ready"] is False
+    assert "1 reviewer(s) requested changes" in readiness["blockers"]
+    by_text = {row["text"]: row["severity"] for row in payload["constraints"]}
+    assert by_text["Please add a test for the empty input"] == "blocking"
+    assert by_text["Please fix the typo in the docstring"] == "suggestion"
+
+
+def test_a_comment_after_an_approval_keeps_the_approval(monkeypatch):
+    # A later COMMENTED review must not degrade the reviewer's approval either.
+    monkeypatch.setenv("AGENTDESCENT_GITHUB_TOKEN", "secret-token")
+    fake = FakeGitHub()
+    fake.pulls = [{"number": 7, "html_url": "https://github.com/o/r/pull/7",
+                   "title": "feat", "state": "open", "draft": False,
+                   "head": {"sha": "abc"}, "base": {"ref": "main"},
+                   "mergeable": True}]
+    fake.reviews = [
+        {"id": 1, "state": "CHANGES_REQUESTED",
+         "body": "Please add a test for the empty input",
+         "user": {"login": "alice"}, "submitted_at": "2026-11-10T02:00:00Z"},
+        {"id": 2, "state": "APPROVED", "body": "Looks good now",
+         "user": {"login": "alice"}, "submitted_at": "2026-11-11T02:00:00Z"},
+        {"id": 3, "state": "COMMENTED", "body": "One small nit in the docstring",
+         "user": {"login": "alice"}, "submitted_at": "2026-11-11T03:00:00Z"},
+    ]
+    fake.checks = _green_checks()
+    payload = github_review(GitHubConfig("o", "r"), 7, transport=fake)
+    readiness = payload["merge_readiness"]
+    assert payload["reviews"]["approved"] == 1
+    assert payload["reviews"]["changes_requested"] == 0
+    assert payload["reviews"]["commented"] == 0
+    assert readiness["ready"] is True
+    assert readiness["blockers"] == []
+
+
+def test_a_dismissed_change_request_stops_blocking(monkeypatch):
+    # Dismissal is the other way GitHub clears a change request.
+    monkeypatch.setenv("AGENTDESCENT_GITHUB_TOKEN", "secret-token")
+    fake = FakeGitHub()
+    fake.pulls = [{"number": 7, "html_url": "https://github.com/o/r/pull/7",
+                   "title": "feat", "state": "open", "draft": False,
+                   "head": {"sha": "abc"}, "base": {"ref": "main"},
+                   "mergeable": True}]
+    fake.reviews = [
+        {"id": 1, "state": "CHANGES_REQUESTED",
+         "body": "Please add a test for the empty input",
+         "user": {"login": "alice"}, "submitted_at": "2026-11-10T02:00:00Z"},
+        {"id": 2, "state": "DISMISSED", "body": "",
+         "user": {"login": "alice"}, "submitted_at": "2026-11-11T02:00:00Z"},
+    ]
+    fake.checks = _green_checks()
+    payload = github_review(GitHubConfig("o", "r"), 7, transport=fake)
+    readiness = payload["merge_readiness"]
+    assert payload["reviews"]["changes_requested"] == 0
+    assert payload["reviews"]["dismissed"] == 1
+    assert readiness["ready"] is True
+    by_text = {row["text"]: row["severity"] for row in payload["constraints"]}
+    assert by_text["Please add a test for the empty input"] == "suggestion"
