@@ -25,15 +25,16 @@ do this **before** The procedure below (`doctor` → `plan` → `start` need a
 real model and a key):
 
 - **With MCP:** call `demo` (optional `algorithm` such as `gepa`, `ace`,
-  `dgm`, `skillopt`, `rrsi`, or `archive_selection`; optional `kind` of
-  `text` or `skill_dir`). It needs no key, does not write the user's files,
-  and returns `initial_reward`, `final_reward`, `learned`, and `next`.
-  Report the reward change and what it learned.
+  `dgm`, `skillopt`, `rrsi`, `archive_selection`, or `evoskill`; optional
+  `kind` of `text`, `skill_dir`, or `skill_library`). It needs no key, does
+  not write the user's files, and returns `initial_reward`, `final_reward`,
+  `learned`, and `next`. Report the reward change and what it learned.
+  `evoskill` defaults to the `skill_library` fixture.
 - **Without MCP:** run `agentdescent demo [--algorithm NAME] --json` and
   report the same fields.
 
 Then continue with The procedure for a real run on the user's files. If
-`demo` refuses a card because it needs a real model (for example `evoskill`),
+`demo` refuses a card (unknown name, or a kind with no offline fixture),
 surface that error — the same words the CLI prints — and offer
 `algorithm_spec` (or `agentdescent algorithms run NAME <path> <cases.jsonl>`)
 after `doctor`. Do not invent a keyless path for those cards.

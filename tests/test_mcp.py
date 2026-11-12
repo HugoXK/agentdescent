@@ -152,7 +152,7 @@ def test_demo_is_on_path_a_and_runs_offline_without_provider_keys(store, monkeyp
     assert any("show" in step for step in out["next"])
 
 
-def test_demo_refuses_unknown_and_real_model_cards_like_cli(store, capsys):
+def test_demo_refuses_unknown_cards_like_cli(store, capsys):
     """#903: MCP demo errors match the CLI wording."""
     from agentdescent import cli
 
@@ -165,14 +165,19 @@ def test_demo_refuses_unknown_and_real_model_cards_like_cli(store, capsys):
     err = capsys.readouterr().err
     assert code == 2 and unknown["error"] in err
 
-    refused = t.demo(algorithm="evoskill")
-    assert refused.get("ok") is False
-    assert "evoskill" in refused["error"]
-    assert "real model" in refused["error"] or "offline demo" in refused["error"]
-    assert "agentdescent algorithms run evoskill" in refused["error"]
-    code = cli.main(["--store", store, "demo", "--algorithm", "evoskill"])
-    err = capsys.readouterr().err
-    assert code == 2 and refused["error"] in err
+
+def test_demo_evoskill_runs_offline_like_cli(store):
+    """#934: evoskill is no longer a real-model-only card on demo or MCP."""
+    t = Tools(store)
+    out = t.demo(algorithm="evoskill")
+    assert out.get("ok") is True, out
+    assert out["algorithm"] == "evoskill"
+    assert out["kind"] == "skill_library"
+    assert out["initial_reward"] == 0.0
+    assert out["final_reward"] == 1.0
+    assert out["outcomes"].get("evoskill-select", 0) >= 1
+    assert "SKILL.md" in out["learned"] and "COLUMN: amount" in out["learned"]
+    assert any(s.startswith("agentdescent algorithms run evoskill ") for s in out["next"])
 
 
 def test_demo_kind_errors_are_actionable(store):

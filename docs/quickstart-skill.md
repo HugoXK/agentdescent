@@ -27,7 +27,8 @@ agentdescent plan spec.json
 Offline library teaching (two `*/SKILL.md`, no key):
 `agentdescent demo --kind skill_library`. The same *card* on the one-skill
 smoke is `agentdescent demo --algorithm archive_selection`; both work with
-`--algorithm archive_selection`.
+`--algorithm archive_selection`. To see evoskill's Proposer → Generator
+loop induce a new `*/SKILL.md`, also offline: `agentdescent demo --algorithm evoskill`.
 
 ---
 

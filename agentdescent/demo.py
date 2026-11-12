@@ -51,6 +51,7 @@ __all__ = [
     "offline_library_reflector",
     "offline_reflector",
     "offline_text_agent",
+    "offline_evoskill_reflector",
     "offline_text_reflector",
     "resolve_demo_kind",
     "skip_reason",
@@ -65,6 +66,7 @@ DEMO_SKILL = "csv-total"
 #: fixture (those cards are text-only). Verified in ``tests/test_demo.py``.
 OFFLINE_ALGORITHMS = (
     "archive_selection",
+    "evoskill",
     "gepa",
     "dgm",
     "ace",
@@ -74,13 +76,8 @@ OFFLINE_ALGORITHMS = (
 
 #: Cards that apply to skill_dir / skill_library but need a real proposal
 #: protocol the offline reflector does not speak -- refused with a reason.
-OFFLINE_SKIP = {
-    "evoskill": (
-        "evoskill's proposer/generator protocol needs a real model; the offline "
-        "demo reflector only speaks the tree <EDITS> / text-rule formats. Run it "
-        "for real with `agentdescent algorithms run evoskill <path> <cases.jsonl>`"
-    ),
-}
+#: Empty since evoskill gained an offline proposer/generator stub (#934).
+OFFLINE_SKIP: Dict[str, str] = {}
 
 #: Subset of :data:`OFFLINE_ALGORITHMS` that run on the text fixture.
 OFFLINE_TEXT_ALGORITHMS = ("gepa", "dgm", "ace", "skillopt", "rrsi")
@@ -212,20 +209,40 @@ def read_rules(name):
     p = os.path.join(skills, name, 'references', 'rules.md')
     return open(p).read() if os.path.exists(p) else ''
 
+def _hits(pattern):
+    # SKILL.md tokens override references/rules.md (evoskill induces the former).
+    from_skill, from_ref = [], []
+    if not os.path.isdir(skills):
+        return from_skill, from_ref
+    for name in sorted(os.listdir(skills)):
+        root = os.path.join(skills, name)
+        if not os.path.isdir(root):
+            continue
+        skill = os.path.join(root, 'SKILL.md')
+        if os.path.exists(skill):
+            from_skill.extend(re.findall(pattern, open(skill).read()))
+        ref = os.path.join(root, 'references')
+        if os.path.isdir(ref):
+            for fn in sorted(os.listdir(ref)):
+                if fn.endswith('.md'):
+                    from_ref.extend(re.findall(pattern, open(os.path.join(ref, fn)).read()))
+    return from_skill, from_ref
+
+def pick(pattern, default):
+    from_skill, from_ref = _hits(pattern)
+    hits = from_skill or from_ref
+    return hits[-1] if hits else default
+
 if os.path.exists('data.csv'):
-    rules = read_rules('csv-total')
-    if not rules:
+    column = pick(r'COLUMN:\s*(\w+)', 'id')
+    if column == 'id' and not read_rules('csv-total') and not _hits(r'COLUMN:\s*(\w+)')[0]:
         print('MISSING_SKILL'); sys.exit(0)
-    m = re.search(r'COLUMN:\s*(\w+)', rules)
-    column = m.group(1) if m else 'id'
     rows = list(csv.DictReader(open('data.csv')))
     print(sum(int(r[column]) for r in rows if r.get(column, '').strip().isdigit()))
 elif os.path.exists('date.txt'):
-    rules = read_rules('date-parse')
-    if not rules:
+    field = pick(r'FIELD:\s*(\w+)', 'month').lower()
+    if field == 'month' and not read_rules('date-parse') and not _hits(r'FIELD:\s*(\w+)')[0]:
         print('MISSING_SKILL'); sys.exit(0)
-    m = re.search(r'FIELD:\s*(\w+)', rules)
-    field = (m.group(1) if m else 'month').lower()
     y, mo, d = open('date.txt').read().strip().split('-')
     print({'year': str(int(y)), 'month': str(int(mo)), 'day': str(int(d))}.get(field, 'UNKNOWN'))
 else:
@@ -365,10 +382,60 @@ def offline_library_reflector(prompt: str) -> str:
     }) + "</EDITS>"
 
 
+_EVOSKILL_COLUMN_SKILL = """\
+---
+name: column-amount
+description: Use when asked to total a column of data.csv; sum the amount column.
+---
+
+# column-amount
+
+Total the `amount` column of `data.csv`.
+
+- COLUMN: amount
+- `id` is a row number, not a quantity.
+- Reply with only the number.
+"""
+
+_EVOSKILL_YEAR_SKILL = """\
+---
+name: date-year
+description: Use when asked for the year recorded in date.txt.
+---
+
+# date-year
+
+Read `date.txt` (YYYY-MM-DD) and return the year.
+
+- FIELD: year
+- Date tasks ask for year, not month.
+- Reply with only the year.
+"""
+
+
+def offline_evoskill_reflector(prompt: str) -> str:
+    """Speak evoskill's Proposer / Generator protocol for the offline demo (#934)."""
+    if "Skill Proposer" in prompt:
+        if re.search(r"date\.txt|What year", prompt):
+            return (
+                "create date-year\n"
+                "Date tasks ask for the year recorded in date.txt."
+            )
+        return (
+            "create column-amount\n"
+            "The agent sums the id column; it should sum amount."
+        )
+    if "date-year" in prompt or "year recorded" in prompt:
+        return _EVOSKILL_YEAR_SKILL
+    return _EVOSKILL_COLUMN_SKILL
+
+
 def resolve_demo_kind(algorithm: Optional[str] = None,
                      kind: Optional[str] = None) -> str:
     """Pick the demo fixture from an explicit ``--kind`` and/or ``--algorithm``."""
     if kind is None:
+        if algorithm == "evoskill":
+            return "skill_library"
         return "text" if algorithm in OFFLINE_TEXT_ALGORITHMS else "skill_dir"
     if kind not in ("text", "skill_dir", "skill_library"):
         raise ValueError(
@@ -493,7 +560,16 @@ def build(root: str, algorithm: Optional[str] = None,
             fh.write("\n".join(json.dumps(r) for r in _rows()) + "\n")
         spec = demo_spec(root)
     if algorithm:
-        spec["algorithm"] = algorithm
+        if algorithm == "evoskill":
+            # Paper default batch_size=4 can exit a short demo with zero proposes
+            # (#847); the stub reflector speaks the two-role protocol, not <EDITS>.
+            spec["algorithm"] = {"name": "evoskill", "params": {"batch_size": 1}}
+            spec["reflect"] = {
+                "ref": "agentdescent.demo:offline_evoskill_reflector",
+                "call": False,
+            }
+        else:
+            spec["algorithm"] = algorithm
     with open(os.path.join(root, "spec.json"), "w", encoding="utf-8") as fh:
         json.dump(spec, fh, indent=2)
     return spec
@@ -539,6 +615,12 @@ def learned_summary(state: Dict[str, Any], *, kind: str) -> str:
         return _rules_line(state)
     if kind == "skill_library":
         parts = []
+        # #934: evoskill induces a new <slug>/SKILL.md; name that first so
+        # "what it learned" is the skill file (with frontmatter), not a hash.
+        for path in sorted(p for p in state if p.endswith("/SKILL.md")):
+            slug = path.split("/", 1)[0]
+            if slug not in LIBRARY_SKILL_NAMES:
+                parts.append(f"{path} -> {state[path].strip()!r}")
         for name in LIBRARY_SKILL_NAMES:
             rules = state.get(f"{name}/references/rules.md", "").strip()
             parts.append(f"{name}/rules.md -> {rules!r}")

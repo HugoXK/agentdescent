@@ -1417,10 +1417,11 @@ def write_starter_spec(
                     report.append(("next", "(`agentdescent demo` runs a complete example, "
                                    "offline, to copy from)"))
         if spec["kind"] == "skill_library":
-            # Always tip which wheel cards apply (evoskill needs a real model).
+            # Always tip which wheel cards apply.
             report.append(("note",
                            "skill_library cards: archive_selection "
-                           "(selection rule) or evoskill (needs a real model); "
+                           "(selection rule) or evoskill (proposer/generator); "
+                           "`agentdescent demo --algorithm evoskill` runs evoskill offline; "
                            "`agentdescent algorithms list --kind skill_library`"))
         report.append(("then", f"agentdescent plan {out}"))
     return out, spec, report, providers_out
@@ -5473,9 +5474,8 @@ def build_parser() -> argparse.ArgumentParser:
                         "--algorithm is a text-only card)")
     s.add_argument("--algorithm", metavar="NAME",
                    help="run the demo with this named algorithm offline "
-                        "(skill_dir / skill_library: archive_selection; text: "
-                        "gepa, dgm, ace, skillopt, rrsi; evoskill is refused — "
-                        "needs a real model). "
+                        "(skill_library: evoskill; skill_dir / skill_library: "
+                        "archive_selection; text: gepa, dgm, ace, skillopt, rrsi). "
                         "Currently: " + ", ".join(_demo_offline_algorithms()))
     s.set_defaults(fn=cmd_demo)
 

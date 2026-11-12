@@ -150,7 +150,8 @@ def test_demo_algorithm_runs_each_offline_algorithm_end_to_end(tmp_path, monkeyp
     assert f"algorithm: {name}" in out, out
     assert "held-out reward: 0.000 -> 1.000" in out, out
     spec = json.loads((tmp_path / "work" / "spec.json").read_text())
-    assert spec["algorithm"] == name
+    alg = spec["algorithm"]
+    assert alg == name or (isinstance(alg, dict) and alg.get("name") == name)
 
 
 def test_demo_algorithm_accepts_an_alias(tmp_path, monkeypatch):
@@ -191,15 +192,13 @@ def test_demo_json_emits_a_parseable_result(tmp_path, monkeypatch):
     assert "A text prompt that totals" not in out
 
 
-def test_demo_algorithm_refuses_one_that_needs_a_real_model(tmp_path, capsys):
-    # #845: evoskill has an explicit skip_reason (proposer protocol); other
-    # unknown-to-offline names still use the generic refusal.
+def test_demo_algorithm_unknown_name_leaves_no_work_dir(tmp_path, capsys):
+    # Unknown names still use the generic refusal and must not write the work dir.
     code = cli.main(["--store", str(tmp_path / "runs"), "demo",
-                     "--dir", str(tmp_path / "work"), "--algorithm", "evoskill"])
+                     "--dir", str(tmp_path / "work"), "--algorithm", "nope"])
     err = capsys.readouterr().err
     assert code == 2
-    assert "evoskill" in err and ("real model" in err or "offline demo" in err)
-    assert "agentdescent algorithms run evoskill" in err
+    assert "unknown algorithm 'nope'" in err
     assert not (tmp_path / "work").exists()
     assert not (tmp_path / "runs").exists() or not os.listdir(tmp_path / "runs")
 
@@ -242,19 +241,89 @@ def test_build_text_fixture_for_text_only_cards(tmp_path):
     assert "```csv" in rows[0]["prompt"] and "fixtures" not in rows[0]
 
 
-def test_demo_algorithm_refuses_evoskill_with_skip_reason(tmp_path, capsys):
-    code = cli.main(["--store", str(tmp_path / "runs"), "demo",
-                     "--dir", str(tmp_path / "work"), "--algorithm", "evoskill"])
-    err = capsys.readouterr().err
-    assert code == 2
-    assert "evoskill" in err and "real model" in err
-    assert "proposer/generator" in err or "algorithms run evoskill" in err
-    assert not (tmp_path / "work").exists()
+def test_demo_algorithm_evoskill_runs_offline(tmp_path, monkeypatch):
+    # #934: evoskill is the skill-library native card; the offline stub speaks
+    # its proposer/generator protocol so a first look needs no key.
+    monkeypatch.setenv("AGENTDESCENT_HOME", str(tmp_path / "home"))
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        code = cli.main(["--store", str(tmp_path / "runs"), "demo",
+                         "--dir", str(tmp_path / "work"), "--algorithm", "evoskill"])
+    out = buf.getvalue()
+    assert code == 0, out
+    assert "held-out reward: 0.000 -> 1.000" in out, out
+    assert "evoskill-select" in out, out
+    assert "algorithm: evoskill" in out
+    assert "SKILL.md" in out and "COLUMN: amount" in out
+    spec = json.loads((tmp_path / "work" / "spec.json").read_text())
+    assert spec["kind"] == "skill_library"
+    assert spec["algorithm"]["name"] == "evoskill"
+    assert spec["algorithm"]["params"]["batch_size"] == 1
+    assert spec["reflect"]["ref"].endswith("offline_evoskill_reflector")
+
+
+def test_demo_algorithm_evoskill_json(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENTDESCENT_HOME", str(tmp_path / "home"))
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        code = cli.main(["--store", str(tmp_path / "runs"), "demo",
+                         "--dir", str(tmp_path / "work"),
+                         "--algorithm", "evoskill", "--json"])
+    out = buf.getvalue()
+    assert code == 0, out
+    payload = json.loads(out)
+    assert payload["ok"] is True
+    assert payload["kind"] == "skill_library"
+    assert payload["algorithm"] == "evoskill"
+    assert payload["initial_reward"] == 0.0
+    assert payload["final_reward"] == 1.0
+    assert payload["outcomes"].get("evoskill-select", 0) >= 1
+    assert "SKILL.md" in payload["learned"]
+    assert "COLUMN: amount" in payload["learned"]
+    assert payload["learned"].lstrip().startswith("column-amount/SKILL.md") or "/SKILL.md" in payload["learned"]
+    assert any("show" in step for step in payload["next"])
+    assert any(s.startswith("agentdescent algorithms run evoskill ") for s in payload["next"])
+    assert "A two-skill library" not in out
+
+
+def test_demo_kind_skill_library_with_evoskill(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENTDESCENT_HOME", str(tmp_path / "home"))
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        code = cli.main(["--store", str(tmp_path / "runs"), "demo",
+                         "--dir", str(tmp_path / "work"),
+                         "--kind", "skill_library", "--algorithm", "evoskill"])
+    out = buf.getvalue()
+    assert code == 0, out
+    assert "held-out reward: 0.000 -> 1.000" in out, out
+    spec = json.loads((tmp_path / "work" / "spec.json").read_text())
+    assert spec["kind"] == "skill_library"
+    assert spec["algorithm"]["name"] == "evoskill"
+
+
+def test_offline_evoskill_reflector_speaks_both_roles():
+    proposer = demo.offline_evoskill_reflector(
+        "You are the Skill Proposer.\nFailures:\n[0] Q: What is the total of "
+        "the requested column in data.csv?\n    agent: 3\n    gold: 42"
+    )
+    assert proposer.startswith("create column-amount")
+    year = demo.offline_evoskill_reflector(
+        "You are the Skill Proposer.\nFailures:\n[0] Q: What year is recorded "
+        "in date.txt?\n    agent: 11\n    gold: 2019"
+    )
+    assert year.startswith("create date-year")
+    body = demo.offline_evoskill_reflector(
+        "You are the Skill Generator.\n" + proposer
+    )
+    assert body.lstrip().startswith("---")
+    assert "name: column-amount" in body and "COLUMN: amount" in body
 
 
 def test_skip_reason_only_for_listed_skips():
-    assert demo.skip_reason("evoskill")
+    assert demo.skip_reason("evoskill") is None
     assert demo.skip_reason("gepa") is None
+    assert not demo.OFFLINE_SKIP
+    assert "evoskill" in demo.OFFLINE_ALGORITHMS
     assert set(demo.OFFLINE_TEXT_ALGORITHMS).issubset(set(demo.OFFLINE_ALGORITHMS))
 
 
