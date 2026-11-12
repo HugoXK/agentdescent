@@ -356,6 +356,25 @@ class AdaptiveTrustRegion:
         #: is recorded.
         self.history: list = [initial]
 
+    def policy_fingerprint(self) -> dict:
+        """This policy's configuration, for ``policies.policy_digest`` (#943).
+
+        ``current`` is deliberately absent: it moves as merges land, and a
+        version hash that changes every round would produce a false
+        ``policy_change`` edge on every decision. What makes a *version* is where
+        the region starts and how far it may move.
+        """
+        start = self.history[0] if self.history else self.current
+        return {
+            "initial": [start.ops, start.chars],
+            "minimum": [self.minimum.ops, self.minimum.chars],
+            "maximum": [self.maximum.ops, self.maximum.chars],
+            "window": self.window,
+            "widen": self.widen,
+            "tighten": self.tighten,
+            "accept_rate_to_widen": self.accept_rate_to_widen,
+        }
+
     def observe(self, outcome: str) -> TrustRegion:
         """Record one merge outcome and return the region for the next merge.
 
@@ -463,6 +482,21 @@ class StableDistanceAcceptance(_ForwardsInstall):
             raise ValueError("strength must not be negative")
         self.inner = inner if inner is not None else DefaultAcceptance()
         self.strength = strength
+
+    def policy_fingerprint(self) -> dict:
+        """``strength`` is a decision knob kept on the instance (#943).
+
+        Without this the digest could not tell ``strength=0.1`` from
+        ``strength=0.9`` -- and the extra margin a distant candidate must clear
+        is exactly the kind of three-line policy change #52 was about.
+        """
+        inner = getattr(self.inner, "policy_fingerprint", None)
+        return {
+            "strength": self.strength,
+            "inner": (f"{type(self.inner).__module__}."
+                      f"{type(self.inner).__qualname__}"),
+            "inner_fingerprint": inner() if callable(inner) else None,
+        }
 
     def accept(self, ctx):
         from dataclasses import replace as _replace

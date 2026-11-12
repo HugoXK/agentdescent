@@ -27,6 +27,14 @@ changed = verify_manifest(spec, manifest, data_paths=[...], code_version="0.9.0"
   secret is never stored. A normal key like `max_tokens` is **not** redacted.
 - **Seeds/algorithm/code version** are explicit fields; `extra` is redacted and
   hashed.
+- **`policy_digest`** is the don't-decide-this-twice half: the decision procedure
+  that judged the run
+  ([`policy_digest()`](policies.md#which-version-of-this-bundle-is-a-run-using)),
+  recorded beside the id and **not** inside it. The id describes the inputs; the
+  policy describes what was done with them, and folding the policy in would give
+  the same data two ids and make every existing manifest incomparable.
+  `diff_manifest` ignores it for the same reason — `verify_manifest` cannot
+  re-derive a procedure from a run's inputs.
 - `manifest_id` is the hash of those fields, so two runs with identical inputs
   share it. `diff_manifest` / `verify_manifest` return the changed field names,
   which is what a replay/audit report needs.

@@ -13,7 +13,7 @@ means the parameter has none.
 Each section links to the page that explains *why* the module is shaped the
 way it is; this page is the *what*.
 
-614 public names across 122 modules.
+615 public names across 122 modules.
 
 ---
 
@@ -81,7 +81,8 @@ EvolutionResult(
     sandboxes_reused: int = 0,
     sandbox_failures: int = 0,
     fusion_trials: List['FusionTrial'] = <factory>,
-    budget: Optional[Dict[str, Any]] = None
+    budget: Optional[Dict[str, Any]] = None,
+    policy_digest: str = ''
 ) -> None
 ```
 
@@ -1345,7 +1346,8 @@ Aggregator(
     fusion: Optional['FusionPolicy'] = None,
     acceptance: Optional['AcceptancePolicy'] = None,
     promotion: Optional['PromotionPolicy'] = None,
-    screen: Optional['ScreenPolicy'] = None
+    screen: Optional['ScreenPolicy'] = None,
+    policy_digest: str = ''
 ) -> None
 ```
 
@@ -4278,6 +4280,7 @@ AdaptiveTrustRegion(
 | method | what it does |
 |---|---|
 | `observe(outcome: str) -> TrustRegion` | Record one merge outcome and return the region for the next merge. |
+| `policy_fingerprint() -> dict` | This policy's configuration, for `policies.policy_digest` (#943). |
 
 ### `AdvantageAcceptance(inner = None, strength: float = 1.0) -> None`
 
@@ -4299,6 +4302,10 @@ Standardise a rollout's reward against the group it belongs to.
 ### `StableDistanceAcceptance(inner = None, strength: float = 0.1) -> None`
 
 Penalise candidates that drift far from the confirmed branch.
+
+| method | what it does |
+|---|---|
+| `policy_fingerprint() -> dict` | `strength` is a decision knob kept on the instance (#943). |
 
 ### `TrustRegion(ops: int, chars: int) -> None`
 
@@ -6029,6 +6036,10 @@ Per-task `after - before` over the keys present in both sides.
 ### `patch_source`
 
 A unified diff between two sources -- the patch a human or a reviewer sees, and what an apply can reverse.
+
+### `policy_digest`
+
+The 64-hex version of a decision procedure: the bundle, the config, the verifier.
 
 ### `policy_improve`
 

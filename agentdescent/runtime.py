@@ -182,7 +182,13 @@ def run_guarded(spec: EvolveSpec, *, acceptance: Optional[Any] = None,
                     "completion_tokens": int(
                         getattr(usage, "completion_tokens", 0) or 0),
                     "wallclock": float(getattr(result, "wallclock", 0.0) or 0.0),
-                })
+                },
+                # The run's own procedure, not the shipped default: a guarded
+                # run often injects a chained acceptance policy, and stamping
+                # `Policies()` here would make every run look alike in the log
+                # -- the exact failure #943 exists to fix. Empty when the result
+                # cannot say, which is honest rather than a guess.
+                policy_digest=str(getattr(result, "policy_digest", "") or ""))
         except Exception as error:  # noqa: BLE001 - the run already happened
             notes.append(f"decision log failed: {type(error).__name__}: {error}")
     return GuardedRun(result=result, decision=decision, acceptance=chain,

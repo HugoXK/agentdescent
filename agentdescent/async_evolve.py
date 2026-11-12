@@ -1547,6 +1547,7 @@ def async_evolve(
                              fusion_trials=_fusion_trials(eng.aggregator),
                              trajectories_path=getattr(
                                  eng.runtime.trajectory_store, "root", None),
+                             policy_digest=getattr(eng, "policy_digest", ""),
                              **_cost_fields(eng.meter))
     if gate_pool is not None:
         # `wait=False`: the merger has already blocked on every measurement it

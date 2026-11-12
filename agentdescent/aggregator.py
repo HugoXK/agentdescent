@@ -653,19 +653,26 @@ def fuse_diffs(diffs: List[Diff]) -> Diff:
                 rationale=combined_rationale(diffs))
 
 
-def merge_commit_message(diff: Diff, artifact_id: str) -> str:
+def merge_commit_message(diff: Diff, artifact_id: str, *,
+                         policy_digest: str = "") -> str:
     """Ledger commit subject (+ optional rationale body) for an accepted Diff.
 
     Without a rationale this is exactly ``merge {diff_id} -> {artifact_id}`` —
     the historical message every non-FileTree strategy still produces. With one,
     the rationale is appended as a single-paragraph body so ``git log`` on the
     ledger carries *why* the change landed.
+
+    ``policy_digest`` adds a ``policy-digest: <64-hex>`` trailer — the policy
+    version that admitted this commit (#943). Empty (the default) leaves the
+    message byte-identical to before, so every existing caller keeps its exact
+    commit message.
     """
     subject = f"merge {diff.diff_id} -> {artifact_id}"
     body = rationale_paragraph(getattr(diff, "rationale", "") or "")
-    if not body:
-        return subject
-    return f"{subject}\n\n{body}"
+    message = f"{subject}\n\n{body}" if body else subject
+    if policy_digest:
+        message = f"{message}\n\npolicy-digest: {policy_digest}"
+    return message
 
 
 def install_policy(policy: Any, verifier: Any, config: "AggregatorConfig") -> None:
@@ -701,10 +708,19 @@ class Aggregator:
         acceptance: Optional["AcceptancePolicy"] = None,
         promotion: Optional["PromotionPolicy"] = None,
         screen: Optional["ScreenPolicy"] = None,
+        policy_digest: str = "",
     ) -> None:
         self.ledger = ledger
         self.verifier = verifier
         self.audit = audit
+        #: Which decision procedure this aggregator is running, as
+        #: :func:`~agentdescent.policies.policy_digest`'s 64-hex hash (#943).
+        #: The engine fills it after construction -- including for a factory-built
+        #: aggregator, which cannot be handed a new keyword without changing a
+        #: public signature -- so the merge path can stamp it on every decision
+        #: and every commit message. ``""`` means "nobody said", and nothing acts
+        #: on it: no shipped policy reads it.
+        self.policy_digest = str(policy_digest)
         # swap Full / Guarded / Reflective without touching the merge pipeline.
         self.staleness_policy = staleness_policy or get_policy("guarded")
         #: Where the staleness ratio is recorded. `None` for a hand-built
@@ -1357,6 +1373,7 @@ class Aggregator:
         breaking change, which is still atomic by being one commit.
         """
         attempts = max(1, self.config.cas_attempts)
+        digest = getattr(self, "policy_digest", "")
         for attempt in range(attempts):
             if diff.contract_breaking:
                 # `commit_atomic` CAS-checks *every* state it writes, so the
@@ -1370,13 +1387,19 @@ class Aggregator:
                 base_vv = {artifact_id: head.get(artifact_id, 0)}
             try:
                 if diff.contract_breaking:
+                    # `(contract)` stays in the subject -- it is what tells a
+                    # reader of `git log` that the dependents landed with it --
+                    # and the policy trailer goes on the same message.
+                    message = f"merge {diff.diff_id} -> {artifact_id} (contract)"
+                    if digest:
+                        message = f"{message}\n\npolicy-digest: {digest}"
                     _, vv = self.ledger.commit_atomic(
-                        new_states, base_vv, branch=branch,
-                        message=f"merge {diff.diff_id} -> {artifact_id} (contract)")
+                        new_states, base_vv, branch=branch, message=message)
                     return vv[artifact_id]
                 _, new_version = self.ledger.commit(
                     candidate, base_vv, branch=branch,
-                    message=merge_commit_message(diff, artifact_id))
+                    message=merge_commit_message(diff, artifact_id,
+                                                 policy_digest=digest))
                 return new_version
             except CASConflict:
                 if self.meter is not None:
@@ -1649,7 +1672,8 @@ class Aggregator:
             base_counts=c.base_counts, cand_counts=c.cand_counts,
             diff=c.diff, base_cheap=base_score, cand_cheap=cand_score,
             prior=prior, trust_radius=c.artifact.blast_radius,
-            stable_distance=stable_distance))
+            stable_distance=stable_distance,
+            policy_digest=getattr(self, "policy_digest", "")))
         p_improve = decision.p_improve
 
         # The full held-out rates. The regression guard below must use *these*

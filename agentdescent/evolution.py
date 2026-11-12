@@ -55,7 +55,7 @@ from .governance import FROZEN_IDS, GovernanceError, assert_mutable
 from .ledger import Ledger, LedgerFailure
 from .metrics import Meter, measured
 from .pipeline import EarlyStop, FirstError, WorkerHealth, describe as _describe
-from .policies import FusionTrial, Policies
+from .policies import FusionTrial, Policies, policy_digest
 from .sampling import RoundRobin, TaskSampler
 from .selection import SingleHead
 from .scheduler import AuditScheduler
@@ -1768,6 +1768,15 @@ class EvolutionResult:
     #: budget ran out" from "it converged" — and to know whether the tail of
     #: the search ran degraded (fewer ranking passes) or at full quality.
     budget: Optional[Dict[str, Any]] = None
+    #: Which decision procedure produced this run (#943), as
+    #: :func:`~agentdescent.policies.policy_digest`'s 64-hex content hash.
+    #: ``""`` on a result that was not produced by ``evolve()`` / the joint
+    #: drivers, or one written before this field existed. It lives here rather
+    #: than in :meth:`outcomes` because ``outcomes()`` is a
+    #: ``Dict[str, int]`` of merge categories -- a version hash is not a count,
+    #: and a caller comparing two runs reads this against
+    #: ``RunManifest.policy_digest``.
+    policy_digest: str = ""
 
     def fusion_stats(self) -> "FusionStats":
         """How often merging beat the best single diff -- and how badly it lost.
@@ -2238,6 +2247,15 @@ class _Engine:
     #: reports ``round 0`` for a search 40 rounds deep, and hands
     #: ``_prune_round_files`` a history that no longer sorts.
     checkpoint_round_base: int = 0
+    #: Which decision procedure this run is using (#943), as
+    #: :func:`~agentdescent.policies.policy_digest`'s 64-hex content hash.
+    #: Computed once in ``_build_engine`` from the *resolved* Policies (legacy
+    #: shortcuts already folded in), the aggregator config after
+    #: ``fusion_tournament=`` was applied, and the verifier that actually
+    #: measures. Stamped on the aggregator, on every commit message and on the
+    #: result, so a later reader can say which procedure admitted a commit
+    #: without reconstructing the call.
+    policy_digest: str = ""
 
     def _record_rollout(self, *, artifact_id: str, rendered: str, task: Task,
                         base_version: VersionVector, purpose: str,
@@ -2994,6 +3012,18 @@ def _build_engine(tasks, reward, *, agent, run, propose, strategy, initial_state
                 f"no callable {method}(). An aggregator needs ingest(card) and "
                 "step() -> list[MergeReport] (see AggregatorProtocol).")
 
+    # Which decision procedure this run is (#943): the resolved bundle, the
+    # config after `fusion_tournament=` was folded in, and the verifier that
+    # will actually measure. Computed once here and stamped on the aggregator --
+    # including a factory-built one, whose signature predates this field and
+    # cannot be handed a new keyword -- so every MergeContext, every ledger
+    # commit message and the result carry one consistent value.
+    policy_digest_value = policy_digest(pol, config=cfg, verifier=verifier)
+    try:
+        aggregator.policy_digest = policy_digest_value
+    except AttributeError:      # slots, or a read-only property
+        pass
+
     # Restore the aggregator's in-memory search state if a checkpoint exists
     # from a previous run on this ledger. Only runs when checkpointing is on —
     # a run that never wrote checkpoints has nothing to restore, and probing
@@ -3062,7 +3092,8 @@ def _build_engine(tasks, reward, *, agent, run, propose, strategy, initial_state
                   test=test,
                   executor=executor, meter=meter, scratch_repo=scratch,
                   checkpoint_payload=_cp_payload, checkpointing=checkpointing,
-                  checkpoint_round_base=_cp_round_base)
+                  checkpoint_round_base=_cp_round_base,
+                  policy_digest=policy_digest_value)
     # A contract-breaking commit lands atomically (commit_atomic); this is the
     # consumer side -- re-measure the artifacts that depended on the changed
     # contract. Wired here, after the engine exists, so the callback has
@@ -4601,6 +4632,7 @@ def evolve(
                              budget=governor.summary() if governor.active else None,
                              trajectories_path=getattr(
                                  eng.runtime.trajectory_store, "root", None),
+                             policy_digest=getattr(eng, "policy_digest", ""),
                              **_cost_fields(eng.meter))
     eng.cleanup()
     result.replay = _replay_stats(sampler)
