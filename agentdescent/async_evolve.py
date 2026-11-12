@@ -803,7 +803,15 @@ def async_evolve(
             reports.extend(eng.aggregator.finish_step(items))
         return reports
 
-    def _worker(wid: int, shard: List[Task]) -> None:
+    def _retire_worker() -> None:
+        with counter_lock:
+            retired[0] += 1
+            live[0] -= 1
+            if live[0] <= 0:
+                died[0] = True
+                stop.set()
+
+    def _worker_loop(wid: int, shard: List[Task]) -> None:
         worker_branch = _head_for_worker(eng.aggregator, wid)
         snap = eng.ledger.snapshot(worker_branch)
         base_v = snap.version.get(eng.artifact_id, 0)
@@ -1039,12 +1047,7 @@ def async_evolve(
                 # rate (~56% per rollout, an ordinary 429 storm) the old blanket
                 # rule retired all three workers in 22s with nothing learned.
                 if health.should_retire(consecutive):
-                    with counter_lock:
-                        retired[0] += 1
-                        live[0] -= 1
-                        if live[0] <= 0:          # every worker retired -> end the run
-                            died[0] = True
-                            stop.set()
+                    _retire_worker()
                     return
                 if health.should_warn(consecutive) and not warned:
                     warned = True   # a backend that dies mid-run must not look idle
@@ -1109,6 +1112,25 @@ def async_evolve(
                     # away with spend if the gate keeps accepting.
                     stop_reason[0] = "max_tokens"
                     stop.set()
+
+    def _worker(wid: int, shard: List[Task]) -> None:
+        # Initialization, task selection and completion bookkeeping sit outside
+        # the rollout's retry loop. If one fails, account for the exiting worker
+        # rather than leaving a dead pool to wait out max_seconds (#971).
+        try:
+            _worker_loop(wid, shard)
+        except ContractError as e:
+            with counter_lock:
+                if errors[0] is None:
+                    errors[0] = describe(e)
+                died[0] = True
+            contract_error.record(e)
+            stop.set()
+        except Exception as e:  # noqa: BLE001 - preserve the partial result
+            with counter_lock:
+                if errors[0] is None:
+                    errors[0] = describe(e)
+            _retire_worker()
 
     def _drain_and_merge() -> None:
         with intake_lock:
