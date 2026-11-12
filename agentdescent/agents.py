@@ -31,6 +31,7 @@ from typing import (Any, Callable, Dict, List, Mapping, Optional, Protocol,
                     Sequence, Tuple, runtime_checkable)
 
 from .evolvable import ContractError
+from ._subprocess import decode_output
 
 Completion = Callable[[str], str]
 
@@ -427,12 +428,18 @@ class _CliAgent:
             # caller's stdin: `opencode run "<prompt>"` waits on an inherited
             # pipe that never reaches EOF and burns the whole timeout. So stdin
             # is the prompt (`via_stdin`) or nothing at all, never the caller's.
-            stdin = {"input": prompt} if self.via_stdin else {"stdin": subprocess.DEVNULL}
+            stdin = {"input": prompt.encode("utf-8")} if self.via_stdin else {"stdin": subprocess.DEVNULL}
             proc = subprocess.run(
                 argv, **stdin,
-                capture_output=True, text=True, timeout=self.timeout,
+                capture_output=True, timeout=self.timeout,
                 cwd=self.workspace, env=env,
             )
+            proc.stdout = decode_output(proc.stdout)
+            proc.stderr = decode_output(proc.stderr)
+        except UnicodeError as e:
+            if self.usage is not None:
+                self.usage.record(seconds=time.time() - t0, failed=True)
+            raise AgentError(f"{self.command[0]} could not exchange UTF-8 text: {e}") from e
         except FileNotFoundError as e:
             raise AgentError(
                 f"{self.command[0]!r} is not installed or not on PATH") from e

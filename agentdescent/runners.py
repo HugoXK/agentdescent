@@ -39,6 +39,7 @@ from typing import (
 )
 
 from .agents import AgentError, Completion, WorkspaceAgent
+from ._subprocess import decode_output
 from .evolution import Task
 from .filetree import TreeError, materialize, parse_tree
 
@@ -267,7 +268,7 @@ def _sh(cmd: Sequence[str], ws: str, timeout: float,
     # `stdin=DEVNULL`: a gate command or plugin host never needs the caller's
     # stdin, and inheriting an open pipe makes a CLI that reads it (`opencode
     # run`) wait until the timeout.
-    proc = subprocess.Popen(prefix + list(cmd), cwd=cwd, env=dict(env), text=True,
+    proc = subprocess.Popen(prefix + list(cmd), cwd=cwd, env=dict(env),
                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             start_new_session=posix)
     try:
@@ -287,7 +288,10 @@ def _sh(cmd: Sequence[str], ws: str, timeout: float,
         except subprocess.TimeoutExpired:                    # pragma: no cover
             out, err = "", ""
         raise subprocess.TimeoutExpired(cmd, timeout, output=out, stderr=err)
-    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+    try:
+        return subprocess.CompletedProcess(cmd, proc.returncode, decode_output(out), decode_output(err))
+    except UnicodeDecodeError as e:
+        raise AgentError(f"{cmd[0]} emitted invalid UTF-8 output: {e}") from e
 
 
 def _kill_group(proc: "subprocess.Popen", posix: bool) -> None:

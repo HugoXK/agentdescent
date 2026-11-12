@@ -26,6 +26,7 @@ import subprocess
 from typing import Callable, Optional, Sequence, Union
 
 from .evolvable import ContractError
+from ._subprocess import decode_output
 
 __all__ = ["exact_match", "contains", "last_number", "numeric_close",
            "SCORERS", "scorer", "command_scorer", "GraderError"]
@@ -215,8 +216,12 @@ def command_scorer(cmd: Union[str, Sequence[str]], *, timeout: float = 60.0,
                              ensure_ascii=False)
         env = {**os.environ, "ANSWER": "" if output is None else str(output)}
         try:
-            proc = subprocess.run(argv, input=payload, capture_output=True, text=True,
+            proc = subprocess.run(argv, input=payload.encode("utf-8"), capture_output=True,
                                   timeout=timeout, cwd=cwd, env=env)
+            proc.stdout = decode_output(proc.stdout)
+            proc.stderr = decode_output(proc.stderr)
+        except UnicodeError as e:
+            raise GraderError(f"grader {argv[0]!r} could not exchange UTF-8 text: {e}") from e
         except FileNotFoundError:
             raise GraderError(f"grader {argv[0]!r} is not installed or not on PATH") from None
         except subprocess.TimeoutExpired:
