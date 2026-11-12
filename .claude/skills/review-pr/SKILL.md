@@ -78,3 +78,19 @@ Verdict: PASS
 ```
 
 Then check it counts: `python3 .github/scripts/review_gate.py --pr <n>`.
+
+## Merge lane by tier
+
+The tier is the diff's (`risk_gate.py`), never the PR text. Once the PASS counts,
+run this and do exactly what it prints:
+
+```sh
+python3 .github/scripts/merge_lane.py --pr <n> --repo ThinkFlowLab/agentdescent \
+  --tip <the PASS's Tip SHA>
+```
+
+`auto-merge` (T0/T1 with a compliant PASS) is the pinned
+`gh pr merge … --auto --squash --match-head-commit <tip>` — the only sanctioned
+auto-merge. `awaiting-approval` (T2/T3, including a T3 that only the size cap
+produced) adds the label, leaves auto-merge unset and stops for Danyang's click.
+`wait` means no compliant PASS names the tip: post one or re-review, never merge.
