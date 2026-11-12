@@ -80,6 +80,50 @@ def test_newest_report_at_the_tip_wins():
     assert not rg.decide(HEAD, "Birfy", [c(report("PASS"), at=same), c(report("INC"), at=same)], POLICY)["ok"]
 
 
+def test_a_later_ran_block_does_not_borrow_an_earlier_not_run():
+    # #931: hasNotRun must reset when a later Ran:/What I ran: restarts the list.
+    # First block has Not run:; the block that carries the evidence does not.
+    body = "\n".join([
+        f"Tip SHA: `{HEAD}`",
+        "Ran:",
+        "  - first block",
+        "Not run:",
+        "  - nothing",
+        "",
+        "What I ran:",
+        "  - second block with no Not run",
+        "",
+        "Verdict: PASS",
+    ])
+    parsed = rg.parse_report(body)
+    assert parsed["ran"] == ["- second block with no Not run"]
+    assert parsed["hasNotRun"] is False
+    r = rg.decide(HEAD, "Birfy", [c(body)], POLICY)
+    assert r["ok"] and r["weak"] == WEAK
+
+    # Control: a single block with Ran: and no Not run: is already weak.
+    control = rg.decide(HEAD, "Birfy", [c(report(not_run=False))], POLICY)
+    assert control["ok"] and control["weak"] == WEAK
+
+    # A later block that does have Not run: stays strong.
+    strong_last = "\n".join([
+        f"Tip SHA: `{HEAD}`",
+        "Ran:",
+        "  - first, no Not run",
+        "",
+        "What I ran:",
+        "  - second",
+        "Not run:",
+        "  - nothing",
+        "",
+        "Verdict: PASS",
+    ])
+    parsed = rg.parse_report(strong_last)
+    assert parsed["ran"] == ["- second"] and parsed["hasNotRun"] is True
+    strong = rg.decide(HEAD, "Birfy", [c(strong_last)], POLICY)
+    assert strong["ok"] and not strong["weak"]
+
+
 def test_a_pass_without_evidence_counts_but_is_marked_weak():
     for body in (report(ran=()), report(not_run=False)):
         r = rg.decide(HEAD, "Birfy", [c(body)], POLICY)

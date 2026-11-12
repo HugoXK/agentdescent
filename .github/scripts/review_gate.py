@@ -63,6 +63,7 @@ def parse_report(body: Optional[str]) -> Dict[str, Any]:
         m = re.match(r"^(?:(?:What\s+)?I\s+)?Ran\b\s*(?:\([^)]*\))?\s*:\s*(.*)$", line, re.I)
         if m:
             out["ran"] = []
+            out["hasNotRun"] = False
             first = m.group(1).strip()
             if first and first != "-":
                 out["ran"].append(first)
