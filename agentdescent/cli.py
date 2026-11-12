@@ -94,6 +94,18 @@ def _out(payload: Any, *, as_json: bool) -> None:
         print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
 
 
+def _cannot_write(path: str, e: OSError) -> "runstore.RunStoreError":
+    """One `error: cannot write <path>: <reason>` line instead of a traceback.
+
+    `#907` gave the run store that contract inside `runstore.create`. The
+    artifact writers outside the store (``init``/``algorithms run --out``,
+    ``apply --to``) are wrapped at the writer, not with a blanket ``except
+    OSError`` in ``main()``: refusals (``refusing to write ...``) and unrelated
+    bugs still raise (#990).
+    """
+    return runstore.RunStoreError(f"cannot write {path}: {e.strerror or e}")
+
+
 def _spec_error(a: argparse.Namespace, e: Exception) -> int:
     """Report a spec that cannot be read or compiled; returns exit code 2.
 
@@ -1295,7 +1307,10 @@ def write_starter_spec(
         out = os.path.join(
             ".agentdescent",
             f"{os.path.basename(path.rstrip('/')) or 'spec'}.evolve.json")
-    os.makedirs(os.path.dirname(os.path.abspath(out)) or ".", exist_ok=True)
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(out)) or ".", exist_ok=True)
+    except OSError as e:
+        raise _cannot_write(out, e) from None
     providers_out = None
     providers_key_env = None
     providers_backup = None
@@ -1315,11 +1330,17 @@ def write_starter_spec(
             config_path=providers_out)
         spec["agent"] = agent_block
         providers_backup = _backup_existing_spec(providers_out, providers)
-        with open(providers_out, "w", encoding="utf-8") as fh:
-            json.dump(providers, fh, indent=2)
+        try:
+            with open(providers_out, "w", encoding="utf-8") as fh:
+                json.dump(providers, fh, indent=2)
+        except OSError as e:
+            raise _cannot_write(providers_out, e) from None
     backup = _backup_existing_spec(out, spec)
-    with open(out, "w", encoding="utf-8") as fh:
-        json.dump(spec, fh, indent=2)
+    try:
+        with open(out, "w", encoding="utf-8") as fh:
+            json.dump(spec, fh, indent=2)
+    except OSError as e:
+        raise _cannot_write(out, e) from None
     report: List[Tuple[str, str]] = [("wrote", f"wrote {out}")]
     for seeded in library_seeded:
         report.append(("wrote", f"seeded {seeded}"))
@@ -3103,14 +3124,26 @@ def apply_payload(run_id: str, *, to: Optional[str] = None, store: Optional[str]
             # slot on every apply. Apply, hand-edit, apply again and the second
             # backup was the hand-edit -- the original the first apply had saved
             # was gone, from the same command that promises to keep one.
-            shutil.copy2(dest, slot)
+            try:
+                shutil.copy2(dest, slot)
+            except OSError as e:
+                raise _cannot_write(slot, e) from None
             saved = [slot]
-        with open(dest, "w", encoding="utf-8", newline="") as fh:
-            fh.write(result.rendered)
+        try:
+            with open(dest, "w", encoding="utf-8", newline="") as fh:
+                fh.write(result.rendered)
+        except OSError as e:
+            raise _cannot_write(dest, e) from None
         return {"written": [dest], "unchanged": [], "backup": saved, "noop": False,
                 "dest": dest}
     _refuse_dest_link(dest, dest)
-    plan = result._write_to(dest, backup=backup, dry_run=dry_run, check_write=check_write)
+    try:
+        plan = result._write_to(dest, backup=backup, dry_run=dry_run,
+                                check_write=check_write)
+    except OSError as e:
+        # `filetree.materialize` writes the tree, so a refused write there is an
+        # artifact write too (#990).
+        raise _cannot_write(dest, e) from None
     plan["dest"] = dest
     if spec.kind == "skill_library":
         # write_to default prune=False: host skills outside the evolved keys

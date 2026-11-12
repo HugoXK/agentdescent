@@ -605,6 +605,11 @@ writable `$HOME`, a mistyped `--store`, or a path that is a file), the CLI
 exits 2 with one `error: cannot create run store <path>: <reason>` line, or
 `{"ok": false, "error": ...}` under `--json`, instead of a traceback (#907).
 
+The artifacts written outside the store — `init --out`, `algorithms run --out`,
+and `apply --to` (a text file or a tree) — use the same shape: one
+`error: cannot write <path>: <reason>` line, or `{"ok": false, "error": ...}`
+under `--json`, with exit code 2 (#990).
+
 A run outlives the tool call that started it, but it **inherits the environment
 of the process that launched it** — including provider keys and, in sandboxed
 or proxied setups, `HTTPS_PROXY`. That is what you want from an interactive
