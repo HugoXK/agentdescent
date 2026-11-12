@@ -126,6 +126,27 @@ def test_algorithms_run_kind_mismatch_speaks_run_not_init(tmp_path, capsys, monk
     assert not list(tmp_path.glob("agentdescent.*.spec.json"))
 
 
+def test_algorithms_run_text_only_card_on_a_library_says_it_is_text_only(
+        tmp_path, capsys, monkeypatch):
+    # #846: "applies to kind ['text']" alone leaves a library user guessing
+    # whether the card can see their skills at all; say the card is text-only
+    # and keep naming the cards that do apply.
+    monkeypatch.chdir(tmp_path)
+    library = tmp_path / "library"
+    for name in ("alpha", "beta"):
+        (library / name).mkdir(parents=True)
+        (library / name / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: d\n---\nbody\n")
+    _prompt, cases = _prompt_and_cases(tmp_path)
+    assert cli.main(["algorithms", "run", "gepa", str(library), str(cases),
+                     "--kind", "skill_library", "--model", "m"]) == 2
+    err = capsys.readouterr().err
+    assert "'gepa' is text-only" in err
+    assert "not a skill_library target" in err
+    assert "archive_selection" in err and "evoskill" in err
+    assert not list(tmp_path.glob("agentdescent.*.spec.json"))
+
+
 def test_algorithms_run_kind_mismatch_on_file_says_it_needs_a_directory(
         tmp_path, capsys, monkeypatch):
     monkeypatch.chdir(tmp_path)

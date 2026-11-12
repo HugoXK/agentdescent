@@ -264,6 +264,8 @@ def test_an_algorithm_that_does_not_apply_to_the_kind_names_the_ones_that_do(tmp
                  algorithm="rrsi")
     with pytest.raises(SpecError,
                        match=r"'rrsi' applies to kind \['text'\], not 'skill_dir'; "
+                             r"'rrsi' is text-only: it reads a single text file, "
+                             r"not a skill_dir target; "
                              r"for kind 'skill_dir': \['archive_selection', 'evoskill'\]"):
         compose(spec)
 
@@ -954,6 +956,8 @@ def test_kind_mismatch_on_text_lists_text_algorithms_without_text_route():
                                            target="Be helpful.")
     assert "gepa" in msg and "rrsi" in msg
     assert "target it as text" not in msg
+    # A tree card is not text-only, so it never carries that sentence (#846).
+    assert "is text-only" not in msg
     with pytest.raises(SpecError, match="for kind 'text'"):
         compose(_spec(algorithm="evoskill"))
 

@@ -379,7 +379,10 @@ def kind_mismatch_message(algorithm: Algorithm, kind: str, *,
     Names the algorithms that do apply (computed from the registry, so a
     plugin-registered algorithm shows up too) and, when the algorithm runs on
     ``text`` and ``target`` is a skill directory holding ``SKILL.md`` (or a
-    single file), how to run it on that one file instead.
+    single file), how to run it on that one file instead. A card that declares
+    only ``text`` says so in as many words (#846): ``applies to kind ['text']``
+    alone left a ``skill_library`` user guessing whether the card could read
+    the tree at all.
 
     ``via="run"`` phrases that route as ``agentdescent algorithms run NAME
     FILE --kind text`` (the name is positional there, #702); the default is
@@ -390,6 +393,9 @@ def kind_mismatch_message(algorithm: Algorithm, kind: str, *,
     name = algorithm.name
     msg = (f"{prefix} {name!r} applies to kind {list(algorithm.kinds)}, "
            f"not {kind!r}")
+    if kind != "text" and set(algorithm.kinds) == {"text"}:
+        msg += (f"; {name!r} is text-only: it reads a single text file, not a "
+                f"{kind} target")
     usable = [a.name for a in listing(kind)]
     if usable:
         msg += (f"; for kind {kind!r}: {usable} "
