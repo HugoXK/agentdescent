@@ -18,6 +18,7 @@ from tests.test_evolvespec import _dir_spec  # noqa: F401
 @pytest.fixture
 def store(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENTDESCENT_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("AGENTDESCENT_SURFACE_WRITE_DIRS", str(tmp_path))
     return str(tmp_path / "runs")
 
 

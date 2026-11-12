@@ -44,11 +44,12 @@ import shutil
 import sys
 import tempfile
 import time
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 
 from . import runstore
-from .evolution import SELECT_SET_NOTE, reward_set_line
+from .evolution import (SELECT_SET_NOTE, _check_apply_paths, _file_tree_backup_path,
+                        reward_set_line)
 from .evolvespec import (KINDS, EvolveSpec, SpecError, budget_round_overshoot_warning,
                          compose, estimate, fold_kind, load_spec, resolve_kind,
                          _POLICY_SLOTS)
@@ -3000,7 +3001,8 @@ def apply_with_target(run_id: Optional[str] = None, *, to: Optional[str] = None,
                       install_to: Optional[str] = None, source: Optional[str] = None,
                       store: Optional[str] = None, home: Optional[str] = None,
                       dry_run: bool = False, backup: bool = True,
-                      cli_flags: bool = True
+                      cli_flags: bool = True,
+                      check_write: Optional[Callable[[str, str], Any]] = None
                       ) -> Tuple[Dict[str, Any], List[str], str]:
     """Shared CLI + MCP entry point for ``apply`` (#823, #935)."""
     notes: List[str] = []
@@ -3020,19 +3022,22 @@ def apply_with_target(run_id: Optional[str] = None, *, to: Optional[str] = None,
                 "--from needs --to/--install-to PATH (where to install the artifact)"
                 if cli_flags
                 else "from needs to/install_to PATH (where to install the artifact)")
-        return (apply_from_payload(source, to=dest, dry_run=dry_run, backup=backup),
+        return (apply_from_payload(source, to=dest, dry_run=dry_run, backup=backup,
+                                   check_write=check_write),
                 notes, source)
     if not run_id:
         raise runstore.RunStoreError(
             "apply needs a run_id, or --from PATH --to/--install-to PATH"
             if cli_flags
             else "apply needs a run_id, or from PATH and to/install_to PATH")
-    return (apply_payload(run_id, to=dest, store=store, dry_run=dry_run, backup=backup),
+    return (apply_payload(run_id, to=dest, store=store, dry_run=dry_run, backup=backup,
+                          check_write=check_write),
             notes, f"run {run_id}")
 
 
 def apply_payload(run_id: str, *, to: Optional[str] = None, store: Optional[str] = None,
-                  dry_run: bool = False, backup: bool = True) -> Dict[str, Any]:
+                  dry_run: bool = False, backup: bool = True,
+                  check_write: Optional[Callable[[str, str], Any]] = None) -> Dict[str, Any]:
     run_id = resolve_run_id(run_id, store=store) or run_id
     rd = runstore.get(run_id, store=store)
     result = rd.result()
@@ -3056,28 +3061,28 @@ def apply_payload(run_id: str, *, to: Optional[str] = None, store: Optional[str]
                 "directory; pass --to FILE to write it to a file, or read it "
                 "with `show`")
         plan = _text_plan(dest, result.rendered)
+        slot = (_backup_slot(dest)
+                if backup and not plan["noop"] and os.path.exists(dest) else None)
+        _check_apply_paths(dest, plan["written"], slot, check_write)
         if dry_run:
             return {**plan, "dest": dest}
         if plan["noop"]:
             return {"written": [], "unchanged": [dest], "backup": [], "noop": True,
                     "dest": dest}
         saved = []
-        if backup and os.path.exists(dest):
+        if slot is not None:
             # `.bak-N`, never a fixed `.bak`: the directory path a few lines down
             # has always numbered its backups, and this one overwrote the single
             # slot on every apply. Apply, hand-edit, apply again and the second
             # backup was the hand-edit -- the original the first apply had saved
             # was gone, from the same command that promises to keep one.
-            n = 0
-            while os.path.exists(f"{dest}.bak-{n}"):
-                n += 1
-            shutil.copy2(dest, f"{dest}.bak-{n}")
-            saved = [f"{dest}.bak-{n}"]
+            shutil.copy2(dest, slot)
+            saved = [slot]
         with open(dest, "w", encoding="utf-8", newline="") as fh:
             fh.write(result.rendered)
         return {"written": [dest], "unchanged": [], "backup": saved, "noop": False,
                 "dest": dest}
-    plan = result.write_to(dest, backup=backup, dry_run=dry_run)
+    plan = result._write_to(dest, backup=backup, dry_run=dry_run, check_write=check_write)
     plan["dest"] = dest
     if spec.kind == "skill_library":
         # write_to default prune=False: host skills outside the evolved keys
@@ -3102,7 +3107,8 @@ def _backup_slot(dest: str) -> str:
 
 
 def apply_from_payload(source: str, *, to: str, dry_run: bool = False,
-                       backup: bool = True) -> Dict[str, Any]:
+                       backup: bool = True,
+                       check_write: Optional[Callable[[str, str], Any]] = None) -> Dict[str, Any]:
     """Install an artifact that lives on disk, not in the run store (#533).
 
     ``agentdescent campaign`` leaves its best artifact in a workspace copy and
@@ -3137,14 +3143,16 @@ def apply_from_payload(source: str, *, to: str, dry_run: bool = False,
         except (OSError, UnicodeDecodeError) as e:
             raise runstore.RunStoreError(f"cannot read {src}: {e}") from None
         plan = _text_plan(dest, rendered)
+        slot = (_backup_slot(dest)
+                if backup and not plan["noop"] and os.path.exists(dest) else None)
+        _check_apply_paths(dest, plan["written"], slot, check_write)
         if dry_run:
             return {**plan, "source": src, "dest": dest}
         if plan["noop"]:
             return {"written": [], "unchanged": [dest], "backup": [], "noop": True,
                     "source": src, "dest": dest}
         saved = []
-        if backup and os.path.exists(dest):
-            slot = _backup_slot(dest)
+        if slot is not None:
             shutil.copy2(dest, slot)
             saved = [slot]
         parent = os.path.dirname(dest)
@@ -3218,11 +3226,13 @@ def apply_from_payload(source: str, *, to: str, dry_run: bool = False,
     plan: Dict[str, Any] = {"written": changed, "unchanged": unchanged, "extra": extra,
                             "deleted": [], "backup": [], "noop": not changed,
                             "source": src, "dest": dest}
+    slot = (_file_tree_backup_path(dest)
+            if backup and not plan["noop"] and os.path.isdir(dest) else None)
+    _check_apply_paths(dest, [os.path.join(dest, rel.replace("/", os.sep))
+                             for rel in changed], slot, check_write)
     if dry_run or plan["noop"]:
         return plan
-    if backup and os.path.isdir(dest):
-        from .evolution import _file_tree_backup_path
-        slot = _file_tree_backup_path(dest)
+    if slot is not None:
         shutil.copytree(dest, slot, symlinks=True)
         plan["backup"] = [slot]
     for rel in changed:

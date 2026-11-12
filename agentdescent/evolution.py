@@ -1553,11 +1553,21 @@ def _file_tree_backup_path(dest: str) -> str:
         os.path.expanduser("~"), ".agentdescent")
     home = os.path.abspath(os.path.expanduser(home))
     base = os.path.join(home, "backups", f"{name}-{digest}")
-    os.makedirs(base, exist_ok=True)
     n = 0
     while os.path.exists(os.path.join(base, f"bak-{n}")):
         n += 1
     return os.path.join(base, f"bak-{n}")
+
+
+def _check_apply_paths(dest: str, written: Sequence[str], backup: Optional[str],
+                       check_write: Optional[Callable[[str, str], Any]]) -> None:
+    """Check the selected write set before any artifact or backup is changed."""
+    if check_write is not None:
+        check_write(dest, "to")
+        for path in written:
+            check_write(path, "to")
+        if backup is not None:
+            check_write(backup, "backup")
 
 
 @dataclass
@@ -1986,6 +1996,12 @@ class EvolutionResult:
           take out anything the spec excluded;
         * ``dry_run=True`` returns the same plan without touching the disk.
         """
+        return self._write_to(path, backup=backup, prune=prune, dry_run=dry_run)
+
+    def _write_to(self, path: str, *, backup: bool = True, prune: bool = False,
+                  dry_run: bool = False,
+                  check_write: Optional[Callable[[str, str], Any]] = None) -> Dict[str, Any]:
+        """The same apply operation, with an optional surface write boundary."""
         import os
         import shutil
 
@@ -2052,10 +2068,13 @@ class EvolutionResult:
                 "extra": [] if prune else extra,
                 "deleted": extra if prune else [], "backup": [],
                 "noop": not changed and not (prune and extra)}
+        bak = (_file_tree_backup_path(dest)
+               if backup and not plan["noop"] and os.path.isdir(dest) else None)
+        _check_apply_paths(dest, [os.path.join(dest, rel.replace("/", os.sep))
+                                 for rel in changed + plan["deleted"]], bak, check_write)
         if dry_run or plan["noop"]:
             return plan
-        if backup and os.path.isdir(dest):
-            bak = _file_tree_backup_path(dest)
+        if bak is not None:
             shutil.copytree(dest, bak, symlinks=True)
             plan["backup"] = [bak]
         materialize({rel: self.state[rel] for rel in changed}, dest)

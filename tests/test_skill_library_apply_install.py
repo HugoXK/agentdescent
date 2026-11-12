@@ -284,7 +284,7 @@ def test_mcp_apply_matches_cli_host_resolution_and_grok_refusal(
     work.mkdir()
     monkeypatch.chdir(work)
 
-    tools = Tools(store)
+    tools = Tools(store, surface_write_dirs=(str(tmp_path),))
     expected = fake_home / ".codex" / "skills"
     plan = tools.apply(run_id=rid, install_to="codex", home=str(fake_home),
                        dry_run=True)

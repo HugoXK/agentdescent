@@ -212,10 +212,11 @@ def ensure_write_path(path: Any, *, name: str,
         return None
     resolved = os.path.abspath(os.path.expanduser(require_text(path, name)))
     if allow is not None:
-        roots = [os.path.abspath(os.path.expanduser(str(root)))
+        target = os.path.normcase(os.path.realpath(resolved))
+        roots = [os.path.normcase(os.path.realpath(os.path.expanduser(str(root))))
                  for root in allow]
         if not roots or not any(
-                resolved == root or resolved.startswith(root + os.sep)
+                target == root or target.startswith(root.rstrip(os.sep) + os.sep)
                 for root in roots):
             raise SurfaceError(
                 f"{name} {path!r} is outside the operator's write allowlist "
