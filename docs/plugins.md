@@ -41,7 +41,8 @@ for any installed host the line names `skill` and `mcp` too (for example
 section (the same data is `hosts` in the JSON report and the MCP `doctor` tool).
 `stale` means the `SKILL.md` a host holds differs from the one this package would
 write now -- what a `pip install -U` leaves behind -- and `partial` means the
-skill or the MCP entry is absent; both are problems (exit code 1) and the fix is
+skill or the MCP entry is absent, or the MCP launcher points at a deleted
+interpreter; both are problems (exit code 1) and the fix is
 to re-run `agentdescent install <host>`. A host CLI on `PATH` with nothing
 installed is a hint, not a problem, because `pip install` wires nothing and not
 every host on a machine should be touched. An OpenCode config with comments (`opencode.jsonc`, or an
@@ -53,8 +54,11 @@ anything is `missing`. Grok Bot's scaffold reports `mcp n/a` (no host-native
 MCP config to check); with a current skill that is still `ok`, not `partial`. An install made through a
 host's own marketplace (`codex plugin add`, Claude Code's `/plugin install`)
 leaves no files here, so it reads `missing` and the hint names that route too.
-Only presence is checked: a launcher pinned to an interpreter that has since
-been deleted still reads `ok`.
+A launcher whose first argument is an absolute path that is no longer an
+executable file reads `mcp broken` (the host is `partial`, exit 1) and the
+host line names the dead path; a relative or bare command such as `python3`
+is not flagged. Re-run `agentdescent install <host>` to pin the current
+interpreter. Grok Bot stays `mcp n/a`.
 
 **Grok Bot over HTTP.** The scaffold edits no host config, because Grok Bot has
 no public one-click plugin API for local skill directories or stdio MCP (custom

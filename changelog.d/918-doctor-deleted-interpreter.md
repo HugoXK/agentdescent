@@ -1,0 +1,2 @@
+Fixed
+`doctor` now flags an MCP launcher whose first argument is an absolute path that is no longer an executable file: the host reads `mcp broken` / `state: partial` (exit 1) instead of a silently green `mcp ok`. The host line names the dead path, and the problems line tells you to re-run `agentdescent install <host>`. A relative or bare command such as `python3` is not flagged; Grok Bot stays `mcp n/a` (#918).

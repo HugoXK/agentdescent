@@ -582,6 +582,10 @@ def doctor_report(*, home: Optional[str] = None) -> Dict[str, Any]:
                 f"({info.get('user_skill_path')}); run `agentdescent install {name}`, "
                 f"then in a Grok Bot chat ask it to rewrite its `agentdescent` skill "
                 f"from {info['path']}")
+        elif info.get("mcp") == "broken":
+            problems.append(
+                f"{name}: the MCP launcher points at a deleted interpreter; "
+                f"run `agentdescent install {name}`")
         elif info["state"] in ("stale", "partial"):
             msg = (
                 f"{name}: the installed integration is {info['state']} "
@@ -3397,6 +3401,13 @@ def cmd_resume(a: argparse.Namespace) -> int:
     return 0
 
 
+def _mcp_bit(info: Dict[str, Any]) -> str:
+    """The ``mcp …`` fragment on a doctor host line, including a dead path."""
+    if info.get("mcp") == "broken" and info.get("mcp_launcher"):
+        return f"mcp broken: {info['mcp_launcher']} not found"
+    return f"mcp {info['mcp']}"
+
+
 def cmd_doctor(a: argparse.Namespace) -> int:
     home = getattr(a, "home", None)
     try:
@@ -3432,12 +3443,12 @@ def cmd_doctor(a: argparse.Namespace) -> int:
                     # No desktop CLI to report; the saved user skill is what the
                     # Bot loads (#675).
                     print(f"host {name}: {info['state']} "
-                          f"(skill {info['skill']}, mcp {info['mcp']}; "
+                          f"(skill {info['skill']}, {_mcp_bit(info)}; "
                           f"user skill {info.get('user_skill', 'unknown')})")
                     continue
                 cli_bit = (f"cli {info['cli']}" if info["cli"] else "cli not on PATH")
                 print(f"host {name}: {info['state']} "
-                      f"(skill {info['skill']}, mcp {info['mcp']}; {cli_bit})")
+                      f"(skill {info['skill']}, {_mcp_bit(info)}; {cli_bit})")
         for h in rep["hints"]:
             print(f"- {h}")
         for p in rep["problems"]:

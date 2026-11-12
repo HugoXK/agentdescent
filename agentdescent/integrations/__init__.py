@@ -1337,7 +1337,79 @@ def _skill_state(path: str) -> str:
     return "ok" if have == skill_text() else "stale"
 
 
-def _opencode_mcp_state(root: str) -> str:
+def _abs_dead_executable(command: object) -> Optional[str]:
+    """An absolute launcher path that is not an existing executable file.
+
+    Relative and bare names (``python3``, ``agentdescent``) are left alone:
+    they resolve against PATH when the host starts the server. ``None`` means
+    this is not a ``broken`` launcher.
+    """
+    if not isinstance(command, str) or not command:
+        return None
+    if not (os.path.isabs(command) or ntpath.isabs(command)):
+        return None
+    if os.path.isfile(command) and os.access(command, os.X_OK):
+        return None
+    return command
+
+
+def _mcp_from_command(present: bool, command: object) -> Tuple[str, Optional[str]]:
+    """``(mcp state, dead absolute path or None)`` for a present MCP entry."""
+    if not present:
+        return "missing", None
+    dead = _abs_dead_executable(command)
+    if dead is not None:
+        return "broken", dead
+    return "ok", None
+
+
+def _entry_command(entry: object) -> object:
+    """The executable an MCP entry will spawn: ``command[0]`` or ``command``."""
+    if not isinstance(entry, dict):
+        return None
+    command = entry.get("command")
+    if isinstance(command, list) and command:
+        return command[0]
+    return command
+
+
+def _quoted_scalar(raw: str) -> Optional[str]:
+    """A TOML/YAML ``command = "..."`` / ``command: "..."`` value, or ``None``."""
+    raw = raw.strip()
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ("'", '"'):
+            return raw[1:-1]
+        return raw
+    return value if isinstance(value, str) else None
+
+
+def _codex_mcp_command(cfg: str) -> Optional[str]:
+    """The ``command`` under a live ``[mcp_servers.agentdescent]`` table."""
+    match = re.search(
+        r"^\s*\[mcp_servers\.agentdescent\]\s*$([\s\S]*?)(?=^\s*\[|\Z)",
+        cfg, re.M)
+    if not match:
+        return None
+    line = re.search(r"^\s*command\s*=\s*(.*)$", match.group(1), re.M)
+    return _quoted_scalar(line.group(1)) if line else None
+
+
+def _dsh_mcp_command(patch: str) -> Optional[str]:
+    """The mcp-client ``command:`` inside our marked ``cordis.patch.yml`` block."""
+    if DSH_BLOCK_START not in patch:
+        return None
+    start = patch.index(DSH_BLOCK_START)
+    end = patch.find(DSH_BLOCK_END, start)
+    block = patch[start:end if end != -1 else None]
+    line = re.search(r"^\s*command:\s*(.*)$", block, re.M)
+    return _quoted_scalar(line.group(1)) if line else None
+
+
+def _opencode_mcp_inspect(root: str) -> Tuple[str, Optional[str]]:
     """The MCP entry in OpenCode's config: ``opencode.jsonc`` (what ``install``
     writes) or ``opencode.json`` (what a user may keep by hand).
 
@@ -1345,7 +1417,9 @@ def _opencode_mcp_state(root: str) -> str:
     (JSONC allows comments, which ``json`` cannot read) names ``agentdescent`` --
     the entry might be there and guessing either way would be wrong. A commented
     file that never names it is ``missing`` (#516): ``install`` puts the entry in
-    ``opencode.json`` beside it, and ``doctor`` must not call that host ``ok``."""
+    ``opencode.json`` beside it, and ``doctor`` must not call that host ``ok``.
+    ``broken`` when the entry's first command element is an absolute path that
+    is not an existing executable file (#918)."""
     unreadable = False
     for name in ("opencode.jsonc", "opencode.json"):
         raw = _read(os.path.join(root, name))
@@ -1357,21 +1431,32 @@ def _opencode_mcp_state(root: str) -> str:
             # (JSONC keys are quoted strings), so only one that does is a maybe.
             unreadable = unreadable or '"agentdescent"' in _strip_jsonc_comments(raw)
             continue
-        if (data.get("mcp") or {}).get("agentdescent"):
-            return "ok"
-    return "unknown" if unreadable else "missing"
+        entry = (data.get("mcp") or {}).get("agentdescent")
+        if entry:
+            return _mcp_from_command(True, _entry_command(entry))
+    return ("unknown" if unreadable else "missing"), None
 
 
-def _claude_mcp_state(path: str) -> str:
+def _opencode_mcp_state(root: str) -> str:
+    return _opencode_mcp_inspect(root)[0]
+
+
+def _claude_mcp_inspect(path: str) -> Tuple[str, Optional[str]]:
     raw = _read(path)
     if raw is None:
-        return "missing"
+        return "missing", None
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        return "missing"          # a manifest the host cannot read starts no server
+        return "missing", None          # a manifest the host cannot read starts no server
     servers = data.get("mcpServers") if isinstance(data, dict) else None
-    return "ok" if isinstance(servers, dict) and servers.get("agentdescent") else "missing"
+    if not (isinstance(servers, dict) and servers.get("agentdescent")):
+        return "missing", None
+    return _mcp_from_command(True, _entry_command(servers.get("agentdescent")))
+
+
+def _claude_mcp_state(path: str) -> str:
+    return _claude_mcp_inspect(path)[0]
 
 
 def _resolve_home(home: Optional[str]) -> Tuple[str, bool]:
@@ -1400,14 +1485,16 @@ def host_status(host: str, *, home: Optional[str] = None) -> Dict[str, str]:
     is what it holds still what this package would write?
 
     ``skill`` is ``ok`` / ``stale`` / ``missing``; ``mcp`` is ``ok`` /
-    ``missing`` / ``unknown`` / ``n/a`` (``n/a`` is Grok Bot: no host-native MCP
-    config file exists; an OpenCode config with comments cannot be read safely;
-    ``unknown`` is also what ``doctor`` reports if reading a host's files raises).
-    Two limits: a launcher pinned to an interpreter that has since been deleted
-    still reads ``ok`` (only presence is checked), and an install made through a
+    ``missing`` / ``unknown`` / ``n/a`` / ``broken`` (``n/a`` is Grok Bot: no
+    host-native MCP config file exists; an OpenCode config with comments cannot
+    be read safely; ``unknown`` is also what ``doctor`` reports if reading a
+    host's files raises; ``broken`` is a launcher whose first argument is an
+    absolute path that is not an existing executable file, and then
+    ``mcp_launcher`` names that path). One limit: an install made through a
     host's own marketplace (``/plugin install``, ``codex plugin add``) leaves no
     files here, so it reads ``missing``. ``state`` summarises them: ``ok``, ``stale`` (the skill is
-    behind the package), ``partial`` (one half is there) or ``missing``. Paths
+    behind the package), ``partial`` (one half is there, or the MCP launcher is
+    ``broken``) or ``missing``. Paths
     follow ``install`` exactly, including ``DSH_HOME`` / ``CODEX_HOME`` /
     ``XDG_CONFIG_HOME``. Codex can also be wired through ``codex plugin``, which
     leaves nothing here, so its ``missing`` says where else to look.
@@ -1415,26 +1502,28 @@ def host_status(host: str, *, home: Optional[str] = None) -> Dict[str, str]:
     if host not in HOSTS:
         raise ValueError(f"unknown host {host!r}; choose from {sorted(HOSTS)}")
     home, honour_env = _resolve_home(home)   # explicit home is the whole world (#410)
+    dead: Optional[str] = None
     if host == "dsh":
         root = _dsh_root(home, honour_env)
         skill = os.path.join(root, "skills", "agentdescent", "SKILL.md")
         patch = _read(os.path.join(root, "cordis.patch.yml")) or ""
         # Both markers: an interrupted write can leave only the start.
-        mcp = "ok" if DSH_BLOCK_START in patch and DSH_BLOCK_END in patch else "missing"
+        present = DSH_BLOCK_START in patch and DSH_BLOCK_END in patch
+        mcp, dead = _mcp_from_command(present, _dsh_mcp_command(patch) if present else None)
         # Our block from before #415 forwards four names, so dsh scrubs
         # `ARK_API_KEY`. Re-running `install` rewrites the block.
         stale_env = mcp == "ok" and _dsh_block_env_is_stale(patch)
     elif host == "claude-code":
         root = os.path.join(home, ".agentdescent", "plugins", "claude-code")
         skill = os.path.join(root, "skills", "agentdescent", "SKILL.md")
-        mcp = _claude_mcp_state(os.path.join(root, ".mcp.json"))
+        mcp, dead = _claude_mcp_inspect(os.path.join(root, ".mcp.json"))
     elif host == "codex":
         root = _codex_root(home, honour_env)
         skill = os.path.join(root, "skills", "agentdescent", "SKILL.md")
         cfg = _read(os.path.join(root, "config.toml")) or ""
         # A live table header, not a substring: a commented-out one is not wired.
-        mcp = ("ok" if re.search(r"^\s*\[mcp_servers\.agentdescent\]", cfg, re.M)
-               else "missing")
+        present = bool(re.search(r"^\s*\[mcp_servers\.agentdescent\]", cfg, re.M))
+        mcp, dead = _mcp_from_command(present, _codex_mcp_command(cfg) if present else None)
         # Our own block from before #404 has no `env_vars`: Codex starts that
         # server without the provider keys. Re-running `install` repairs it.
         legacy_block = mcp == "ok" and _is_legacy_codex_block(cfg)
@@ -1449,7 +1538,7 @@ def host_status(host: str, *, home: Optional[str] = None) -> Dict[str, str]:
     else:
         root = _opencode_root(home, honour_env)
         skill = os.path.join(root, "skill", "agentdescent", "SKILL.md")
-        mcp = _opencode_mcp_state(root)
+        mcp, dead = _opencode_mcp_inspect(root)
     skill_state = _skill_state(skill)
     if skill_state == "missing" and mcp in ("missing", "unknown"):
         # Nothing of ours is there. `unknown` only says a config this user wrote
@@ -1462,6 +1551,9 @@ def host_status(host: str, *, home: Optional[str] = None) -> Dict[str, str]:
         state = "ok"
     else:
         state = "partial"
+    info = {"state": state, "skill": skill_state, "mcp": mcp, "path": skill}
+    if dead:
+        info["mcp_launcher"] = dead
     if host == "grok-bot":
         # The skill Grok Bot actually loads is the saved user skill, not the
         # scaffold (#675): a stale one is stale whatever the scaffold says, and
@@ -1470,9 +1562,11 @@ def host_status(host: str, *, home: Optional[str] = None) -> Dict[str, str]:
             state = "stale"
         elif user_skill == "ok" and state == "missing":
             state = "ok"
-        return {"state": state, "skill": skill_state, "mcp": mcp, "path": skill,
-                "user_skill": user_skill, "user_skill_path": user_skill_path}
-    return {"state": state, "skill": skill_state, "mcp": mcp, "path": skill}
+        info["state"] = state
+        info["user_skill"] = user_skill
+        info["user_skill_path"] = user_skill_path
+        return info
+    return info
 
 
 def _dsh_block_env_is_stale(patch: str) -> bool:
