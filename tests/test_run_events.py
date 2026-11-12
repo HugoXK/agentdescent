@@ -171,6 +171,31 @@ def test_last_event_id_resumes_after_that_round(live):
     assert [event["data"]["round"] for event in rounds] == [1]
 
 
+def test_stream_emits_all_rows_when_round_indexes_repeat_after_resume(live):
+    base, rd = live
+    for idx in (0, 1, 2, 0, 1):
+        rd.append_round(_round(idx))
+    rd.update_status(state="done", stop_reason="rounds")
+
+    events = _read_events(f"{base}/api/runs/{rd.run_id}/events")
+    rounds = [e for e in events if e["event"] == "round"]
+    assert [e["id"] for e in rounds] == ["0", "1", "2", "3", "4"]
+    assert [e["data"]["round"] for e in rounds] == [0, 1, 2, 0, 1]
+
+
+def test_last_event_id_resumes_by_ordinal_across_duplicate_rounds(live):
+    base, rd = live
+    for idx in (0, 1, 2, 0, 1):
+        rd.append_round(_round(idx))
+    rd.update_status(state="done", stop_reason="rounds")
+
+    events = _read_events(f"{base}/api/runs/{rd.run_id}/events",
+                          headers={"Last-Event-ID": "2"})
+    rounds = [e for e in events if e["event"] == "round"]
+    assert [e["id"] for e in rounds] == ["3", "4"]
+    assert [e["data"]["round"] for e in rounds] == [0, 1]
+
+
 def test_an_unknown_run_is_404(live):
     base, _ = live
     with pytest.raises(urllib.error.HTTPError) as error:
