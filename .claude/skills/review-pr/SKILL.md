@@ -82,12 +82,21 @@ Then check it counts: `python3 .github/scripts/review_gate.py --pr <n>`.
 ## Merge lane by tier
 
 The tier is the diff's (`risk_gate.py`), never the PR text. Once the PASS counts,
-run this and do exactly what it prints:
+run this from the PR clone and do exactly what it prints:
 
 ```sh
 python3 .github/scripts/merge_lane.py --pr <n> --repo ThinkFlowLab/agentdescent \
   --tip <the PASS's Tip SHA>
 ```
+
+The lane reads its two trust inputs — `.github/agent/review-policy.json` and
+`.github/agent/risk-rules.json` — from the PR's **base** commit
+(`git show <base>:<path>`), never from the clone it runs in, so a branch that
+edits either file cannot lend itself a PASS or a lower tier. If the clone cannot
+serve a file from base the lane prints `no lane` and exits 1 without a command:
+`git fetch origin` and run it again; never substitute the branch's copy.
+Independently of the rules file, a diff touching `.github/**` or
+`.claude/skills/**` is T3.
 
 `auto-merge` (T0/T1 with a compliant PASS) is the pinned
 `gh pr merge … --auto --squash --match-head-commit <tip>` — the only sanctioned
