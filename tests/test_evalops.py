@@ -117,6 +117,33 @@ def test_default_gate_uses_the_stored_min_effect():
     assert ops.gate("e").passed
 
 
+@pytest.mark.parametrize("n, score, effect, passed", [
+    (1, 0.8, 0.0, False),
+    (3, 0.8, 0.1, True),
+    (3, 0.51, 0.1, False),
+    (3, 0.5, 0.0, False),
+])
+def test_run_and_default_gate_agree(n, score, effect, passed):
+    ops = EvalOps()
+    ops.add_dataset(Dataset("d", 1, _tasks(n)))
+    ops.add_spec(EvalSpec("e", "d", min_effect=effect, bootstrap=100))
+    result = ops.run("e", lambda *_: score, lambda *_: 0.5)
+    assert result.passed is passed
+    assert ops.gate("e").passed is passed
+    assert ops.snapshot()["results"]["e"]["passed"] is passed
+
+
+def test_single_sample_can_explicitly_skip_significance():
+    ops = EvalOps()
+    ops.add_dataset(Dataset("d", 1, _tasks(1)))
+    ops.add_spec(EvalSpec("e", "d", bootstrap=100))
+    result = ops.run("e", lambda *_: 0.8, lambda *_: 0.5)
+    assert not result.passed
+    decision = ops.gate("e", RegressionGate(require_significance=False))
+    assert decision.passed
+    assert not result.passed  # A custom gate does not rewrite the default result.
+
+
 def test_dataset_tasks_are_deep_frozen_and_hash_is_cached():
     tasks = [{"task_id": "a", "nested": {"x": 1}}]
     dataset = Dataset("d", 1, tasks)
