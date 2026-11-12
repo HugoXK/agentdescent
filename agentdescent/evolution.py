@@ -4372,18 +4372,27 @@ def evolve(
                 # then kept the process alive -- round_timeout bounded the round and
                 # not the program.
                 gate = threading.Semaphore(min(max_concurrency, len(units)))
+                cancelled = threading.Event()
 
-                def _bounded(u=None):
+                def _bounded(u=None, gate=gate, cancelled=cancelled,
+                             run_unit=_run_unit):
                     with gate:              # preserve max_concurrency
-                        _run_unit(u)
+                        if not cancelled.is_set():
+                            run_unit(u)
 
                 threads = [threading.Thread(target=_bounded, args=(u,), daemon=True)
                            for u in units]
-                for t in threads:
-                    t.start()
-                cutoff = None if round_timeout is None else time.time() + round_timeout
-                for t in threads:
-                    t.join(None if cutoff is None else max(0.0, cutoff - time.time()))
+                try:
+                    for t in threads:
+                        t.start()
+                    cutoff = None if round_timeout is None else time.time() + round_timeout
+                    for t in threads:
+                        t.join(None if cutoff is None else max(0.0, cutoff - time.time()))
+                finally:
+                    # In-flight calls may finish, but waiting workers must not
+                    # start new rollouts. Bind this round's state above: a later
+                    # round must not reactivate its predecessor's queued work.
+                    cancelled.set()
                 pending = [t for t in threads if t.is_alive()]
                 if pending:
                     straggler_rounds += 1

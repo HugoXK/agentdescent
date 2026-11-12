@@ -9,9 +9,58 @@ import threading
 import time
 import warnings
 
+import pytest
+
 from agentdescent.evolution import SingleSlot, Task, evolve
 
 TASKS = [Task(id=str(i), prompt=str(i), meta={"gold": str(i)}) for i in range(6)]
+
+
+@pytest.mark.parametrize("release_previous", [False, True],
+                         ids=["after-return", "next-round"])
+def test_round_timeout_cancels_queued_rollouts(release_previous):
+    """Queued work must not start after its round times out, even in a later round.
+
+    Keep the two admitted rollouts in flight until evolve returns, or until the
+    next round starts. Events order the calls; no backend or timing benchmark is
+    involved. Already-running calls may finish normally.
+    """
+    tasks = [Task(id=str(i), prompt=str(i)) for i in range(8)]
+    release = threading.Event()
+    first_release = threading.Event()
+    returned = threading.Event()
+    lock = threading.Lock()
+    starts = []
+    before = set(threading.enumerate())
+    rounds = 2 if release_previous else 1
+
+    def run(rendered, task):
+        if int(task.id) < 4:  # Held-out scoring must stay unblocked.
+            with lock:
+                index = len(starts)
+                starts.append((task.id, returned.is_set()))
+            if release_previous and index >= 2:
+                first_release.set()
+            (first_release if release_previous and index < 2 else release).wait()
+        return "wrong"
+
+    try:
+        result = evolve(tasks, lambda t, o: 0.5, run=run,
+                        propose=lambda *a: None,
+                        strategy=SingleSlot(initial_value="seed"),
+                        rounds=rounds, n_workers=4, max_concurrency=2,
+                        round_timeout=0.2, held_out_frac=0.5)
+        returned.set()
+    finally:
+        release.set()
+        first_release.set()
+        workers = set(threading.enumerate()) - before
+        for thread in workers:
+            thread.join(timeout=5)
+    assert not any(thread.is_alive() for thread in workers)
+    assert result.error is None
+    assert len(starts) == 2 * rounds, starts
+    assert not any(after_return for _, after_return in starts), starts
 
 
 def test_an_abandoned_straggler_does_not_hold_the_interpreter_open():
