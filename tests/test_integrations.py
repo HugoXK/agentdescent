@@ -27,6 +27,7 @@ def test_the_skill_teaches_the_procedure_and_the_guardrails():
     assert text.startswith("---\nname: agentdescent\n")
     for word in ("doctor", "plan", "start", "status", "show", "apply", "nested", "cases.jsonl"):
         assert word in text, word
+    assert "agentdescent demo" in text          # #903: zero-key path, not just --demo
     assert "Never evolve against data the user has not seen" in text
     assert "Ask before `apply`" in text
 

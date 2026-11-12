@@ -355,7 +355,8 @@ Now open your agent in that directory and say:
 
 > Improve `/tmp/try/prompt.txt` against the examples in `/tmp/try/cases.jsonl`.
 
-What should happen, in order — this is the skill's whole contract:
+What should happen, in order — this is the skill's whole contract (if they
+asked to try it with no key first, it calls **`demo`** before this loop):
 
 1. it runs **`doctor`** and reports anything missing;
 2. it writes a spec and runs **`plan`**, and **shows you the call count before
@@ -382,6 +383,7 @@ just goes quiet.
 
 | Try saying | What should happen |
 |---|---|
+| "show me gepa without a key" / "try the demo" | it calls MCP `demo` (or `agentdescent demo --json`) and reports the reward lift |
 | "improve this skill" with **no examples** | it offers to draft 8–20 cases and **stops for you to check them** |
 | "use 60 rounds and 32 workers" | it quotes the cost **before** starting, even if you said not to ask |
 | "apply it" | it names the file it would overwrite, then backs up and reports the path |
@@ -473,7 +475,7 @@ async def main():
 asyncio.run(main())
 ```
 
-Expected tools (Path A default): `algorithm_spec apply cancel describe_algorithm diagnose doctor list_algorithms plan resume show start status` (12 tools). With `agentdescent mcp --advanced` / `AGENTDESCENT_MCP_ADVANCED=1`, the full set is also registered: `algorithm_spec apply audit_drift audit_pending audit_recompute audit_rescan audit_resolve audit_scorecard audit_status audit_trace cancel capability describe_algorithm diagnose doctor experience_cycle experience_ingest experience_recall experience_replay experience_report experience_update governed_harness list_algorithms meta_campaign ops plan platform platform_status portfolio release release_verify resume rsi safety show start status tenant traces_digest` (39 total). See [MCP Path A](mcp-path-a.md).
+Expected tools (Path A default): `algorithm_spec apply cancel demo describe_algorithm diagnose doctor list_algorithms plan resume show start status` (13 tools). With `agentdescent mcp --advanced` / `AGENTDESCENT_MCP_ADVANCED=1`, the full set is also registered: `algorithm_spec apply audit_drift audit_pending audit_recompute audit_rescan audit_resolve audit_scorecard audit_status audit_trace cancel capability demo describe_algorithm diagnose doctor experience_cycle experience_ingest experience_recall experience_replay experience_report experience_update governed_harness list_algorithms meta_campaign ops plan platform platform_status portfolio release release_verify resume rsi safety show start status tenant traces_digest` (40 total). See [MCP Path A](mcp-path-a.md). Call `demo` (optional `algorithm`, e.g. `gepa`) to confirm the zero-key path — it needs no provider key and returns the same payload as `agentdescent demo --json`.
 
 ## 7. The web panel
 

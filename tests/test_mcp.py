@@ -119,11 +119,11 @@ def test_standalone_mcp_guide_lists_path_a_and_advanced_sets():
     path_a = re.search(r"Expected tools \(Path A default\): `([^`]+)`", guide)
     assert path_a is not None
     assert set(path_a.group(1).split()) == set(PATH_A_TOOLS)
-    assert len(PATH_A_TOOLS) == 12
+    assert len(PATH_A_TOOLS) == 13
     full = re.search(r"full set is also registered: `([^`]+)`", guide)
     assert full is not None
     assert set(full.group(1).split()) == set(TOOL_DESCRIPTIONS)
-    assert len(TOOL_DESCRIPTIONS) == 39
+    assert len(TOOL_DESCRIPTIONS) == 40
 
 
 def test_every_tool_has_a_description_written_for_the_model():
@@ -132,6 +132,56 @@ def test_every_tool_has_a_description_written_for_the_model():
     assert "DESTRUCTIVE" in TOOL_DESCRIPTIONS["apply"]
     assert "FIRST" in TOOL_DESCRIPTIONS["doctor"]
     assert "WITHOUT running" in TOOL_DESCRIPTIONS["plan"]
+
+
+def test_demo_is_on_path_a_and_runs_offline_without_provider_keys(store, monkeypatch):
+    """#903: hosts can smoke an algorithm with no provider key via MCP demo."""
+    for name in list(os.environ):
+        if name.endswith("_API_KEY") or name in ("OPENAI_BASE_URL", "OPENAI_API_BASE"):
+            monkeypatch.delenv(name, raising=False)
+    assert "demo" in PATH_A_TOOLS
+    out = Tools(store).demo(algorithm="gepa")
+    assert out["ok"] is True, out
+    assert out["algorithm"] == "gepa"
+    assert out["kind"] == "text"
+    assert out["initial_reward"] is not None
+    assert out["final_reward"] > out["initial_reward"]
+    assert out["run_id"]
+    assert "COLUMN: amount" in out["learned"]
+    assert any("show" in step for step in out["next"])
+
+
+def test_demo_refuses_unknown_and_real_model_cards_like_cli(store, capsys):
+    """#903: MCP demo errors match the CLI wording."""
+    from agentdescent import cli
+
+    t = Tools(store)
+    unknown = t.demo(algorithm="nope")
+    assert unknown.get("ok") is False
+    assert "unknown algorithm 'nope'" in unknown["error"]
+    assert "archive_selection" in unknown["error"]
+    code = cli.main(["--store", store, "demo", "--algorithm", "nope"])
+    err = capsys.readouterr().err
+    assert code == 2 and unknown["error"] in err
+
+    refused = t.demo(algorithm="evoskill")
+    assert refused.get("ok") is False
+    assert "evoskill" in refused["error"]
+    assert "real model" in refused["error"] or "offline demo" in refused["error"]
+    assert "agentdescent algorithms run evoskill" in refused["error"]
+    code = cli.main(["--store", store, "demo", "--algorithm", "evoskill"])
+    err = capsys.readouterr().err
+    assert code == 2 and refused["error"] in err
+
+
+def test_demo_kind_errors_are_actionable(store):
+    t = Tools(store)
+    plugin = t.demo(kind="plugin")
+    assert plugin.get("ok") is False
+    assert "plugin" in plugin["error"] and "offline" in plugin["error"]
+    mismatch = t.demo(algorithm="gepa", kind="skill_dir")
+    assert mismatch.get("ok") is False
+    assert "gepa" in mismatch["error"] and "text" in mismatch["error"]
 
 
 # ---------------------------------------------------------------------------

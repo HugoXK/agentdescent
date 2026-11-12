@@ -2,13 +2,14 @@
 
 Host agents and humans share one default loop. Everything else is advanced and
 stays out of the default MCP discovery set so a host model is not flooded with
-~39 equal tools (#803).
+~40 equal tools (#803).
 
 ## Path A tools (default MCP listing)
 
 | Tool / verb | Role |
 |---|---|
-| `doctor` | What this machine can run (CLIs, keys, installs). Call first. |
+| `demo` | Zero-key offline smoke (`algorithm`, optional `kind`). Same payload as `agentdescent demo --json`. Call when the user wants to see it work before a real run; needs no provider key and writes none of their files. |
+| `doctor` | What this machine can run (CLIs, keys, installs). Call first for a real run. |
 | `list_algorithms` / `describe_algorithm` | Discover Algorithm **cards** (optional; filter by `kind`). |
 | `algorithm_spec` | Build + plan a starter spec for one named card (does not start). |
 | `plan` | Validate the EvolveSpec and estimate cost; show the user; get a yes. |
@@ -19,11 +20,11 @@ stays out of the default MCP discovery set so a host model is not flooded with
 | `cancel` / `resume` | Stop or continue a live run. |
 | `diagnose` | Why a finished run learned nothing (or stopped). |
 
-CLI Path A verbs match: `doctor`, `init`/`algorithms run`, `plan`, `evolve`,
+CLI Path A verbs match: `demo`, `doctor`, `init`/`algorithms run`, `plan`, `evolve`,
 `status`/`watch`, `show`, `apply`, `cancel`, `resume`, `algorithms list|show`.
 
 ```
-doctor  →  write a spec  →  plan (show the user)  →  start  →  status  →  show  →  ask  →  apply
+demo (optional, zero-key)  →  doctor  →  write a spec  →  plan (show the user)  →  start  →  status  →  show  →  ask  →  apply
 ```
 
 ## Advanced (opt-in)

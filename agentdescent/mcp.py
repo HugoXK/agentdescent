@@ -35,7 +35,7 @@ import os
 from typing import Annotated, Any, Dict, Optional, Sequence, Tuple
 
 from . import __version__, runstore
-from .cli import (NESTED_ENV, apply_with_target, doctor_report,
+from .cli import (NESTED_ENV, apply_with_target, demo_payload, doctor_report,
                  plan_payload, require_cli_on_path, require_resume_host_on_path,
                  require_resume_not_quota_exhausted, require_resume_not_solved,
                  resolve_run_id, show_payload, status_payload)
@@ -69,13 +69,15 @@ def rescan_allow_from_env(environ: Optional[Dict[str, str]] = None
     return tuple(part.strip() for part in raw.split(",") if part.strip())
 
 
-#: Default MCP discovery set (#803): doctor → plan → start → status/show → apply,
-#: plus cancel/resume, diagnose, and algorithm discovery/spec builders. Everything
-#: else (audit_*, release, platform, experience, …) stays in the package but is
-#: only registered when ``advanced=True`` / ``AGENTDESCENT_MCP_ADVANCED=1``.
+#: Default MCP discovery set (#803): demo (zero-key smoke) → doctor → plan →
+#: start → status/show → apply, plus cancel/resume, diagnose, and algorithm
+#: discovery/spec builders. Everything else (audit_*, release, platform,
+#: experience, …) stays in the package but is only registered when
+#: ``advanced=True`` / ``AGENTDESCENT_MCP_ADVANCED=1``.
 PATH_A_TOOLS = frozenset({
-    "doctor", "plan", "start", "status", "show", "apply", "cancel", "resume",
-    "diagnose", "list_algorithms", "describe_algorithm", "algorithm_spec",
+    "demo", "doctor", "plan", "start", "status", "show", "apply", "cancel",
+    "resume", "diagnose", "list_algorithms", "describe_algorithm",
+    "algorithm_spec",
 })
 ADVANCED_ENV = "AGENTDESCENT_MCP_ADVANCED"
 
@@ -88,6 +90,18 @@ def advanced_from_env(environ: Optional[Dict[str, str]] = None) -> bool:
 
 #: Written for the calling model: what the tool is for and what to do around it.
 TOOL_DESCRIPTIONS: Dict[str, str] = {
+    "demo": (
+        "Run the packaged zero-key offline demo and return the same payload as "
+        "`agentdescent demo --json` (ok, run_id, initial_reward, final_reward, "
+        "learned, next). Optional `algorithm` names a card (gepa, dgm, ace, "
+        "skillopt, rrsi, archive_selection). Optional `kind` selects the "
+        "offline fixture (`text` or `skill_dir`) when algorithm is omitted. "
+        "Needs no provider key and does not write the user's files. Call this "
+        "when the user wants to see AgentDescent work, has no cases or key "
+        "yet, or wants to know whether a named card can run — before doctor / "
+        "plan / start. Cards that need a real model (for example evoskill) "
+        "return an actionable error; point the user at algorithm_spec for a "
+        "real run. This is a short synchronous smoke, not a detached start."),
     "doctor": (
         "Check what this machine can run: which worker agent CLIs (claude, codex, dsh, "
         "opencode) "
@@ -430,6 +444,14 @@ class Tools:
         return {}
 
     # -- read-only -------------------------------------------------------------
+
+    def demo(self, algorithm: Optional[str] = None,
+             kind: Optional[str] = None) -> Dict[str, Any]:
+        """Zero-key smoke: the MCP form of ``agentdescent demo --json`` (#903)."""
+        try:
+            return demo_payload(algorithm, kind=kind, store=self.store)
+        except SpecError as e:
+            return {"ok": False, "error": str(e)}
 
     def doctor(self, home: Optional[str] = None) -> Dict[str, Any]:
         return doctor_report(home=home) if home is not None else doctor_report()
@@ -1150,9 +1172,9 @@ def build_server(store: Optional[str] = None, *, name: str = "agentdescent",
     """An MCP server with Path A tools by default, or the full set when advanced.
 
     ``advanced=None`` reads :data:`ADVANCED_ENV` (``AGENTDESCENT_MCP_ADVANCED``).
-    Path A is doctor → plan → start → status/show → apply (+ cancel/resume,
-    diagnose, list/describe/algorithm_spec). Satellite tools keep the same
-    names/contracts when advanced is on (#803).
+    Path A is demo (zero-key smoke) → doctor → plan → start → status/show →
+    apply (+ cancel/resume, diagnose, list/describe/algorithm_spec). Satellite
+    tools keep the same names/contracts when advanced is on (#803).
     """
     if advanced is None:
         advanced = advanced_from_env()
@@ -1166,7 +1188,8 @@ def build_server(store: Optional[str] = None, *, name: str = "agentdescent",
     if "version" in inspect.signature(server_cls.__init__).parameters:
         extra["version"] = __version__
     path_a_line = (
-        "Path A (default tools): doctor -> write an EvolveSpec -> plan (show the "
+        "Path A (default tools): demo (optional zero-key smoke) -> doctor -> "
+        "write an EvolveSpec -> plan (show the "
         "user) -> start -> status (once a round) -> show -> ask -> apply; "
         "list_algorithms / describe_algorithm / algorithm_spec when naming a method; "
         "cancel / resume / diagnose as needed."
@@ -1237,6 +1260,11 @@ def build_server(store: Optional[str] = None, *, name: str = "agentdescent",
             # Kept, not discarded: a run whose reflector cannot reach the host
             # proposes nothing and looks like a run that simply learned nothing.
             t.bridge, t.bridge_error = None, f"{type(e).__name__}: {e}"
+
+    @maybe_tool("demo")
+    def demo(algorithm: Optional[str] = None,
+             kind: Optional[str] = None) -> Dict[str, Any]:
+        return t.demo(algorithm, kind)
 
     @maybe_tool("doctor")
     def doctor(home: Optional[str] = None) -> Dict[str, Any]:

@@ -667,17 +667,29 @@ def _demo_offline_algorithms() -> Tuple[str, ...]:
     return demo_mod.OFFLINE_ALGORITHMS
 
 
-def cmd_demo(a: argparse.Namespace) -> int:
-    """Build a complete example and run it, so the first thing seen works."""
+def demo_payload(
+    algorithm: Optional[str] = None,
+    *,
+    kind: Optional[str] = None,
+    directory: Optional[str] = None,
+    store: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Run the offline demo and return the same dict as ``demo --json``.
+
+    Shared by the CLI and the MCP ``demo`` tool (#903). Raises
+    :class:`SpecError` for an unknown or real-model-only algorithm, or a
+    ``kind`` with no offline fixture, so both surfaces report the same
+    message.
+    """
     import tempfile
 
     from . import algorithms
     from . import demo as demo_mod
 
     algo = None
-    if getattr(a, "algorithm", None):
+    if algorithm:
         try:
-            algo = algorithms.get(a.algorithm, where="demo --algorithm").name
+            algo = algorithms.get(algorithm, where="demo --algorithm").name
         except algorithms.AlgorithmError as e:
             raise SpecError(str(e)) from None
         why = demo_mod.skip_reason(algo)
@@ -691,74 +703,35 @@ def cmd_demo(a: argparse.Namespace) -> int:
                 f"`agentdescent algorithms run {algo} <path> <cases.jsonl>` "
                 f"(`agentdescent algorithms show {algo}` for its parameters)")
     try:
-        demo_mod.resolve_demo_kind(algo, getattr(a, "kind", None))
+        demo_mod.resolve_demo_kind(algo, kind)
     except ValueError as e:
-        raise SpecError(str(e)) from None
-    root = os.path.abspath(os.path.expanduser(a.dir)) if a.dir else tempfile.mkdtemp(
-        prefix="agentdescent-demo-")
+        # Keep the #905 MCP contract: a bad --kind is actionable from a host
+        # too, so name the offline fixtures beside the resolver's message.
+        raise SpecError(f"{e} (offline kinds: ['skill_dir', 'text', "
+                        "'skill_library'])") from None
+
+    root = (os.path.abspath(os.path.expanduser(directory)) if directory
+            else tempfile.mkdtemp(prefix="agentdescent-demo-"))
     os.makedirs(root, exist_ok=True)
     try:
-        spec_dict = demo_mod.build(root, algorithm=algo, kind=getattr(a, "kind", None))
+        spec_dict = demo_mod.build(root, algorithm=algo, kind=kind)
     except ValueError as e:
         raise SpecError(str(e)) from None
-    kind = spec_dict["kind"]
-
-    as_json = getattr(a, "json", False)
-    if not as_json:
-        if kind == "text":
-            prompt_path = os.path.join(root, "prompt.txt")
-            print(f"A text prompt that totals a CSV column, in {root}")
-            print(f"  prompt.txt   ->  {open(prompt_path).read().strip()!r}   "
-                  f"(wrong: `id` is a row number)")
-            print("  cases.jsonl  ->  12 prompts with embedded CSVs and known totals")
-        elif kind == "skill_library":
-            csv_rules = os.path.join(root, "csv-total", "references", "rules.md")
-            date_rules = os.path.join(root, "date-parse", "references", "rules.md")
-            print(f"A two-skill library (csv-total + date-parse), in {root}")
-            print(f"  csv-total/references/rules.md   ->  "
-                  f"{open(csv_rules).read().strip()!r}   (wrong: `id` is a row number)")
-            print(f"  date-parse/references/rules.md  ->  "
-                  f"{open(date_rules).read().strip()!r}   (wrong: date tasks ask for year)")
-            print("  cases.jsonl                      ->  12 tasks (CSV totals + date years)")
-        else:
-            skill = os.path.join(root, demo_mod.DEMO_SKILL)
-            rules = os.path.join(skill, "references", "rules.md")
-            print(f"A skill that totals a column of a CSV, in {root}")
-            print(f"  {demo_mod.DEMO_SKILL}/references/rules.md  ->  "
-                  f"{open(rules).read().strip()!r}   (wrong: `id` is a row number)")
-            print("  cases.jsonl                        ->  12 CSVs with known totals")
-        print("  the agent is a local program, so this costs nothing and needs no key")
-        if kind != "skill_library":
-            print("  note: this is a smoke trajectory; for multi-round library edits see")
-            print("        agentdescent demo --kind skill_library")
-        if algo:
-            print(f"  algorithm: {algo}   (`agentdescent algorithms show {algo}`)")
-        print()
+    used_kind = spec_dict["kind"]
 
     spec = EvolveSpec.from_dict(spec_dict)
     comp = compose(spec)
     est = estimate(comp)
-    if not as_json:
-        print(f"plan: {len(comp.tasks)} tasks, "
-              f"{comp.kwargs['rounds']} rounds x {comp.kwargs['n_workers']} workers, "
-              f"up to {est['agent_calls_upper_bound']} agent calls\n")
-
-    rd = runstore.create(spec.to_dict(), store=a.store)
-    if not as_json:
-        print(f"running ({rd.run_id})...")
+    rd = runstore.create(spec.to_dict(), store=store)
     result = runstore.execute(rd)
-    if not as_json:
-        for info in result.history:
-            print(f"  round {info.round:>2}  reward={info.held_out_reward:.3f}  "
-                  f"+{info.committed}/-{info.rejected}")
 
     init = getattr(result, "initial_reward", None)
-    learned = demo_mod.learned_summary(result.state, kind=kind)
+    learned = demo_mod.learned_summary(result.state, kind=used_kind)
     ok = result.final_reward >= 1.0
     # #902: one list feeds both the human footer and --json.next, and with
     # --algorithm NAME the "your own run" steps keep the algorithm just shown.
     target = {"text": "<your-prompt.txt>",
-              "skill_library": "<your-skill-library>"}.get(kind, "<your-skill-dir>")
+              "skill_library": "<your-skill-library>"}.get(used_kind, "<your-skill-dir>")
     if algo:
         own_steps = [
             f"agentdescent algorithms run {algo} {target} <your-cases.jsonl> "
@@ -766,7 +739,7 @@ def cmd_demo(a: argparse.Namespace) -> int:
             "agentdescent doctor",
             f"agentdescent evolve agentdescent.{algo}.spec.json",
         ]
-    elif kind == "text":
+    elif used_kind == "text":
         own_steps = [
             f"agentdescent init {target} --kind text --data <your-cases.jsonl> --out spec.json",
             "agentdescent doctor",
@@ -789,59 +762,108 @@ def cmd_demo(a: argparse.Namespace) -> int:
         f"agentdescent apply {rd.run_id} --dry-run",
         *own_steps,
     ]
+    return {
+        "ok": ok,
+        "dir": root,
+        "kind": used_kind,
+        "algorithm": algo,
+        "run_id": rd.run_id,
+        "plan": {
+            "tasks": len(comp.tasks),
+            "rounds": comp.kwargs["rounds"],
+            "n_workers": comp.kwargs["n_workers"],
+            "agent_calls_upper_bound": est["agent_calls_upper_bound"],
+        },
+        "initial_reward": init,
+        "final_reward": result.final_reward,
+        "outcomes": result.outcomes(),
+        "learned": learned,
+        "history": [
+            {"round": info.round,
+             "held_out_reward": info.held_out_reward,
+             "committed": info.committed,
+             "rejected": info.rejected}
+            for info in result.history
+        ],
+        "next": next_steps,
+        **({} if ok else {"note": "lower than expected for the demo; see the run store"}),
+    }
 
-    if as_json:
-        # #862: honour the advertised --json flag so hosts can assert an
-        # offline algo smoke without scraping the human narrative.
-        _out({
-            "ok": ok,
-            "dir": root,
-            "kind": kind,
-            "algorithm": algo,
-            "run_id": rd.run_id,
-            "plan": {
-                "tasks": len(comp.tasks),
-                "rounds": comp.kwargs["rounds"],
-                "n_workers": comp.kwargs["n_workers"],
-                "agent_calls_upper_bound": est["agent_calls_upper_bound"],
-            },
-            "initial_reward": init,
-            "final_reward": result.final_reward,
-            "outcomes": result.outcomes(),
-            "learned": learned,
-            "history": [
-                {"round": info.round,
-                 "held_out_reward": info.held_out_reward,
-                 "committed": info.committed,
-                 "rejected": info.rejected}
-                for info in result.history
-            ],
-            "next": next_steps,
-            **({} if ok else {"note": "lower than expected for the demo; see the run store"}),
-        }, as_json=True)
-        return 0 if ok else 1
 
-    if init is not None:
-        print(f"\nheld-out reward: {init:.3f} -> {result.final_reward:.3f}   "
-              f"outcomes: {result.outcomes()}")
+def _print_demo_human(payload: Dict[str, Any], *, store: Optional[str] = None) -> None:
+    """Reprint the narrative ``cmd_demo`` used to stream while the run ran."""
+    from . import demo as demo_mod
+
+    root = payload["dir"]
+    kind = payload["kind"]
+    algo = payload["algorithm"]
+    if kind == "text":
+        prompt_path = os.path.join(root, "prompt.txt")
+        print(f"A text prompt that totals a CSV column, in {root}")
+        print(f"  prompt.txt   ->  {open(prompt_path).read().strip()!r}   "
+              f"(wrong: `id` is a row number)")
+        print("  cases.jsonl  ->  12 prompts with embedded CSVs and known totals")
+    elif kind == "skill_library":
+        csv_rules = os.path.join(root, "csv-total", "references", "rules.md")
+        date_rules = os.path.join(root, "date-parse", "references", "rules.md")
+        print(f"A two-skill library (csv-total + date-parse), in {root}")
+        print(f"  csv-total/references/rules.md   ->  "
+              f"{open(csv_rules).read().strip()!r}   (wrong: `id` is a row number)")
+        print(f"  date-parse/references/rules.md  ->  "
+              f"{open(date_rules).read().strip()!r}   (wrong: date tasks ask for year)")
+        print("  cases.jsonl                      ->  12 tasks (CSV totals + date years)")
     else:
-        print(f"\nheld-out reward: {result.final_reward:.3f}   "
-              f"outcomes: {result.outcomes()}")
-    print(f"what it learned:  {learned}")
-    if not ok:
+        skill = os.path.join(root, demo_mod.DEMO_SKILL)
+        rules = os.path.join(skill, "references", "rules.md")
+        print(f"A skill that totals a column of a CSV, in {root}")
+        print(f"  {demo_mod.DEMO_SKILL}/references/rules.md  ->  "
+              f"{open(rules).read().strip()!r}   (wrong: `id` is a row number)")
+        print("  cases.jsonl                        ->  12 CSVs with known totals")
+    print("  the agent is a local program, so this costs nothing and needs no key")
+    if kind != "skill_library":
+        print("  note: this is a smoke trajectory; for multi-round library edits see")
+        print("        agentdescent demo --kind skill_library")
+    if algo:
+        print(f"  algorithm: {algo}   (`agentdescent algorithms show {algo}`)")
+    print()
+
+    plan = payload["plan"]
+    print(f"plan: {plan['tasks']} tasks, "
+          f"{plan['rounds']} rounds x {plan['n_workers']} workers, "
+          f"up to {plan['agent_calls_upper_bound']} agent calls\n")
+    print(f"running ({payload['run_id']})...")
+    for info in payload["history"]:
+        print(f"  round {info['round']:>2}  reward={info['held_out_reward']:.3f}  "
+              f"+{info['committed']}/-{info['rejected']}")
+
+    init = payload["initial_reward"]
+    if init is not None:
+        print(f"\nheld-out reward: {init:.3f} -> {payload['final_reward']:.3f}   "
+              f"outcomes: {payload['outcomes']}")
+    else:
+        print(f"\nheld-out reward: {payload['final_reward']:.3f}   "
+              f"outcomes: {payload['outcomes']}")
+    print(f"what it learned:  {payload['learned']}")
+    if not payload["ok"]:
         print("\n(that is lower than expected for the demo; the run store has the detail:")
-        print(f" {rd.path})")
-        return 1
+        try:
+            print(f" {runstore.get(payload['run_id'], store=store).path})")
+        except runstore.RunStoreError:
+            print(f" {payload['run_id']})")
+        return
+
+    own_steps = payload["next"][2:]
     own = "\n".join(f"  {step}" + ("        # what is missing before a real run"
                                      if step == "agentdescent doctor" and kind != "text"
                                      else "")
                      for step in own_steps)
+    run_id = payload["run_id"]
     if kind == "text":
         print(f"""
 The prompt on disk is untouched -- an evolved artifact only lands when you say so:
 
-  agentdescent show  {rd.run_id}          the diff
-  agentdescent apply {rd.run_id} --dry-run  what it would write
+  agentdescent show  {run_id}          the diff
+  agentdescent apply {run_id} --dry-run  what it would write
 
 Your own run is the same shape with a real model instead of the offline pair:
 
@@ -850,8 +872,8 @@ Your own run is the same shape with a real model instead of the offline pair:
         print(f"""
 The library on disk is untouched -- an evolved artifact only lands when you say so:
 
-  agentdescent show  {rd.run_id}          the diff
-  agentdescent apply {rd.run_id} --dry-run  what it would write
+  agentdescent show  {run_id}          the diff
+  agentdescent apply {run_id} --dry-run  what it would write
 
 Your own run is the same spec with three things changed -- your library, your
 cases.jsonl, and a real agent instead of the offline one:
@@ -861,14 +883,30 @@ cases.jsonl, and a real agent instead of the offline one:
         print(f"""
 The skill on disk is untouched -- an evolved artifact only lands when you say so:
 
-  agentdescent show  {rd.run_id}          the diff
-  agentdescent apply {rd.run_id} --dry-run  what it would write
+  agentdescent show  {run_id}          the diff
+  agentdescent apply {run_id} --dry-run  what it would write
 
 Your own run is the same spec with three things changed -- your directory, your
 cases.jsonl, and a real agent instead of the offline one:
 
 {own}""")
-    return 0
+
+
+def cmd_demo(a: argparse.Namespace) -> int:
+    """Build a complete example and run it, so the first thing seen works."""
+    payload = demo_payload(
+        getattr(a, "algorithm", None),
+        kind=getattr(a, "kind", None),
+        directory=getattr(a, "dir", None),
+        store=a.store,
+    )
+    if getattr(a, "json", False):
+        # #862: honour the advertised --json flag so hosts can assert an
+        # offline algo smoke without scraping the human narrative.
+        _out(payload, as_json=True)
+        return 0 if payload["ok"] else 1
+    _print_demo_human(payload, store=a.store)
+    return 0 if payload["ok"] else 1
 
 
 def _starter_model_warnings(spec: Dict[str, Any], out: str) -> List[str]:
