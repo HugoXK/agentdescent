@@ -86,12 +86,16 @@ def test_existing_directory_link_cannot_escape(tmp_path, operation):
             db = allowed / "runs.sqlite3"
             SqliteRunStore(str(db)).close()
             result = tools.ops(str(db), "t", "w", out=str(link / "report.json"))
+            assert "write allowlist" in result["error"]
         else:
             src = tmp_path / "source"
             (src / "link").mkdir(parents=True)
             (src / "link/file.txt").write_text("candidate")
             result = tools.apply(source=str(src), to=str(allowed), backup=False)
-        assert "write allowlist" in result["error"]
+            # `apply` refuses the link before the allowlist check, so the
+            # message is the destination-link refusal (#977). The escape is
+            # still refused; only the message moved.
+            assert "symlink" in result["error"] and str(link) in result["error"]
         assert not list(outside.iterdir())
     finally:
         if os.name == "nt":

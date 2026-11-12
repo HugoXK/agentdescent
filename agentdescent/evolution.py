@@ -1554,7 +1554,9 @@ def _file_tree_backup_path(dest: str) -> str:
     home = os.path.abspath(os.path.expanduser(home))
     base = os.path.join(home, "backups", f"{name}-{digest}")
     n = 0
-    while os.path.exists(os.path.join(base, f"bak-{n}")):
+    # `lexists`, not `exists`: a dangling link at `bak-0` is still a link, so
+    # `exists` would hand that slot to `copytree`, which dies on it (#977).
+    while os.path.lexists(os.path.join(base, f"bak-{n}")):
         n += 1
     return os.path.join(base, f"bak-{n}")
 

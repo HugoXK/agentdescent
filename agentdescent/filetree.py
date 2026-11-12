@@ -40,6 +40,7 @@ __all__ = [
     "TreeSpec",
     "TreeError",
     "canonical",
+    "dest_problem",
     "parse_tree",
     "load_tree",
     "materialize",
@@ -339,6 +340,29 @@ def load_tree(path: str, spec: Optional[TreeSpec] = None) -> Dict[str, str]:
 _EXEC_PATTERNS = ("**/*.sh", "scripts/**", "**/bin/**")
 
 
+def dest_problem(root: str, full: str) -> Optional[str]:
+    """Why writing ``full`` under ``root`` must be refused, or ``None`` (#977).
+
+    One rule for both writers: ``materialize`` (the tree writer ``apply`` of a
+    run goes through) and ``apply --from``. A link planted in the destination is
+    refused by name rather than dereferenced, and the leaf's real path -- not
+    just its parent's -- must stay under ``root``'s, so a link at the leaf
+    cannot redirect the write outside either.
+    """
+    root = os.path.abspath(root)
+    rel = os.path.relpath(os.path.abspath(full), root).replace(os.sep, "/")
+    cur = root
+    for part in rel.split("/"):
+        cur = os.path.join(cur, part)
+        if os.path.islink(cur):
+            return f"{rel!r} is a symlink"
+    real_root = os.path.realpath(root)
+    real = os.path.realpath(full)
+    if real != real_root and not real.startswith(real_root + os.sep):
+        return f"{rel!r} resolves outside {root!r}"
+    return None
+
+
 def materialize(state: Mapping[str, str], dest: str, *, prefix: str = "",
                 exec_patterns: Sequence[str] = _EXEC_PATTERNS) -> List[str]:
     """Write a tree into ``dest`` (optionally under ``prefix``); return the paths.
@@ -356,11 +380,10 @@ def materialize(state: Mapping[str, str], dest: str, *, prefix: str = "",
         rel = safe_relpath(f"{prefix}/{raw_path}" if prefix else raw_path)
         full = os.path.join(root, rel.replace("/", os.sep))
         # belt and braces: safe_relpath already forbids `..`, but a symlinked
-        # parent directory inside dest could still redirect the write.
-        real_parent = os.path.realpath(os.path.dirname(full))
-        if not (real_parent == os.path.realpath(root)
-                or real_parent.startswith(os.path.realpath(root) + os.sep)):
-            raise TreeError(f"refusing to write {rel!r} outside {dest!r}")
+        # parent directory or leaf inside dest could still redirect the write.
+        problem = dest_problem(root, full)
+        if problem is not None:
+            raise TreeError(f"refusing to write {rel!r} under {dest!r}: {problem}")
         os.makedirs(os.path.dirname(full), exist_ok=True)
         # newline="": write the text verbatim. `load_tree` reads bytes, so CRLF
         # round-trips; translation (on Windows) would make a re-apply look changed.

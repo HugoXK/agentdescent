@@ -3035,6 +3035,32 @@ def apply_with_target(run_id: Optional[str] = None, *, to: Optional[str] = None,
             notes, f"run {run_id}")
 
 
+def _refuse_dest_link(top: str, path: str) -> None:
+    """Refuse a link planted in the destination, before any backup or write (#977).
+
+    ``apply`` link-checked the source only and then handed ``--to`` to
+    ``shutil.copy2`` / ``open``, both of which follow a link: probe
+    ``skills/SKILL.md -> id_rsa`` overwrote the target and left
+    ``skills/SKILL.md.bak-0`` holding the target's bytes inside a directory host
+    scanners read. The rule is ``filetree.dest_problem`` -- the tree writer's
+    boundary -- not a second copy of it.
+    """
+    from .filetree import dest_problem
+
+    top = os.path.abspath(top)
+    if top == os.path.abspath(path) and os.path.islink(top):
+        raise runstore.RunStoreError(
+            f"--to {top} is a symlink; refuse to apply (a destination link is "
+            "never dereferenced)")
+    problem = dest_problem(top, path)
+    if problem is not None:
+        raise runstore.RunStoreError(
+            f"refuse to apply to {os.path.abspath(path)!r}: {problem} under "
+            f"--to {top}; a destination link is never dereferenced, and no "
+            ".bak-N may hold what it points at. Remove the link or pick "
+            "another --to")
+
+
 def apply_payload(run_id: str, *, to: Optional[str] = None, store: Optional[str] = None,
                   dry_run: bool = False, backup: bool = True,
                   check_write: Optional[Callable[[str, str], Any]] = None) -> Dict[str, Any]:
@@ -3060,6 +3086,7 @@ def apply_payload(run_id: str, *, to: Optional[str] = None, store: Optional[str]
                 f"{run_id} evolved a single text artifact and {dest!r} is a "
                 "directory; pass --to FILE to write it to a file, or read it "
                 "with `show`")
+        _refuse_dest_link(os.path.dirname(os.path.abspath(dest)) or os.sep, dest)
         plan = _text_plan(dest, result.rendered)
         slot = (_backup_slot(dest)
                 if backup and not plan["noop"] and os.path.exists(dest) else None)
@@ -3082,6 +3109,7 @@ def apply_payload(run_id: str, *, to: Optional[str] = None, store: Optional[str]
             fh.write(result.rendered)
         return {"written": [dest], "unchanged": [], "backup": saved, "noop": False,
                 "dest": dest}
+    _refuse_dest_link(dest, dest)
     plan = result._write_to(dest, backup=backup, dry_run=dry_run, check_write=check_write)
     plan["dest"] = dest
     if spec.kind == "skill_library":
@@ -3101,7 +3129,9 @@ def apply_payload(run_id: str, *, to: Optional[str] = None, store: Optional[str]
 
 def _backup_slot(dest: str) -> str:
     n = 0
-    while os.path.exists(f"{dest}.bak-{n}"):
+    # `lexists`, not `exists`: a dangling link at `.bak-0` is still a link, and
+    # copying onto it would write through it, outside the destination (#977).
+    while os.path.lexists(f"{dest}.bak-{n}"):
         n += 1
     return f"{dest}.bak-{n}"
 
@@ -3142,6 +3172,7 @@ def apply_from_payload(source: str, *, to: str, dry_run: bool = False,
                 rendered = fh.read()
         except (OSError, UnicodeDecodeError) as e:
             raise runstore.RunStoreError(f"cannot read {src}: {e}") from None
+        _refuse_dest_link(os.path.dirname(dest) or os.sep, dest)
         plan = _text_plan(dest, rendered)
         slot = (_backup_slot(dest)
                 if backup and not plan["noop"] and os.path.exists(dest) else None)
@@ -3167,6 +3198,7 @@ def apply_from_payload(source: str, *, to: str, dry_run: bool = False,
     if os.path.isfile(dest):
         raise runstore.RunStoreError(
             f"{src} is a directory but --to {dest} is a file")
+    _refuse_dest_link(dest, dest)
 
     def _files(root: str, *, refuse_symlinks: bool = False) -> List[str]:
         """Real files only. With ``refuse_symlinks``, raise if any link is under root.
@@ -3226,6 +3258,11 @@ def apply_from_payload(source: str, *, to: str, dry_run: bool = False,
     plan: Dict[str, Any] = {"written": changed, "unchanged": unchanged, "extra": extra,
                             "deleted": [], "backup": [], "noop": not changed,
                             "source": src, "dest": dest}
+    # Every leaf, before the backup is taken: a link planted in --to must not
+    # redirect the `.bak-N` copy either, or the backup holds the target's
+    # bytes inside a directory host scanners read (#977).
+    for rel in changed:
+        _refuse_dest_link(dest, os.path.join(dest, rel.replace("/", os.sep)))
     slot = (_file_tree_backup_path(dest)
             if backup and not plan["noop"] and os.path.isdir(dest) else None)
     _check_apply_paths(dest, [os.path.join(dest, rel.replace("/", os.sep))
