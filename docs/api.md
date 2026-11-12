@@ -13,7 +13,7 @@ means the parameter has none.
 Each section links to the page that explains *why* the module is shaped the
 way it is; this page is the *what*.
 
-604 public names across 121 modules.
+613 public names across 122 modules.
 
 ---
 
@@ -5062,6 +5062,84 @@ A table whose caption cannot claim more than the numbers support.
 
 ---
 
+## Replay fidelity
+
+The RNG, environment and hidden-state inputs a manifest cannot see. &nbsp;·&nbsp; `agentdescent.replay_fidelity` &nbsp;·&nbsp; [guide](manifest.md)
+
+### `EnvironmentFingerprint(...)`
+
+The environment a run happened in, as far as it is safe to record it.
+
+```python
+EnvironmentFingerprint(
+    cwd: str,
+    python: str,
+    platform: str,
+    tools: Mapping[str, str] = <factory>,
+    env_names: Tuple[str, ...] = (),
+    missing_env: Tuple[str, ...] = ()
+) -> None
+```
+
+| method | what it does |
+|---|---|
+| `capture(...)` | Fingerprint this process (or the explicit values a caller supplies). |
+| `diff(other: 'EnvironmentFingerprint') -> Tuple[str, ...]` | Names of the environment inputs that differ (empty when identical). |
+
+### `ReplayCheck(...)`
+
+The result of comparing a captured run with its replay.
+
+```python
+ReplayCheck(
+    ok: bool,
+    changed: Tuple[str, ...] = (),
+    verdict_changed: bool = False,
+    notes: Tuple[str, ...] = ()
+) -> None
+```
+
+### `ReplayFidelity(...)`
+
+Everything a replay needs that the manifest's input hashes do not cover.
+
+```python
+ReplayFidelity(
+    environment: Optional[EnvironmentFingerprint] = None,
+    rng: Tuple[RngRecord, ...] = (),
+    hidden_state: Mapping[str, str] = <factory>,
+    uncaptured: Tuple[str, ...] = ()
+) -> None
+```
+
+| method | what it does |
+|---|---|
+| `capture(...)` | Assemble a record; hidden-state summaries are digested here. |
+| `diff(other: 'ReplayFidelity') -> Tuple[str, ...]` | Names of the recorded inputs that differ (empty for the same run). |
+| `notes() -> Tuple[str, ...]` | What would stop a replay claim, in words (empty when eligible). |
+
+### `ReplayNotEligible(notes: Iterable[str]) -> None`
+
+A counterfactual was asked for over a run that cannot be replayed.
+
+### `RngRecord(boundary: str, digest: str, seed: Optional[str] = None) -> None`
+
+One RNG seed/state digest at an interaction boundary.
+
+### `content_digest(value: Any) -> str`
+
+A sha256 digest of any JSON-able summary.
+
+### `replay_check(captured: Any, replayed: Any) -> ReplayCheck`
+
+Whether `replayed` reproduces `captured` -- or refuses to say.
+
+### `rng_digest(*, seed: Any = None, state: Any = None) -> str`
+
+A digest of an RNG seed and/or a state summary at one boundary.
+
+---
+
 ## Type aliases and constants
 
 Values rather than classes or functions.
@@ -5489,6 +5567,10 @@ What a `ProposalPolicy` is given for one rollout.
 ### `ProposalPolicy`
 
 How a rollout becomes candidate changes.
+
+### `REPLAY_ENV_ALLOWLIST`
+
+Environment variable names whose **presence** may affect a run, and which are therefore recorded as names. Chosen for determinism, not convenience: the hash seed changes dict/set iteration, `PYTHONPATH` decides which code is imported at all, the locale changes sorting and number formatting, `TZ` changes timestamps a prompt may contain, and the thread counts change floating-point reduction order in numeric workloads. Names only, never values -- not even hashed (Security review, #952). A four-entry dictionary recovered a `TZ` value offline from the old sha256 digests, and any candidate value confirms by `sha256()`, so a digest of a value is value material. `capture` also intersects the caller's list with this tuple, so no caller can widen it, and still drops credential-shaped names.
 
 ### `ROUTE_SEED`
 

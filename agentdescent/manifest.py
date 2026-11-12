@@ -18,7 +18,9 @@ import json
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+
+from .replay_fidelity import ReplayFidelity
 
 __all__ = ["RunManifest", "build_manifest", "diff_manifest", "verify_manifest"]
 
@@ -105,6 +107,17 @@ class RunManifest:
     missing: Tuple[str, ...] = ()
     model_config: Dict[str, Any] = field(default_factory=dict)
     extra: Dict[str, Any] = field(default_factory=dict)
+    #: Whether this run's replay inputs were captured (RNG boundary digests, the
+    #: environment fingerprint, hidden-state coverage). False with ``replay_notes``
+    #: explaining what is missing: a counterfactual over such a run would be a
+    #: guess, and ``ReplayLab`` refuses it. Not part of ``manifest_id`` and not
+    #: compared by ``diff_manifest`` -- those describe the *inputs* that make two
+    #: runs the same run, while fidelity is a property of the record kept about
+    #: one of them (two identical runs can be recorded with and without a
+    #: capture, and that must not change which inputs they share).
+    replay_eligible: bool = False
+    replay_notes: Tuple[str, ...] = ()
+    replay: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -120,6 +133,9 @@ class RunManifest:
             "missing": list(self.missing),
             "model_config": dict(self.model_config),
             "extra": dict(self.extra),
+            "replay_eligible": self.replay_eligible,
+            "replay_notes": list(self.replay_notes),
+            "replay": dict(self.replay),
         }
 
     @classmethod
@@ -138,18 +154,29 @@ class RunManifest:
             missing=tuple(payload.get("missing") or ()),
             model_config=dict(payload.get("model_config") or {}),
             extra=dict(payload.get("extra") or {}),
+            replay_eligible=bool(payload.get("replay_eligible", False)),
+            replay_notes=tuple(payload.get("replay_notes") or ()),
+            replay=dict(payload.get("replay") or {}),
         )
 
 
 def build_manifest(spec: Any, *, data_paths: Sequence[str] = (),
                    model_config: Optional[Mapping[str, Any]] = None,
-                   code_version: str = "", extra: Optional[Mapping[str, Any]] = None
+                   code_version: str = "", extra: Optional[Mapping[str, Any]] = None,
+                   replay: Optional[ReplayFidelity] = None
                    ) -> RunManifest:
     """Hash a spec, its data files/directories, model config and code version.
 
     ``data_paths`` defaults to the spec's ``data.path`` when it names a real
     file/directory. The manifest id is a hash of the canonical field record, so
     two runs with identical inputs share it.
+
+    ``replay`` is the run's :class:`~agentdescent.replay_fidelity.ReplayFidelity`
+    capture, when one was taken. It never enters ``manifest_id`` (see the field
+    docstring); it only decides whether a consumer may claim a replay, and
+    ``replay_notes`` says what was not captured. Without a capture the manifest
+    still records *why* it cannot be replayed, so "unknown" is never mistaken
+    for "reproducible".
     """
     spec_dict = spec.to_dict() if hasattr(spec, "to_dict") else dict(spec)
     spec_hash = _sha(_canonical(redact(spec_dict)))
@@ -186,12 +213,27 @@ def build_manifest(spec: Any, *, data_paths: Sequence[str] = (),
         "algorithm": algorithm,
         "extra": redact(dict(extra or {})),
     }
+    if replay is None:
+        replay_eligible = False
+        replay_notes = ("replay fidelity was not captured: rng, environment and "
+                        "hidden state are unknown, so no counterfactual may be "
+                        "claimed from this run",)
+        replay_record: Dict[str, Any] = {}
+    else:
+        replay_eligible = replay.eligible
+        replay_notes = replay.notes()
+        # Redacted like `model_config` / `extra` above: the record carries tool
+        # command lines and paths, and a token that appears `"<redacted>"` in one
+        # serialized form and verbatim in another is worse than no redaction --
+        # it reads as safe (#952 Security review).
+        replay_record = redact(replay.to_dict())
     return RunManifest(
         manifest_id=_sha(_canonical(fields)), spec_hash=spec_hash,
         data_hash=data_hash, model_hash=model_hash,
         code_version=str(code_version), seeds=seeds, algorithm=algorithm,
         files=files, missing=tuple(missing), model_config=safe_model,
-        extra=redact(dict(extra or {})))
+        extra=redact(dict(extra or {})), replay_eligible=replay_eligible,
+        replay_notes=tuple(replay_notes), replay=replay_record)
 
 
 def diff_manifest(a: RunManifest, b: RunManifest) -> Dict[str, Dict[str, Any]]:

@@ -573,6 +573,9 @@ SUBMODULES: List[Tuple[str, str, str, str]] = [
     ("agentdescent.baselines", "Equal-budget baselines",
      "merge-of-N against best-of-N fork and serial, on one rollout budget.",
      "results.md"),
+    ("agentdescent.replay_fidelity", "Replay fidelity",
+     "The RNG, environment and hidden-state inputs a manifest cannot see.",
+     "manifest.md"),
 ]
 
 
