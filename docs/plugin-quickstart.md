@@ -101,7 +101,10 @@ short diff, rationale, outcome), so "the agent answered wrongly" is
 distinguishable from "the reflector proposed nothing useful". Both are
 diagnostics on disk; `record_rollouts: false` keeps neither.
 
-Pass `--dir ./somewhere` to keep the demo's files around and poke at them.
+A bare `agentdescent demo` writes to a temporary directory and removes it at
+exit, whether the run succeeded or failed. Pass `--dir ./somewhere` to keep the
+demo's files around and poke at them; `--json` also keeps the directory it
+reports in `dir`, so a host can read it after the command returns.
 
 Pass `--algorithm archive_selection` to watch a named algorithm (from
 `agentdescent algorithms list`) run the same offline example end to end. Only

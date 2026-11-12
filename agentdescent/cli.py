@@ -667,6 +667,15 @@ def _demo_offline_algorithms() -> Tuple[str, ...]:
     return demo_mod.OFFLINE_ALGORITHMS
 
 
+def _drop_temp_demo_root(root: str, directory: Optional[str]) -> None:
+    """#906: a bare run's root is only worth keeping while its payload returns."""
+    if directory:
+        return
+    import shutil
+
+    shutil.rmtree(root, ignore_errors=True)
+
+
 def demo_payload(
     algorithm: Optional[str] = None,
     *,
@@ -716,6 +725,7 @@ def demo_payload(
     try:
         spec_dict = demo_mod.build(root, algorithm=algo, kind=kind)
     except ValueError as e:
+        _drop_temp_demo_root(root, directory)
         raise SpecError(str(e)) from None
     used_kind = spec_dict["kind"]
 
@@ -723,7 +733,12 @@ def demo_payload(
     comp = compose(spec)
     est = estimate(comp)
     rd = runstore.create(spec.to_dict(), store=store)
-    result = runstore.execute(rd)
+    try:
+        result = runstore.execute(rd)
+    except BaseException:
+        # #906: a failed run cannot be reported, so its own root is dead weight.
+        _drop_temp_demo_root(root, directory)
+        raise
 
     init = getattr(result, "initial_reward", None)
     learned = demo_mod.learned_summary(result.state, kind=used_kind)
@@ -790,23 +805,26 @@ def demo_payload(
     }
 
 
-def _print_demo_human(payload: Dict[str, Any], *, store: Optional[str] = None) -> None:
+def _print_demo_human(payload: Dict[str, Any], *, store: Optional[str] = None,
+                      keep: bool = True) -> None:
     """Reprint the narrative ``cmd_demo`` used to stream while the run ran."""
     from . import demo as demo_mod
 
     root = payload["dir"]
+    # #906: say which case keeps the files, so the line matches what is on disk.
+    where = root if keep else f"{root} (removed at exit)"
     kind = payload["kind"]
     algo = payload["algorithm"]
     if kind == "text":
         prompt_path = os.path.join(root, "prompt.txt")
-        print(f"A text prompt that totals a CSV column, in {root}")
+        print(f"A text prompt that totals a CSV column, in {where}")
         print(f"  prompt.txt   ->  {open(prompt_path).read().strip()!r}   "
               f"(wrong: `id` is a row number)")
         print("  cases.jsonl  ->  12 prompts with embedded CSVs and known totals")
     elif kind == "skill_library":
         csv_rules = os.path.join(root, "csv-total", "references", "rules.md")
         date_rules = os.path.join(root, "date-parse", "references", "rules.md")
-        print(f"A two-skill library (csv-total + date-parse), in {root}")
+        print(f"A two-skill library (csv-total + date-parse), in {where}")
         print(f"  csv-total/references/rules.md   ->  "
               f"{open(csv_rules).read().strip()!r}   (wrong: `id` is a row number)")
         print(f"  date-parse/references/rules.md  ->  "
@@ -815,7 +833,7 @@ def _print_demo_human(payload: Dict[str, Any], *, store: Optional[str] = None) -
     else:
         skill = os.path.join(root, demo_mod.DEMO_SKILL)
         rules = os.path.join(skill, "references", "rules.md")
-        print(f"A skill that totals a column of a CSV, in {root}")
+        print(f"A skill that totals a column of a CSV, in {where}")
         print(f"  {demo_mod.DEMO_SKILL}/references/rules.md  ->  "
               f"{open(rules).read().strip()!r}   (wrong: `id` is a row number)")
         print("  cases.jsonl                        ->  12 CSVs with known totals")
@@ -894,19 +912,28 @@ cases.jsonl, and a real agent instead of the offline one:
 
 def cmd_demo(a: argparse.Namespace) -> int:
     """Build a complete example and run it, so the first thing seen works."""
+    import shutil
+
     payload = demo_payload(
         getattr(a, "algorithm", None),
         kind=getattr(a, "kind", None),
         directory=getattr(a, "dir", None),
         store=a.store,
     )
-    if getattr(a, "json", False):
-        # #862: honour the advertised --json flag so hosts can assert an
-        # offline algo smoke without scraping the human narrative.
-        _out(payload, as_json=True)
+    # #906: a bare demo's root lives only for this run. `--dir` is the user
+    # keeping it; `--json` hands the path to a host that reads it after exit.
+    keep = bool(getattr(a, "dir", None)) or bool(getattr(a, "json", False))
+    try:
+        if getattr(a, "json", False):
+            # #862: honour the advertised --json flag so hosts can assert an
+            # offline algo smoke without scraping the human narrative.
+            _out(payload, as_json=True)
+            return 0 if payload["ok"] else 1
+        _print_demo_human(payload, store=a.store, keep=keep)
         return 0 if payload["ok"] else 1
-    _print_demo_human(payload, store=a.store)
-    return 0 if payload["ok"] else 1
+    finally:
+        if not keep:
+            shutil.rmtree(payload["dir"], ignore_errors=True)
 
 
 def _starter_model_warnings(spec: Dict[str, Any], out: str) -> List[str]:
@@ -5305,7 +5332,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("demo", help="build a complete example and run it, offline")
-    s.add_argument("--dir", help="where to build it (default: a temp directory)")
+    s.add_argument("--dir", help="where to build it, and keep it "
+                   "(default: a temp directory, removed at exit)")
     s.add_argument("--kind", choices=("skill_dir", "text", "skill_library"),
                    help="demo fixture (default: skill_dir, or text when "
                         "--algorithm is a text-only card)")
