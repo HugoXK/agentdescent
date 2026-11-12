@@ -20,11 +20,12 @@ tool policy can each have their own budget and editability.
 
 from __future__ import annotations
 
-import fnmatch
 import json
 import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
+
+from .filetree import match_any
 
 __all__ = [
     "HARNESS_MANIFEST_SCHEMA_VERSION",
@@ -172,15 +173,35 @@ class HarnessManifest:
             raise HarnessManifestError(
                 f"unsupported manifest schema {self.version!r}")
 
-    def component_for(self, path: str) -> Optional[HarnessComponent]:
+    def components_for(self, path: str) -> Tuple[HarnessComponent, ...]:
+        """Every component whose paths match ``path``.
+
+        Uses :func:`~agentdescent.filetree.match_any` -- the same matcher
+        ``FileTree`` uses -- so a manifest means one thing on both surfaces.
+        """
         clean = _clean_path(path)
-        for component in self.components:
-            if any(fnmatch.fnmatch(clean, pattern) for pattern in component.paths):
-                return component
-        return None
+        return tuple(
+            component for component in self.components
+            if match_any(clean, component.paths))
+
+    def component_for(self, path: str) -> Optional[HarnessComponent]:
+        """The first matching component, for attribution only.
+
+        Nothing is *decided* here: overlap is resolved by
+        :meth:`components_for` (every match applies, read-only wins), so
+        listing order cannot make a path writable that a later component
+        freezes.
+        """
+        matches = self.components_for(path)
+        return matches[0] if matches else None
 
     def tree_kwargs(self) -> Dict[str, Any]:
-        """The ``FileTree`` keyword arguments this manifest resolves to."""
+        """The ``FileTree`` keyword arguments this manifest resolves to.
+
+        Implements the same union rule as :meth:`check`: every matching
+        component applies, and a ``frozen`` / ``editable: false`` match wins
+        over an editable one regardless of listing order.
+        """
         editable = []
         frozen = []
         for component in self.components:
@@ -208,27 +229,35 @@ class HarnessManifest:
         component_lines: Dict[str, int] = {}
         total_lines = 0
         for path, content in rows.items():
-            if not any(fnmatch.fnmatch(path, pattern)
-                       for pattern in self.allowed_paths):
+            if not match_any(path, self.allowed_paths):
                 violations.append(f"{path}: outside allowed_paths")
-            if any(fnmatch.fnmatch(path, pattern)
-                   for pattern in self.forbidden_paths):
+            if match_any(path, self.forbidden_paths):
                 violations.append(f"{path}: matched forbidden_paths")
-            component = self.component_for(path)
-            if component is None:
+            matches = self.components_for(path)
+            if not matches:
                 violations.append(f"{path}: no component owns this path")
                 continue
-            if component.frozen or not component.editable:
-                why = "frozen" if component.frozen else "not editable"
-                violations.append(
-                    f"{path}: component {component.name!r} is {why}")
+            blocked = [component for component in matches
+                       if component.frozen or not component.editable]
+            if blocked:
+                # Read-only wins over any editable match, and every frozen
+                # match is reported -- the tree unions frozen globs, so the
+                # checker must not stop at the first match either.
+                for component in blocked:
+                    why = "frozen" if component.frozen else "not editable"
+                    violations.append(
+                        f"{path}: component {component.name!r} is {why}")
                 continue
-            component_files[component.name] = component_files.get(
-                component.name, 0) + 1
+            # Overlapping components are all charged: a budget must bite even
+            # when a catch-all component is listed before it.
+            for component in matches:
+                component_files[component.name] = component_files.get(
+                    component.name, 0) + 1
             if content is not None:
                 lines = len(str(content).splitlines())
-                component_lines[component.name] = component_lines.get(
-                    component.name, 0) + lines
+                for component in matches:
+                    component_lines[component.name] = component_lines.get(
+                        component.name, 0) + lines
                 total_lines += lines
         for component in self.components:
             files = component_files.get(component.name, 0)

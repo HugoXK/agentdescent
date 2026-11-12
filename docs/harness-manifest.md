@@ -41,8 +41,15 @@ agentdescent harness check    --spec harness.json --changes changes.json
 `other`.
 
 `frozen: true` (or `editable: false`) makes every path in the component
-read-only. Overlapping globs resolve to the **first** matching component, so
-order the safety components before the catch-all ones.
+read-only. Every matching component applies: a path that matches both an
+editable component and a frozen one is read-only, whatever the listing order.
+Budgets are charged to every component that matches, so a catch-all cannot hide
+a later component's `max_files` / `max_lines`.
+
+Paths are matched with the tree's own glob semantics, not `fnmatch`: `*` matches
+within one path segment, `**` spans segments, `?` and `[...]` work as usual, and
+a bare directory pattern (`tests`) also matches its whole subtree. Use `**` to
+mean "any depth" -- `src/*.py` does not match `src/sub/x.py`.
 
 ## What `check` validates
 
@@ -74,8 +81,9 @@ strategy = FileTree(load_tree("my-agent"), **manifest.tree_kwargs())
 frozen **and** `editable: false` ones. There is no `**` fallback: if every
 component is read-only, `editable` is empty. A path outside every component is
 not editable by the loop, which is the point: a manifest that does not name a
-file cannot silently authorise it. Overlapping globs resolve to the first
-matching component, so put safety components before catch-alls.
+file cannot silently authorise it. `harness check` is the same rule on the same
+matcher: every matching component applies, read-only wins over editable, and
+listing order is not part of the contract.
 
 ## Boundaries
 
