@@ -141,6 +141,11 @@ class RunStatus:
     #: Held-out reward of the seed before round 0 (#708). ``None`` until the
     #: run finishes scoring it, or when seed scoring failed / predates the field.
     initial_reward: Optional[float] = None
+    #: Reward on the test split the run carved out with ``test_frac`` (#843).
+    #: ``None`` for a run with no split, or one whose test scoring failed -- so
+    #: ``show`` can say "select set only" instead of inventing a number. Never
+    #: read by a merge decision.
+    test_reward: Optional[float] = None
     committed: int = 0
     #: ``propose`` calls that raised, summed over the rounds so far (#395), and
     #: the first such exception as ``Type: message``. Non-zero with
@@ -897,6 +902,7 @@ def execute(rd: RunDir, *, budget_usd: Optional[float] = None,
         stop_reason=result.stop_reason, error=result.error,
         best_reward=max(best) if best else final,
         last_reward=final, initial_reward=initial,
+        test_reward=_finite_or_none(getattr(result, "test_reward", None)),
         calls=usage.calls, pending_calls=0, phase=None,
         usd=None if usd_per_call is None else round(usage.calls * usd_per_call, 4))
     return result

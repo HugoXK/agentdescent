@@ -48,6 +48,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 
 from . import runstore
+from .evolution import SELECT_SET_NOTE, reward_set_line
 from .evolvespec import (KINDS, EvolveSpec, SpecError, budget_round_overshoot_warning,
                          compose, estimate, fold_kind, load_spec, resolve_kind,
                          _POLICY_SLOTS)
@@ -2173,20 +2174,28 @@ def cmd_evolve(a: argparse.Namespace) -> int:
     init = getattr(result, "initial_reward", None)
     payload = {"run_id": rd.run_id, "state": st.state, "final_reward": result.final_reward,
                "initial_reward": init, "stop_reason": result.stop_reason,
+               # #843: the reward set, so `--json` callers do not have to
+               # re-derive it from a flag that may have been edited since.
+               "test_reward": getattr(result, "test_reward", None),
+               "test_tasks": getattr(result, "test_tasks", 0),
+               "select_tasks": getattr(result, "select_tasks", 0),
                "outcomes": result.outcomes(), "error": result.error, "dir": rd.path}
     from .diagnose import SEED_SOLVED_HINT, seed_already_solved
     seed_solved = seed_already_solved(init, result.final_reward, result.stop_reason)
     if seed_solved:
         payload["note"] = SEED_SOLVED_HINT
+    set_line = reward_set_line(result.final_reward,
+                               getattr(result, "test_reward", None))
     if init is not None:
         plain = (f"{_status_line(st)}\n"
                  f"held-out reward: {init:.3f} -> {result.final_reward:.3f}  "
                  f"outcomes: {result.outcomes()}\n"
+                 f"{set_line}\n"
                  + (f"{SEED_SOLVED_HINT}\n" if seed_solved else "")
                  + f"{rd.path}")
     else:
         plain = (f"{_status_line(st)}\nfinal reward: {result.final_reward:.3f}  "
-                 f"outcomes: {result.outcomes()}\n{rd.path}")
+                 f"outcomes: {result.outcomes()}\n{set_line}\n{rd.path}")
     _out(payload if a.json else plain, as_json=a.json)
     return 0 if result.error is None else 1
 
@@ -2510,6 +2519,12 @@ def show_payload(run_id: str, *, store: Optional[str] = None, diff: bool = True,
         return payload
     payload.update(final_reward=result.final_reward,
                    initial_reward=getattr(result, "initial_reward", None),
+                   # #843: which set each number is. `final_reward` is the
+                   # select set; `test_reward` is None unless the run carved a
+                   # test partition with `test_frac`.
+                   test_reward=getattr(result, "test_reward", None),
+                   test_tasks=getattr(result, "test_tasks", 0),
+                   select_tasks=getattr(result, "select_tasks", 0),
                    outcomes=result.outcomes(),
                    rounds=len(result.history))
     # Reflector exceptions (#395). Only when there were some, so a healthy run's
@@ -2580,10 +2595,20 @@ def cmd_show(a: argparse.Namespace) -> int:
         _out(payload, as_json=True)
         return 0
     for k in ("run_id", "state", "stop_reason", "error", "initial_reward",
-              "final_reward", "outcomes",
+              "final_reward", "test_reward", "outcomes",
               "best_reward", "propose_errors", "propose_error", "note"):
         if payload.get(k) is not None:
             print(f"{k}: {payload[k]}")
+    # #843: `final_reward` alone does not say whether it is the set that selected
+    # the winner or an unseen test. Keep the pinned `final_reward:` line and add
+    # the sentence that names the set; a split run also prints `test_reward:`
+    # above, which is the number that was never used for selection.
+    if payload.get("final_reward") is not None:
+        if payload.get("test_reward") is not None:
+            print("(final_reward is the select set; test_reward was never used "
+                  "for accept/select)")
+        else:
+            print(f"({SELECT_SET_NOTE})")
     if payload.get("fusion_summary"):
         print(payload["fusion_summary"])
     if payload.get("history"):
@@ -4040,6 +4065,16 @@ def cmd_diagnose(a: argparse.Namespace) -> int:
         _out(report.to_dict(), as_json=True)
         return 0
     print(f"{report.verdict}: {report.summary}")
+    # #843: the verdict talks about "the reward" without saying which set it
+    # came from. `diagnose` is the command a person runs to understand a run, so
+    # it has to name it -- select set, or select + test when the run split one.
+    try:
+        result = runstore.get(report.run_id, store=a.store).result()
+    except Exception:  # noqa: BLE001 - the diagnosis must still print
+        result = None
+    if result is not None:
+        print(reward_set_line(result.final_reward,
+                              getattr(result, "test_reward", None)))
     if report.evidence:
         print("evidence:", json.dumps(report.evidence, default=str)[:1200])
     for line in report.recommendations:

@@ -1571,6 +1571,17 @@ class EvolutionResult:
     #: ``None`` when seed scoring failed (dead backend) or the result was written
     #: before this field existed. Never aborts the run.
     initial_reward: Optional[float] = None
+    #: Reward on the **test** split, when the run carved one out with
+    #: ``evolve(test_frac=...)`` (#843). ``None`` when there is no test split, or
+    #: when its one scoring pass failed -- a missing number rather than a
+    #: misleading one. Never read by a commit decision: ``final_reward`` is the
+    #: select-set number, and this is what generalisation actually measured.
+    test_reward: Optional[float] = None
+    #: Sizes of the two partitions the numbers rest on: the select set
+    #: (``final_reward``) and the test set (``test_reward``). ``test_tasks == 0``
+    #: means the old single-split run.
+    test_tasks: int = 0
+    select_tasks: int = 0
     #: ``None`` on a clean run; otherwise a description of the failure that either
     #: ended the run early **or** made its final measurement unusable (in which case
     #: ``final_reward`` falls back to the last measured round, and the message says
@@ -2145,6 +2156,11 @@ class _Engine:
     #: (whose ``Contract.depends_on`` names A) has cached evaluations taken under
     #: the old contract, so the engine re-measures them.
     contract_dependents: Dict[str, List[str]] = field(default_factory=dict)
+    #: The test partition carved out of ``held_out`` when the caller passed
+    #: ``test_frac`` (#843). Empty is the old run exactly. Selection and every
+    #: gate read ``held_out`` (now the *select* set); this is scored once, at the
+    #: end, and never enters a commit decision.
+    test: List[Task] = field(default_factory=list)
 
     def invalidate_dependents(self, changed_artifact_id: str,
                               branch: str = Ledger.DEV) -> None:
@@ -2392,6 +2408,31 @@ def _contract_dependents(primary_id: str, primary_contract: Any,
 #: note the same condition from the same helpers, so the two cannot drift (#414).
 MIN_HELD_OUT = 4
 
+#: What the printed reward actually is, once a run has no separate test split
+#: (#843). Selection -- which candidate becomes head, which diff commits -- and
+#: the reported number both read the same held-out split by default, so the
+#: reward is the score of the set that chose the winner. Saying so is the honest
+#: half of the fix; ``evolve(test_frac=...)`` is the measurable half.
+SELECT_SET_NOTE = ("reward is the select set (the split used for accept/select), "
+                   "not an unseen test set")
+
+
+def reward_set_line(final_reward: float,
+                    test_reward: Optional[float] = None) -> str:
+    """One line naming which set a printed reward is (#843).
+
+    With a test split, both numbers are printed and the test reward is labelled
+    as never having been used for selection. Without one, the line says the
+    reward is the select set rather than an unseen test -- the alternative was
+    letting a reader assume generalisation that the run never measured.
+    """
+    if test_reward is None:
+        return (f"reward: {final_reward:.3f}  "
+                f"({SELECT_SET_NOTE})")
+    return (f"select reward: {final_reward:.3f}  "
+            f"test reward: {test_reward:.3f}  "
+            "(the test split was never used for accept/select)")
+
 
 class SmallHeldOutWarning(RuntimeWarning):
     """``evolve()``'s held-out set is smaller than :data:`MIN_HELD_OUT`.
@@ -2467,7 +2508,8 @@ def _build_engine(tasks, reward, *, agent, run, propose, strategy, initial_state
                   trajectory_store: Optional[Any] = None,
                   contract: Optional[Contract] = None,
                   extra_artifacts: Optional[Dict[str, "EvolvingArtifact"]] = None,
-                  population_islands: int = 0) -> _Engine:
+                  population_islands: int = 0,
+                  test_frac: float = 0.0) -> _Engine:
     """Wire the ledger, runtime, verifier and aggregator (shared by
     :func:`evolve` and :func:`~agentdescent.async_evolve.async_evolve`)."""
     import tempfile
@@ -2548,6 +2590,27 @@ def _build_engine(tasks, reward, *, agent, run, propose, strategy, initial_state
     # pushed one train item into held-out for many dataset sizes.
     cut = len(tasks) - held_out_size(len(tasks), held_out_frac)
     train, held_out = tasks[:cut], tasks[cut:]
+    # The test split (#843) is carved off the *tail* of the held-out set, so the
+    # select split keeps the positional promise `Dataset.val_frac` makes and the
+    # test tasks are simply the last `test_frac` of what used to be held out.
+    # Nothing in the run measures on them: every gate below reads `held_out`,
+    # which is now the select set. 0.0 (the default) leaves both variables
+    # exactly as they were.
+    test: List[Task] = []
+    if test_frac:
+        if not 0.0 < test_frac < 1.0:
+            raise ValueError(f"test_frac must be in (0, 1), got {test_frac}")
+        n_test = round(len(held_out) * test_frac)
+        if n_test < 1:
+            raise ValueError(
+                f"test_frac={test_frac} leaves no test task out of "
+                f"{len(held_out)} held-out tasks; pass more tasks or a larger "
+                "test_frac")
+        if len(held_out) - n_test < 1:
+            raise ValueError(
+                f"test_frac={test_frac} would leave no select task out of "
+                f"{len(held_out)} held-out tasks")
+        held_out, test = held_out[:len(held_out) - n_test], held_out[len(held_out) - n_test:]
     # Every gate in the run -- the Beta acceptance test, target_reward, patience,
     # final_reward -- is measured on this set. At 3 items a single binary rollout
     # moves the reported reward by 0.33, and at 1 it is 0.0 or 1.0 and nothing
@@ -2977,6 +3040,7 @@ def _build_engine(tasks, reward, *, agent, run, propose, strategy, initial_state
                       aid for aid in (extra_artifacts or {}) if aid != artifact_id),
                   artifact_strategies=artifact_strategies,
                   contract_dependents=contract_dependents,
+                  test=test,
                   executor=executor, meter=meter, scratch_repo=scratch,
                   checkpoint_payload=_cp_payload, checkpointing=checkpointing,
                   checkpoint_round_base=_cp_round_base)
@@ -3079,6 +3143,13 @@ def evolve(
     #: (default) means the per-call ceiling never changes.
     self_verify: bool = True,
     held_out_frac: float = 0.4,
+    #: Carve a **test** partition out of the held-out tail (#843). Selection and
+    #: every gate keep reading the select partition, so the winner is never
+    #: chosen on the numbers that are reported as generalisation; the test split
+    #: is scored once, at the end, and returned as
+    #: :attr:`EvolutionResult.test_reward`. ``0.0`` (default) is the old run
+    #: exactly, except that the CLI now says the printed reward is select-set.
+    test_frac: float = 0.0,
     repo_path: Optional[str] = None,
     #: Checkpoint the aggregator's search state every round, so a process
     #: restart can resume the search rather than just the artifact. Off by
@@ -3393,6 +3464,14 @@ def evolve(
         score candidates only on held-out should pass ``False``.
     held_out_frac:
         Fraction of ``tasks`` reserved for held-out scoring, in ``(0, 1)``.
+    test_frac:
+        Carve a **test** partition out of the held-out tail (#843). Selection and
+        every gate keep reading the select partition; the test split is scored
+        once, after the loop, and returned as :attr:`EvolutionResult.test_reward`
+        (with ``test_tasks`` / ``select_tasks`` for the sizes). ``0.0`` (the
+        default) is the old single-split run exactly -- the CLI then says the
+        printed reward is select-set rather than an unseen test. Synchronous
+        only: the async path warns that it does not split yet.
     repo_path:
         Where the git-backed ledger lives. Omit for a throwaway repo that is
         removed when this call returns (not held until interpreter exit, so a
@@ -3668,6 +3747,13 @@ def evolve(
     trajectory_store = _obs.trajectory_store
 
     if asynchronous:
+        # The asynchronous driver does not split a test partition yet (#843).
+        # Refusing is the honest option: accepting the argument and silently
+        # running without a test split would report a select-set number as if a
+        # generalisation measurement had been asked for and produced. It goes
+        # through the warn-and-ignore loop below, which is this path's contract
+        # for a knob it does not honour (`test_no_evolve_argument_is_dropped_
+        # without_notice` pins that no new kwarg falls through silently).
         # Deprecated bridge (#809): sync and async are two contracts, not a mode
         # flag. Prefer ``async_evolve`` directly. Validate budgets before the
         # deprecation warning so a misconfigured call fails closed without the
@@ -3685,6 +3771,10 @@ def evolve(
             ("refresh_interval", None if refresh_interval == 1 else refresh_interval,
              "it staggers snapshot refresh across round barriers, and the async "
              "path has none -- async_ratio is its lag budget"),
+            ("test_frac", None if not test_frac else test_frac,
+             "the barrier-free runtime has no select/test split yet, so a run "
+             "would report a select-set reward as if a test split had been "
+             "measured -- run synchronously to get a test_reward (#843)"),
         ):
             if value is not None:
                 warnings.warn(
@@ -3797,7 +3887,7 @@ def evolve(
         initial_state=initial_state, blast_radius=blast_radius, artifact_id=artifact_id,
         held_out_frac=held_out_frac, repo_path=repo_path, agg_config=agg_config,
         staleness_policy=staleness_policy, aggregator_factory=aggregator_factory,
-        selection=selection,
+        selection=selection, test_frac=test_frac,
         oracle_budget=oracle_budget, eval_concurrency=eval_concurrency,
         cheap_eval_tasks=cheap_eval_tasks, fusion_tournament=fusion_tournament,
             shuffle=shuffle, seed=seed,
@@ -4448,6 +4538,16 @@ def evolve(
     except Exception as e:  # noqa: BLE001 - report, keep the partial result
         run_error = run_error or _describe(e)
         final_reward = history[-1].held_out_reward if history else 0.0
+    # The test split is measured exactly once, after the loop, so no commit can
+    # ever have been influenced by it (#843). A failed test score is reported as
+    # missing rather than as a number: a run whose select score is fine but whose
+    # test sweep died must not look like "the lesson generalised".
+    test_reward: Optional[float] = None
+    if eng.test:
+        try:
+            test_reward = float(final.score(eng.test))
+        except Exception:  # noqa: BLE001 - a missing test score is not a crash
+            test_reward = None
     if run_error:
         # Never end a run silently: verbose=False is the default, so a partial
         # result is otherwise indistinguishable from a converged one.
@@ -4466,6 +4566,9 @@ def evolve(
                              ledger_log=_safe_log(ledger),
                              initial_reward=initial_reward, error=run_error,
                              stop_reason="error" if run_error else stop_reason,
+                             test_reward=test_reward,
+                             test_tasks=len(eng.test),
+                             select_tasks=len(held_out),
                              fusion_trials=_fusion_trials(aggregator),
                              budget=governor.summary() if governor.active else None,
                              trajectories_path=getattr(

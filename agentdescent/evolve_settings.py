@@ -51,6 +51,10 @@ EVOLVE_PARAM_ALLOWLIST = frozenset({
     "seed", "on_round", "on_reports", "stop_when", "verbose", "usage",
     "policies", "allocator", "record_trajectories", "trajectory_store",
     "contract", "extra_artifacts", "population_islands",
+    #: #843: test split of the held-out set. Deliberately a flat kwarg and not a
+    #: RuntimeSettings field for this slice (#804): it is additive, defaults to
+    #: ``0.0`` (the old run exactly), and the bag refactor is a separate card.
+    "test_frac",
     # typed bags (#804) — preferred home for new numerics / flags
     "budget", "runtime", "observability",
 })

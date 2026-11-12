@@ -35,6 +35,9 @@ EvolutionResult(
     history: List[RoundInfo],
     ledger_log: List[str],
     initial_reward: Optional[float] = None,
+    test_reward: Optional[float] = None,
+    test_tasks: int = 0,
+    select_tasks: int = 0,
     error: Optional[str] = None,
     stop_reason: str = 'rounds',
     forced_refreshes: int = 0,
@@ -247,6 +250,7 @@ evolve(
     call_budget: Optional['CallBudget'] = None,
     self_verify: bool = True,
     held_out_frac: float = 0.4,
+    test_frac: float = 0.0,
     repo_path: Optional[str] = None,
     checkpointing: bool = False,
     agg_config: Optional[AggregatorConfig] = None,
@@ -312,6 +316,7 @@ evolve(
 | `call_budget` | `Optional['CallBudget']` | `None` | An adaptive per-call thinking budget (o1-style test-time scaling). Pass a `CallBudget` whose `base` matches the adapter's configured `max_tokens`, and the engine adjusts the per-call ceiling based on each parent's score and the remaining budget — promising parents get more thinking, dead-end ones get less, and the allocation tightens as the token budget is spent. The adapter must be wrapped with `budgeted_completion` for this to reach it. `None` (default) means the per-call ceiling is the adapter's own and never changes. |
 | `self_verify` | `bool` | `True` | Re-run the trajectory with the diff applied to record a local before/after delta. Doubles the rollouts spent per proposal; ports that score candidates only on held-out should pass `False`. |
 | `held_out_frac` | `float` | `0.4` | Fraction of `tasks` reserved for held-out scoring, in `(0, 1)`. |
+| `test_frac` | `float` | `0.0` | Carve a **test** partition out of the held-out tail (#843). Selection and every gate keep reading the select partition; the test split is scored once, after the loop, and returned as `test_reward` (with `test_tasks` / `select_tasks` for the sizes). `0.0` (the default) is the old single-split run exactly -- the CLI then says the printed reward is select-set rather than an unseen test. Synchronous only: the async path warns that it does not split yet. |
 | `repo_path` | `Optional[str]` | `None` | Where the git-backed ledger lives. Omit for a throwaway repo that is removed when this call returns (not held until interpreter exit, so a sweep does not accumulate one git repo per run); **passing the same path again resumes** that ledger, and a caller-supplied path is never deleted. Git runs with an isolated config, so a personal `~/.gitconfig` (`commit.gpgsign`, `core.hooksPath`) cannot fail the ledger's own bookkeeping commits. |
 | `checkpointing` | `bool` | `False` | Save the aggregator's in-memory **search** state to `<repo_path>/checkpoints/` after every round, so a later run on the same `repo_path` resumes the search instead of re-deriving it from the ledger head. `repo_path` alone already resumes the *artifact*; what it cannot carry is what the search learned on the way there -- Beta posteriors, a population archive and its `selected` counts, the early-stop patience counter. Off by default, because a run that never resumes (a scratch repo, a tempdir) would pay the serialise-and-write for nothing, and because an aggregator opts in by implementing `checkpoint()` / `restore()` at all -- one without them is unaffected either way. A checkpoint that cannot be written or read (state that does not serialise, a lock another process holds, a full disk) is skipped, never raised: the cost of a missing checkpoint is a resume that starts the search fresh, which is what `False` does. |
 | `agg_config` | `Optional[AggregatorConfig]` | `None` | Tuning for the reference aggregator (batching, acceptance risk, trust region, staleness tolerance). |
