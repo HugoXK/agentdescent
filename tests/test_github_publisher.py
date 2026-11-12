@@ -533,3 +533,22 @@ def test_a_dismissed_change_request_stops_blocking(monkeypatch):
     assert readiness["ready"] is True
     by_text = {row["text"]: row["severity"] for row in payload["constraints"]}
     assert by_text["Please add a test for the empty input"] == "suggestion"
+
+
+def test_an_approval_with_an_action_word_does_not_block_readiness(monkeypatch):
+    """`ready: false` against a reviewer PASS, because the body said "required"."""
+    monkeypatch.setenv("AGENTDESCENT_GITHUB_TOKEN", "secret-token")
+    fake = FakeGitHub()
+    fake.pulls = [{"number": 7, "html_url": "https://github.com/o/r/pull/7",
+                   "title": "feat", "state": "open", "draft": False,
+                   "head": {"sha": "abc"}, "base": {"ref": "main"},
+                   "mergeable": True}]
+    fake.reviews = [
+        {"id": 1, "state": "APPROVED", "body": "Approved - no changes required.",
+         "user": {"login": "alice"}, "submitted_at": "2026-11-12T05:00:00Z"},
+    ]
+    fake.checks = _green_checks()
+    payload = github_review(GitHubConfig("o", "r"), 7, transport=fake)
+    assert payload["merge_readiness"]["ready"] is True
+    by_text = {row["text"]: row["severity"] for row in payload["constraints"]}
+    assert by_text["Approved - no changes required."] == "suggestion"

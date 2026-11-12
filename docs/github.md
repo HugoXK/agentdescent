@@ -120,9 +120,13 @@ The packet contains:
 - `merge_readiness` — `ready`, `requires_human_click: true`, the blockers and
   the next step.
 
-A `CHANGES_REQUESTED` review (and its inline comments) is blocking; any other
-review or comment is a suggestion unless it uses an action word such as
-`please`, `add` or `update`, which promotes it to blocking. Only a reviewer's
+A `CHANGES_REQUESTED` review (and its inline comments) is blocking. Any other
+**comment** is a suggestion unless it uses an action word such as `please`,
+`add` or `update`, which promotes it to blocking. An `APPROVED` or `DISMISSED`
+review body is never promoted that way — an approval is a report and a dismissal
+is a withdrawal — and neither is a body that is itself a `Verdict: PASS` report,
+whose `Ran:` list and caveats are exactly the prose an action-word heuristic
+trips on. Those rows are still listed, as suggestions. Only a reviewer's
 decisive review counts: the author's latest approval, change request or
 dismissal, so a change request that reviewer later approved (or had dismissed)
 no longer blocks and its constraints stay as suggestions, while a later

@@ -269,6 +269,13 @@ _DOCS = re.compile(r"\b(doc|docs|readme|docstring|comment|typo)\b",
 _STYLE = re.compile(r"\b(lint|format|typing|type hint|naming|style)\b",
                     re.IGNORECASE)
 _PATH = re.compile(r"`([^`\n]+\.[A-Za-z0-9_]+)`")
+#: A review body that *is* a verdict report -- a line of its own reading
+#: ``Verdict: PASS``, which is the shape our own review flow writes. A report
+#: states evidence; it never asks for a change, so it stays a suggestion even
+#: when its prose contains an action word (#933). Anchored to a line and matched
+#: against the *raw* body, because the constraint text is whitespace-collapsed
+#: and ``Tip SHA: ...\n\nVerdict: PASS`` would no longer start a line there.
+_VERDICT_PASS = re.compile(r"(?im)^[ \t]*verdict[ \t]*:[ \t]*pass\b")
 _WS = re.compile(r"\s+")
 
 
@@ -306,13 +313,22 @@ def extract_review_constraints(
     REST does not expose whether a review thread is resolved, so ``resolved``
     is false unless the caller passes the ids it knows are resolved. A
     ``CHANGES_REQUESTED`` review (or one of its inline comments) is a blocking
-    constraint; any other review or comment is a suggestion unless its text
-    carries an action phrase (``please``, ``add``, ``update``, ``fix``, ...),
-    which promotes it to blocking. Plain "thanks" notes are dropped rather than
+    constraint. Any other **comment** is a suggestion unless its text carries an
+    action phrase (``please``, ``add``, ``update``, ``fix``, ...), which
+    promotes it to blocking. Plain "thanks" notes are dropped rather than
     becoming tasks. Each reviewer's representative review decides (see
     ``_latest_reviews``): a change request that reviewer later approved or had
     dismissed stays as a suggestion instead of blocking, while a plain later
     comment neither lifts nor weakens the block (#774).
+
+    The action-word promotion is for **comments**, never for an approval or a
+    dismissal (#933). ``_ACTION`` contains ``add``, ``fix``, ``required``,
+    ``cannot``, ..., so ordinary reviewer prose trips it -- and the two states
+    whose whole meaning is "not a request" were the ones mined hardest: a
+    dismissed PASS blocked a merged PR after its block was lifted, and a
+    ``Verdict: PASS`` report blocked because one caveat sentence said "cannot".
+    A review body that is itself a PASS report is never blocking for the same
+    reason: it is evidence, and it is still listed as a suggestion.
     """
     resolved = {str(value) for value in resolved_ids}
     mapped = [review for review in reviews if isinstance(review, Mapping)]
@@ -333,10 +349,18 @@ def extract_review_constraints(
             continue
         source = f"review:{review.get('id', '')}"
         stale = str(review.get("id", "")) in superseded
+        state = str(review.get("state", "")).upper()
         severity = ("blocking"
-                    if str(review.get("state", "")).upper() == "CHANGES_REQUESTED"
-                    and not stale else "suggestion")
-        if _ACTION.search(text) and severity == "suggestion" and not stale:
+                    if state == "CHANGES_REQUESTED" and not stale
+                    else "suggestion")
+        # Promotion on an action word is keyed on the state, not on the prose:
+        # only a COMMENTED review can be read as a request. An APPROVED body is
+        # a report, a DISMISSED one is a withdrawal, and an unknown state is not
+        # a request either -- none of them may turn on an incidental "add".
+        if (severity == "suggestion" and not stale
+                and state == "COMMENTED"
+                and not _VERDICT_PASS.search(str(review.get("body") or ""))
+                and _ACTION.search(text)):
             severity = "blocking"
         rc_id = _constraint_id(kind, text, "")
         _add_constraint(found, ReviewConstraint(
@@ -355,9 +379,17 @@ def extract_review_constraints(
         source = f"comment:{comment.get('id', '')}"
         parent = str(comment.get("pull_request_review_id", ""))
         stale = parent in superseded
+        parent_state = review_state.get(parent)
         severity = ("blocking"
-                    if review_state.get(parent) == "CHANGES_REQUESTED"
-                    or (_ACTION.search(text) and not stale) else "suggestion")
+                    if parent_state == "CHANGES_REQUESTED"
+                    else "suggestion")
+        # A comment on a review that approved or dismissed is a remark on a
+        # report, not a request; one with no decisive parent keeps the
+        # action-word promotion (there is no state to key it on).
+        if (severity == "suggestion"
+                and parent_state not in ("APPROVED", "DISMISSED")
+                and _ACTION.search(text) and not stale):
+            severity = "blocking"
         rc_id = _constraint_id(kind, text, path)
         _add_constraint(found, ReviewConstraint(
             id=rc_id, kind=kind, text=text, source=source, path=path,
