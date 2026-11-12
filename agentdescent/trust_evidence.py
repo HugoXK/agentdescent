@@ -30,7 +30,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence, Tuple
 
 from .conformal import ConformalGate, ConformalReport
@@ -64,6 +64,19 @@ def _content_hash(before: Mapping[str, float], after: Mapping[str, float]) -> st
     return hashlib.sha256(body.encode()).hexdigest()
 
 
+def _artifact_metadata(artifact_changed: Optional[bool],
+                       metadata: dict) -> dict:
+    """Metadata that records the artifact comparison, when there was one.
+
+    The keys are omitted for a caller that did not compare artifacts, so the
+    evidence of a bundle built before this field existed hashes the same.
+    """
+    if artifact_changed is not None:
+        metadata["artifact_changed"] = artifact_changed
+        metadata["noise_only"] = artifact_changed is False
+    return metadata
+
+
 @dataclass(frozen=True)
 class TrustEvidence:
     """The reports one paired evaluation produced, ready for `promote()`."""
@@ -79,6 +92,10 @@ class TrustEvidence:
     contaminated: Optional[bool] = None
     risk: Optional[float] = None
     approved: Optional[bool] = None
+    #: Whether the compared artifacts differ byte-for-byte. ``None`` means the
+    #: caller did not compare them, so the bundle keeps the behaviour it had
+    #: before this field existed.
+    artifact_changed: Optional[bool] = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -86,11 +103,34 @@ class TrustEvidence:
             raise TypeError("contaminated must be a bool or None")
         if self.approved is not None and not isinstance(self.approved, bool):
             raise TypeError("approved must be a bool or None")
+        if self.artifact_changed is not None and not isinstance(
+                self.artifact_changed, bool):
+            raise TypeError("artifact_changed must be a bool or None")
+        if self.artifact_changed is False:
+            # Byte-identical before and after: any moved score is evaluation
+            # noise, so it can neither be reported as gain nor pass an eval
+            # gate. Zeroing here covers every construction path, including a
+            # caller that builds the bundle directly from its own EvalResult.
+            object.__setattr__(self, "eval_result", replace(
+                self.eval_result, delta=0.0, passed=False,
+                detail=(self.eval_result.detail +
+                        "; artifact unchanged, so the eval delta is evaluation "
+                        "noise, not learning").lstrip("; ")))
         if self.risk is not None:
             risk = _finite(self.risk, "risk")
             if not 0.0 <= risk <= 1.0:
                 raise ValueError("risk must be in [0, 1]")
         object.__setattr__(self, "metadata", dict(self.metadata or {}))
+
+    @property
+    def noise_only(self) -> bool:
+        """True when the artifact is known to be byte-identical before and after."""
+        return self.artifact_changed is False
+
+    @property
+    def gain(self) -> float:
+        """The effect this bundle may report; zero when nothing changed on disk."""
+        return 0.0 if self.noise_only else self.eval_result.delta
 
     def to_promotion_request(self, artifact_id: str, *,
                              artifact_hash: Optional[str] = None,
@@ -117,7 +157,7 @@ class TrustEvidence:
             calibration=self.calibration, metadata=metadata)
 
     def to_dict(self) -> dict:
-        return {
+        body = {
             "eval": self.eval_result.to_dict(),
             "canary": asdict(self.canary),
             "conformal": None if self.conformal is None else asdict(self.conformal),
@@ -134,6 +174,10 @@ class TrustEvidence:
             "approved": self.approved,
             "metadata": dict(self.metadata),
         }
+        if self.artifact_changed is not None:
+            body["artifact_changed"] = self.artifact_changed
+            body["noise_only"] = self.noise_only
+        return body
 
 
 def build_trust_evidence(
@@ -152,6 +196,7 @@ def build_trust_evidence(
         contaminated: Optional[bool] = None,
         risk: Optional[float] = None,
         approved: Optional[bool] = None,
+        artifact_changed: Optional[bool] = None,
         alpha: float = 0.05,
         seed: int = 0,
         min_effect: float = 0.0,
@@ -172,6 +217,8 @@ def build_trust_evidence(
         raise ValueError("metamorphic needs a run callable")
     if verifier is not None and candidate is None:
         raise ValueError("verifier needs a candidate")
+    if artifact_changed is not None and not isinstance(artifact_changed, bool):
+        raise TypeError("artifact_changed must be a bool or None")
 
     deltas = paired_gain(before, after)
     if not deltas:
@@ -222,5 +269,8 @@ def build_trust_evidence(
         sequential=stream, goodhart=goodhart, metamorphic=metamorphic_report,
         verifier=verifier_report, calibration=calibration_report,
         contaminated=contaminated, risk=risk, approved=approved,
-        metadata={"before_tasks": len(before), "after_tasks": len(after),
-                  "common_tasks": len(deltas)})
+        artifact_changed=artifact_changed,
+        metadata=_artifact_metadata(
+            artifact_changed,
+            {"before_tasks": len(before), "after_tasks": len(after),
+             "common_tasks": len(deltas)}))
