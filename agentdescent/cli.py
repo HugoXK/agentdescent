@@ -1162,7 +1162,10 @@ def _backup_existing_spec(out: str, spec: Any) -> Optional[str]:
         except ValueError:
             pass
     backup = _backup_slot(out)
-    shutil.copyfile(out, backup)
+    try:
+        shutil.copyfile(out, backup)
+    except OSError as e:
+        raise _cannot_write(backup, e) from None
     return backup
 
 
@@ -3217,13 +3220,22 @@ def apply_from_payload(source: str, *, to: str, dry_run: bool = False,
                     "source": src, "dest": dest}
         saved = []
         if slot is not None:
-            shutil.copy2(dest, slot)
+            try:
+                shutil.copy2(dest, slot)
+            except OSError as e:
+                raise _cannot_write(slot, e) from None
             saved = [slot]
         parent = os.path.dirname(dest)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-        with open(dest, "w", encoding="utf-8", newline="") as fh:
-            fh.write(rendered)
+        try:
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+        except OSError as e:
+            raise _cannot_write(dest, e) from None
+        try:
+            with open(dest, "w", encoding="utf-8", newline="") as fh:
+                fh.write(rendered)
+        except OSError as e:
+            raise _cannot_write(dest, e) from None
         return {"written": [dest], "unchanged": [], "backup": saved, "noop": False,
                 "source": src, "dest": dest}
     if not os.path.isdir(src):
@@ -3303,11 +3315,17 @@ def apply_from_payload(source: str, *, to: str, dry_run: bool = False,
     if dry_run or plan["noop"]:
         return plan
     if slot is not None:
-        shutil.copytree(dest, slot, symlinks=True)
+        try:
+            shutil.copytree(dest, slot, symlinks=True)
+        except OSError as e:
+            raise _cannot_write(slot, e) from None
         plan["backup"] = [slot]
     for rel in changed:
         out = os.path.join(dest, rel.replace("/", os.sep))
-        os.makedirs(os.path.dirname(out), exist_ok=True)
+        try:
+            os.makedirs(os.path.dirname(out), exist_ok=True)
+        except OSError as e:
+            raise _cannot_write(out, e) from None
         # Source entries are guaranteed non-links by `_files`; still refuse to
         # follow if the tree changed under us.
         src_path = os.path.join(src, rel.replace("/", os.sep))
@@ -3315,7 +3333,10 @@ def apply_from_payload(source: str, *, to: str, dry_run: bool = False,
             raise runstore.RunStoreError(
                 f"--from {src} contains symlink(s) ({rel}); refuse to apply "
                 "(would dereference into real files)")
-        shutil.copy2(src_path, out)
+        try:
+            shutil.copy2(src_path, out)
+        except OSError as e:
+            raise _cannot_write(out, e) from None
     return plan
 
 

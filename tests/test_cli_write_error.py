@@ -130,3 +130,45 @@ def test_a_writable_destination_still_writes_the_same_bytes(tmp_path, capsys):
     dest = tmp_path / "out.txt"
     assert cli.main(["--store", store, "apply", rid, "--to", str(dest)]) == 0
     assert dest.read_text(encoding="utf-8") == "evolved rule\n"
+
+
+@pytest.mark.parametrize("as_json", MODES)
+def test_init_over_an_existing_spec_that_cannot_be_backed_up(tmp_path, capsys,
+                                                            as_json):
+    """The ``.bak-N`` copy runs before the wrapped ``open(out)`` (#994).
+
+    A 250-character file name is legal and its ``.bak-0`` sibling is 256, over
+    ``NAME_MAX``, so the backup is refused structurally: no permissions, no
+    uid, and the case cannot turn into a skip in a root CI leg.
+    """
+    proj = tmp_path / "proj-bak"
+    proj.mkdir()
+    (proj / "rule.md").write_text("Be helpful.\n", encoding="utf-8")
+    out = tmp_path / ("s" * 250)
+    out.write_text('{"stale": true}\n', encoding="utf-8")
+    assert cli.main(_argv(as_json, "init", str(proj), "--out", str(out),
+                          "--model", "echo")) == 2
+    _assert_refusal(capsys, as_json, path=out)
+
+
+@pytest.mark.parametrize("as_json", MODES)
+def test_apply_from_a_file_into_a_parent_that_cannot_be_created(tmp_path,
+                                                                capsys, as_json):
+    src = tmp_path / "rule.md"
+    src.write_text("evolved\n", encoding="utf-8")
+    dest = _blocked(tmp_path) / "out.txt"
+    assert cli.main(_argv(as_json, "apply", "--from", str(src),
+                          "--to", str(dest))) == 2
+    _assert_refusal(capsys, as_json, path=dest)
+
+
+@pytest.mark.parametrize("as_json", MODES)
+def test_apply_from_a_tree_into_a_destination_that_cannot_be_created(
+        tmp_path, capsys, as_json):
+    src = tmp_path / "skill"
+    src.mkdir()
+    (src / "SKILL.md").write_text("evolved\n", encoding="utf-8")
+    dest = _blocked(tmp_path) / "newdir"
+    assert cli.main(_argv(as_json, "apply", "--from", str(src),
+                          "--to", str(dest))) == 2
+    _assert_refusal(capsys, as_json, path=dest)
