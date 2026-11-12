@@ -5147,6 +5147,28 @@ def _bind_failure(e: BaseException) -> str:
 
 
 def cmd_serve(a: argparse.Namespace) -> int:
+    # The panel is read-only but unauthenticated: it lists every run in the
+    # store, including specs and artifacts. `mcp` already refuses a
+    # non-loopback bind without an opt-in (#911); `serve` publishing the store
+    # to the network from one flag was the gap.
+    from .mcp import is_loopback_host
+
+    if not is_loopback_host(getattr(a, "host", None)) and not getattr(
+            a, "allow_remote", False):
+        message = (f"refusing to listen on non-loopback host {a.host!r}: the run "
+                   "panel has no authentication and shows every run in the store. "
+                   f"Keep --host {runstore.DEFAULT_HTTP_HOST} and expose it with a "
+                   "tunnel, or pass --allow-remote if you really mean to publish "
+                   "the store to the network.")
+        if getattr(a, "json", False):
+            _out({"ok": False, "error": message}, as_json=True)
+        else:
+            print(f"agentdescent serve: {message}", file=sys.stderr)
+        return 2
+    if not is_loopback_host(getattr(a, "host", None)):
+        print(f"agentdescent serve: WARNING: serving on {a.host}:{a.port} with no "
+              "authentication; anyone who can reach it can read every run in the "
+              "store.", file=sys.stderr)
     # Bind before announcing the URL: a busy or invalid --port used to print
     # the banner and then die with a traceback (exit 1), so a backgrounded
     # panel looked up. Same contract as `mcp --transport streamable-http`
@@ -6202,6 +6224,9 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("serve", help="serve a read-only run panel on loopback, for a host UI")
     s.add_argument("--host", default=runstore.DEFAULT_HTTP_HOST)
     s.add_argument("--port", type=int, default=runstore.DEFAULT_HTTP_PORT)
+    s.add_argument("--allow-remote", action="store_true",
+                   help="allow a non-loopback --host (the panel has no "
+                        "authentication and lists every run in the store)")
     s.set_defaults(fn=cmd_serve)
 
     s = sub.add_parser("mcp", help="serve the tools over MCP (stdio by default; needs agentdescent[mcp])")
