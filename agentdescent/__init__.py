@@ -383,6 +383,7 @@ from .promotion import (
     ProofEvidence,
     PromotionRequest,
     PromotionDecision,
+    ReviewCost,
     promote,
 )
 from .trust_evidence import TrustEvidence, build_trust_evidence
@@ -922,6 +923,7 @@ __all__ = [
     "ProofEvidence",
     "PromotionRequest",
     "PromotionDecision",
+    "ReviewCost",
     "promote",
     "PromotionLedger",
     "ReleaseRecord",

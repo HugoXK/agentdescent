@@ -126,6 +126,30 @@ For a reproducible policy, pass a JSON object:
 
 Unknown keys are refused: a typo must not silently relax a gate.
 
+## What a review costs
+
+A promotion also has a human price, and it is not linear in the reward delta: a
++0.02 diff spread over forty files spends more of the team's attention than a
++0.02 diff in one file. [`ReviewCost`](api.md#reviewcost) records the diff's
+shape -- files changed, lines changed, blast radius, risk tier, and how many
+evidence items a reviewer must read -- and estimates `review_minutes` with the
+documented constants in `agentdescent/promotion.py` (`REVIEW_BASE_MINUTES`,
+`REVIEW_MINUTES_PER_FILE`, ...). The estimate is arithmetic on measured inputs,
+not a model, and `to_dict()` returns those inputs beside it.
+
+Two opt-in limits on `PromotionRules` act on it, and both default to `0`, which
+means off:
+
+- `max_review_minutes` defers a candidate whose estimate exceeds the budget;
+- `max_review_cost` does the same on the weighted cost before the fixed base.
+
+When a candidate is deferred for cost, the reason says to batch it with other
+promotions rather than review it alone. The decision's evidence also carries
+`attention_per_accepted_gain` -- review minutes per +0.01 of held-out gain --
+whenever a review cost and a positive eval delta are both present. With both
+limits at their defaults the decision, its evidence hash and its decision hash
+are exactly what they were before the fields existed.
+
 `--contamination` and `--approval` default to `unknown`, which is not the same
 as "clean" or "approved". An unknown value leaves the corresponding evidence
 missing, and the promotion decision defers. Pass `--clean` / `--contaminated`
