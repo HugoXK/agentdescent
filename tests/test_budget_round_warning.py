@@ -52,12 +52,13 @@ def test_plan_includes_budget_warning(tmp_path, capsys):
     spec = _spec(tmp_path)
     path = tmp_path / "spec.json"
     path.write_text(json.dumps(spec.to_dict()), encoding="utf-8")
-    code = cli.main(["plan", str(path), "--budget", "0.05", "--usd-per-call", "0.01"])
+    code = cli.main(["plan", str(path), "--budget", "0.05", "--usd-per-call", "0.01",
+                     "--json"])
     assert code == 0
     payload = json.loads(capsys.readouterr().out)
     assert any("between rounds" in w and "overshoot" in w for w in payload["warnings"])
     # No budget flag: quiet even with a price.
-    cli.main(["plan", str(path), "--usd-per-call", "0.01"])
+    cli.main(["plan", str(path), "--usd-per-call", "0.01", "--json"])
     payload2 = json.loads(capsys.readouterr().out)
     assert not any("overshoot" in w for w in payload2["warnings"])
 

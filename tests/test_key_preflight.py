@@ -107,12 +107,12 @@ def test_plan_reports_the_named_key(tmp_path, monkeypatch, capsys):
     path = tmp_path / "spec.json"
     path.write_text(json.dumps(spec.to_dict()))
     monkeypatch.setenv("OPENAI_API_KEY", "unrelated")
-    assert cli.main(["plan", str(path)]) in (0, 1)
+    assert cli.main(["plan", str(path), "--json"]) in (0, 1)
     warnings = json.loads(capsys.readouterr().out)["warnings"]
     assert any("X_KEY" in w for w in warnings), warnings
     monkeypatch.setenv("X_KEY", "k")
     monkeypatch.delenv("OPENAI_API_KEY")
-    cli.main(["plan", str(path)])
+    cli.main(["plan", str(path), "--json"])
     assert not [w for w in json.loads(capsys.readouterr().out)["warnings"]
                 if "openai_compatible" in w]
 

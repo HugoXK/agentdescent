@@ -2063,6 +2063,112 @@ def plan_payload(spec: EvolveSpec, *, usd_per_call: Optional[float] = None,
     return payload
 
 
+#: The sentence `evolve()` warns with when the held-out set is too small. `plan`
+#: records it as a note, so the human form reroutes it to stderr as a warning
+#: (the same line `evolve` prints) instead of hiding it near the JSON's bottom.
+_HELD_OUT_NOTE = "the held-out set has only"
+
+
+def _plan_target_line(payload: Dict[str, Any]) -> str:
+    """First human line of `plan`: what is evolved, by which algorithm card."""
+    spec = payload.get("spec") or {}
+    kind = payload.get("kind") or spec.get("kind") or "?"
+    target = spec.get("target") or "?"
+    line = f"ok: {kind} {target}"
+    algo = payload.get("algorithm")
+    if algo:
+        # `plan_payload` stores the algorithm *card*, not its name (#919), so
+        # take the label and the fidelity straight from the card; a bare name
+        # (an older payload) still resolves through the registry.
+        if isinstance(algo, dict):
+            name, fidelity = algo.get("name"), algo.get("fidelity")
+        else:
+            name, fidelity = algo, None
+        if name:
+            line += f"  algorithm={name}"
+            if fidelity:
+                line += f" ({fidelity})"
+            elif not isinstance(algo, dict):
+                try:
+                    from . import algorithms
+
+                    line += f" ({algorithms.get(name).fidelity})"
+                except Exception:  # noqa: BLE001 - a label must never fail a valid plan
+                    pass
+    return line
+
+
+def _plan_agent_line(spec: Dict[str, Any]) -> Optional[str]:
+    """The `agent:` line, when the spec names one; keys are reported, never read."""
+    agent = spec.get("agent")
+    block = agent if isinstance(agent, dict) else {}
+    ref = agent if isinstance(agent, str) else block.get("ref")
+    if not ref:
+        return None
+    line = f"agent: {ref}"
+    if block.get("model"):
+        line += f" {block['model']}"
+    if block.get("default_base_url"):
+        line += f" @ {block['default_base_url']}"
+    key_env = block.get("api_key_env")
+    if key_env:
+        try:
+            present = bool(doctor_report()["provider_keys_present"].get(key_env))
+        except Exception:  # noqa: BLE001 - a hint, not a preflight decision
+            present = bool(os.environ.get(key_env))
+        line += f" (key {key_env}: {'set' if present else 'not set'})"
+    return line
+
+
+def _print_plan(payload: Dict[str, Any], *, spec_path: str,
+                next_line: Optional[str] = None,
+                printed: Optional[set] = None) -> None:
+    """Print the human `plan` summary; warnings and the held-out note go to stderr.
+
+    `payload` is exactly the object `--json` prints, so both surfaces carry the
+    same facts and `--json` stays byte-identical (#919). `printed` holds lines an
+    earlier report already showed (`algorithms run` prints init's report first),
+    so a warning is never repeated.
+    """
+    already = set(printed or ())
+    for line in payload.get("warnings") or []:
+        if line not in already:
+            print(f"warning: {line}", file=sys.stderr)
+            already.add(line)
+    notes = list(payload.get("notes") or [])
+    for line in notes:
+        if line.startswith(_HELD_OUT_NOTE) and line not in already:
+            print(f"warning: {line}", file=sys.stderr)
+            already.add(line)
+    est = payload.get("estimate") or {}
+    rounds, workers = est.get("rounds"), est.get("n_workers")
+    tasks = est.get("tasks", payload.get("tasks")) or 0
+    held = est.get("held_out_tasks")
+    calls = est.get("agent_calls_upper_bound")
+    summary = f"plan: {tasks} task{'' if tasks == 1 else 's'}"
+    if held is not None:
+        summary += f" ({held} held out)"
+    if rounds is not None and workers is not None:
+        summary += (f", {rounds} round{'' if rounds == 1 else 's'}"
+                    f" x {workers} worker{'' if workers == 1 else 's'}")
+    if calls is not None:
+        summary += f", up to {calls} agent calls"
+    usd = est.get("usd_upper_bound")
+    summary += (f"  (${usd:.2f} upper bound)" if usd is not None
+                else "  (no $ estimate: pass --usd-per-call)")
+    lines = [_plan_target_line(payload), summary]
+    agent = _plan_agent_line(payload.get("spec") or {})
+    if agent:
+        lines.append(agent)
+    other_notes = [n for n in notes if not n.startswith(_HELD_OUT_NOTE)]
+    for line in other_notes[:3]:
+        lines.append(f"note: {line}")
+    if len(other_notes) > 3:
+        lines.append(f"note: (+{len(other_notes) - 3} more; --json lists every note)")
+    lines.append(f"next: {next_line or f'agentdescent evolve {spec_path}'}")
+    print("\n".join(lines))
+
+
 def _apply_algorithm_flag(spec: EvolveSpec, a: argparse.Namespace) -> None:
     """`plan/evolve --algorithm ... --param ...` override the spec in memory.
 
@@ -2110,7 +2216,19 @@ def cmd_plan(a: argparse.Namespace) -> int:
         # human `error: ...` line on stderr as a spec that does not compile (#553).
         print(f"error: {payload.get('error', 'plan failed')}", file=sys.stderr)
         return 2
-    _out(payload, as_json=a.json)
+    if a.json:
+        _out(payload, as_json=True)
+    else:
+        # The human form is the default; `--json` above is the machine form and
+        # stays exactly the object it always was (#919).
+        next_line = f"agentdescent evolve {a.spec}"
+        # Keep an ad-hoc `--algorithm` / `--param` override in the suggested
+        # command: it lives in memory, not in the spec file.
+        if getattr(a, "algorithm", None):
+            next_line += f" --algorithm {a.algorithm}"
+            for param in getattr(a, "param", None) or []:
+                next_line += f" --param {param}"
+        _print_plan(payload, spec_path=a.spec, next_line=next_line)
     return 0 if payload.get("ok", True) else 2
 
 
@@ -4034,8 +4152,9 @@ def _cmd_algorithms_run(a: argparse.Namespace) -> int:
         print(f"error: {err}", file=sys.stderr)
         print(f"next: fix {out}, then {obj['next']}")
         return 2
-    _out(payload, as_json=False)
-    print(f"next: {obj['next']}")
+    # Same human form as `plan`: init's `wrote ...` lines above, then the plan
+    # summary with `next:` last -- never the JSON document (#919).
+    _print_plan(payload, spec_path=out, next_line=obj["next"], printed=printed)
     calls = (payload.get("estimate") or {}).get("agent_calls_upper_bound")
     if (getattr(a, "rounds", None) is None and getattr(a, "workers", None) is None
             and isinstance(calls, (int, float)) and calls > QUICK_TRIAL_CALLS):
