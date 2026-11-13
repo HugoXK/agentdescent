@@ -1206,9 +1206,18 @@ def count_library_skills(path: str) -> int:
 
 
 def ensure_skill_library_tree(path: str) -> List[str]:
-    """Seed ≥2 ``*/SKILL.md`` under ``path`` when fewer exist. Returns written paths."""
+    """Seed ≥2 ``*/SKILL.md`` under ``path`` when fewer exist. Returns written paths.
+
+    Every write goes through `_cannot_write`: a read-only target used to escape
+    `main()`'s `(SpecError, RunStoreError)` handler as a traceback, and it runs
+    before the `--out` makedirs, so it is also where a refusal must happen
+    before any starter lands (#1003).
+    """
     root = os.path.expanduser(path)
-    os.makedirs(root, exist_ok=True)
+    try:
+        os.makedirs(root, exist_ok=True)
+    except OSError as e:
+        raise _cannot_write(root, e) from None
     written: List[str] = []
     if count_library_skills(root) >= 2:
         return written
@@ -1218,11 +1227,17 @@ def ensure_skill_library_tree(path: str) -> List[str]:
         if name in existing:
             continue
         skill_dir = os.path.join(root, name)
-        os.makedirs(skill_dir, exist_ok=True)
+        try:
+            os.makedirs(skill_dir, exist_ok=True)
+        except OSError as e:
+            raise _cannot_write(skill_dir, e) from None
         dest = os.path.join(skill_dir, "SKILL.md")
         if not os.path.exists(dest):
-            with open(dest, "w", encoding="utf-8") as fh:
-                fh.write(body)
+            try:
+                with open(dest, "w", encoding="utf-8") as fh:
+                    fh.write(body)
+            except OSError as e:
+                raise _cannot_write(dest, e) from None
             written.append(dest)
         if count_library_skills(root) >= 2:
             break
@@ -1303,9 +1318,6 @@ def write_starter_spec(
             raise ValueError(
                 f"--agent {agent}: {why}; pick a matching ref "
                 "(see `agentdescent doctor`) or omit --agent for the default")
-    library_seeded: List[str] = []
-    if spec["kind"] == "skill_library":
-        library_seeded = ensure_skill_library_tree(path)
     column_notes: List[str] = []
     if spec["kind"] != "policy_slot" and isinstance(spec.get("data"), dict):
         columns, column_notes = detect_data_columns(data)
@@ -1318,6 +1330,11 @@ def write_starter_spec(
         os.makedirs(os.path.dirname(os.path.abspath(out)) or ".", exist_ok=True)
     except OSError as e:
         raise _cannot_write(out, e) from None
+    # Both destinations are proven writable before the seed runs, so a refused
+    # `--out` cannot leave a half-seeded skill library behind (#1003).
+    library_seeded: List[str] = []
+    if spec["kind"] == "skill_library":
+        library_seeded = ensure_skill_library_tree(path)
     providers_out = None
     providers_key_env = None
     providers_backup = None

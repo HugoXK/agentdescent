@@ -612,7 +612,11 @@ exits 2 with one `error: cannot create run store <path>: <reason>` line, or
 The artifacts written outside the store — `init --out`, `algorithms run --out`,
 and `apply --to` (a text file or a tree) — use the same shape: one
 `error: cannot write <path>: <reason>` line, or `{"ok": false, "error": ...}`
-under `--json`, with exit code 2 (#990).
+under `--json`, with exit code 2 (#990). A `skill_library` spec also writes the
+target directory itself — the starter skills are seeded there — so the target
+must be writable even when `--out` points somewhere writable, and the `--out`
+directory is proven writable before anything is seeded, so a refusal leaves no
+partially created `*/SKILL.md` behind (#1003).
 
 A run outlives the tool call that started it, but it **inherits the environment
 of the process that launched it** — including provider keys and, in sandboxed
