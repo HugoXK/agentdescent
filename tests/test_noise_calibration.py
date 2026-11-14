@@ -39,7 +39,8 @@ def test_a_strong_gain_clears_the_noise_floor():
         assert report.gain == pytest.approx(0.6)
         assert report.distinguishable is True
         assert report.verdict == "distinguishable from noise"
-        assert report.gain_over_noise > 1.0
+        # zero-spread floor: the ratio is undefined, not a 6e+08 epsilon artefact
+        assert report.gain_over_noise == 0.0
 
 
 def test_high_run_to_run_variance_widens_the_floor_and_warns():
@@ -87,3 +88,27 @@ def test_calibration_validates_its_inputs():
         calibrate_noise({})
     with pytest.raises(ValueError, match="min_effect"):
         calibrate_noise({"baseline": _runs(0.5)}, min_effect=float("nan"))
+
+
+@pytest.mark.parametrize("baseline,candidate,min_effect,distinguishable", [
+    ([_flat(0.5)], _runs(0.8), 0.0, False),          # one repeat: no floor
+    (_runs(0.5), _runs(0.52), 0.5, False),           # zero spread, below min_effect
+    (_runs(0.2), _runs(0.8), 0.0, True),             # zero spread, passes
+])
+def test_gain_over_noise_is_zero_when_the_floor_is_undefined(
+        baseline, candidate, min_effect, distinguishable):
+    report = calibrate_noise({"baseline": baseline, "candidate": candidate},
+                             min_effect=min_effect)
+    assert report.gain_over_noise == 0.0
+    assert report.distinguishable is distinguishable
+
+
+def test_gain_over_noise_keeps_the_ratio_on_a_measurable_floor():
+    report = calibrate_noise(
+        {"baseline": [_flat(0.3), _flat(0.5), _flat(0.7)],
+         "candidate": _runs(0.55)}, seed=0)
+    lo, hi = report.noise_floor
+    assert hi > lo
+    assert report.gain_over_noise == pytest.approx(
+        report.gain / ((hi - lo) / 2.0))
+    assert report.distinguishable is False

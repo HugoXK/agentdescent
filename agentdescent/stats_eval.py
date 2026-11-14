@@ -265,6 +265,11 @@ class NoiseCalibration:
     :func:`decompose_variance`. A gain is ``distinguishable`` only when it is
     larger than both the floor's half-width and ``min_effect``; otherwise it is
     noise, not promotion evidence.
+
+    ``gain_over_noise`` is the gain divided by the floor's half-width. It is
+    ``0.0`` when the gain is not positive and also when the ratio is undefined:
+    fewer than 2 baseline repeats bound no floor, and a zero-spread baseline has
+    a zero half-width. ``0.0`` there means "undefined", not "no signal".
     """
 
     noise_floor: Tuple[float, float]
@@ -353,8 +358,10 @@ def calibrate_noise(
         if candidate_values:
             candidate_mean = sum(candidate_values) / len(candidate_values)
     gain = 0.0 if candidate_mean is None else candidate_mean - baseline_mean
-    gain_over_noise = (0.0 if gain <= 0.0 else
-                       gain / max(half_width, 1e-9))
+    # The ratio is undefined without a measurable floor (fewer than 2
+    # repeats, or zero spread); report 0.0 rather than divide by an epsilon.
+    gain_over_noise = (0.0 if gain <= 0.0 or len(baseline_runs) < 2
+                       or half_width <= 0.0 else gain / half_width)
     # A gain exactly at the floor edge is still noise; the epsilon keeps a
     # floating-point representation of the edge from flipping the verdict.
     bar = max(half_width, float(min_effect))

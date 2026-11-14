@@ -332,6 +332,28 @@ class TrustEvidence:
         return body
 
 
+def _noise_refusal_note(noise: Any, *, min_effect: float) -> str:
+    """Name the actual reason a gain is refused as noise.
+
+    ``distinguishable`` is false for three causes: too few baseline repeats to
+    bound a floor, a measurable floor the gain does not clear, or a floor
+    narrower than ``min_effect`` (the effect-size bar decides). Every branch
+    keeps the phrase ``not distinguishable from noise``.
+    """
+    head = f"gain {noise.gain:+.3f} is not distinguishable from noise"
+    if noise.repeats < 2:
+        return (f"{head} (the noise floor cannot be estimated from "
+                f"{noise.repeats} baseline repeat(s); at least 2 are needed)")
+    lo, hi = noise.noise_floor
+    half_width = (hi - lo) / 2.0
+    if half_width < float(min_effect):
+        return (f"{head} (gain does not exceed min_effect "
+                f"{float(min_effect):.3f}; noise floor half-width is "
+                f"{half_width:.3f})")
+    return (f"{head} (gain does not exceed the noise floor: baseline mean "
+            f"{noise.baseline_mean:+.3f} \u00b1 {half_width:.3f})")
+
+
 def build_trust_evidence(
         before: Mapping[str, float], after: Mapping[str, float], *,
         eval_id: str = "paired", dataset_id: str = "paired", version: int = 1,
@@ -415,9 +437,7 @@ def build_trust_evidence(
             groups, expected_repeats=noise_repeats, alpha=alpha, seed=seed,
             min_effect=min_effect)
         if not noise.distinguishable:
-            lo, hi = noise.noise_floor
-            note = (f"gain {noise.gain:+.3f} is not distinguishable from noise "
-                    f"(noise floor [{lo:+.3f}, {hi:+.3f}])")
+            note = _noise_refusal_note(noise, min_effect=min_effect)
             detail = (f"{eval_result.detail}; {note}"
                       if eval_result.detail else note)
             eval_result = replace(eval_result, passed=False, detail=detail)
