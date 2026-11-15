@@ -66,8 +66,21 @@ _CREDENTIAL_COMPONENTS = frozenset((
     "apikey", "accesskey", "privatekey", "secretkey", "clientsecret",
     "apitoken", "accesstoken", "authtoken", "refreshtoken", "bearertoken",
     "password", "passwd", "pwd", "credential", "credentials", "authorization",
+    # A plural compound is still a credential in any position (`db_passwords`).
+    "passwords", "passwds", "secretkeys", "apikeys", "privatekeys",
+    "accesskeys", "clientsecrets",
 ))
-_CREDENTIAL_NOUNS = frozenset(("token", "secret"))
+_CREDENTIAL_NOUNS = frozenset(("token", "secret", "secrets"))
+#: A credential written as one word (#1095): `PGPASSWORD` is libpq's password
+#: variable and `s3secretkey` / `AWSSecretAccessKey` carry no separator, so a
+#: single-component key is matched by whole-word suffix. `tokens` ends `okens`,
+#: which is why the suffix has to be a whole credential word and not a stem.
+_CREDENTIAL_WORDS = frozenset((
+    "password", "passwd", "secret", "secretkey", "apikey", "privatekey",
+    "accesskey", "clientsecret", "credential",
+    "passwords", "passwds", "secrets", "secretkeys", "apikeys", "privatekeys",
+    "accesskeys", "clientsecrets", "credentials",
+))
 #: Two components of one credential spelling (`api` + `key`).
 _CREDENTIAL_PAIRS = frozenset((
     "apikey", "accesskey", "privatekey", "secretkey", "clientsecret",
@@ -81,12 +94,27 @@ _SECRET_VALUE = re.compile(
     r"Bearer\s+[A-Za-z0-9._-]{10,})")
 
 
+def _singular(word: str) -> Tuple[str, ...]:
+    """``word`` and, when it ends in a plural ``s``, its singular (#1095)."""
+    if len(word) > 1 and word.endswith("s"):
+        return (word, word[:-1])
+    return (word,)
+
+
+def _pair_spells_a_credential(first: str, second: str) -> bool:
+    """`api` + `keys`, `client` + `secrets`: one plural `s` is still the pair."""
+    return any(left + right in _CREDENTIAL_PAIRS
+               for left in _singular(first) for right in _singular(second))
+
+
 def _is_secret_key(key: Any) -> bool:
     """True when a whole component of ``key`` names a credential (#1070).
 
     ``token_count`` and ``secret_free`` measure credentials, they are not one;
-    ``client_secret`` and ``api_key`` are, in any spelling. Values are still
-    filtered by :data:`_SECRET_VALUE` wherever they appear.
+    ``client_secret`` and ``api_key`` are, in any spelling. A credential that is
+    one word (`PGPASSWORD`, `s3secretkey`) has no component to see, so it is
+    matched by whole-word suffix instead (#1095). Values are still filtered by
+    :data:`_SECRET_VALUE` wherever they appear.
     """
     parts = [part for part in _KEY_PARTS.split(str(key).lower()) if part]
     if not parts:
@@ -95,7 +123,10 @@ def _is_secret_key(key: Any) -> bool:
         return True
     if parts[-1] in _CREDENTIAL_NOUNS:
         return True
-    return any(first + second in _CREDENTIAL_PAIRS
+    if len(parts) == 1 and any(parts[0].endswith(word)
+                               for word in _CREDENTIAL_WORDS):
+        return True
+    return any(_pair_spells_a_credential(first, second)
                for first, second in zip(parts, parts[1:]))
 
 
