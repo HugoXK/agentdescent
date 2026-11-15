@@ -51,6 +51,7 @@ from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, Iterator, List, Optional, Sequence
 
 from .evolution import EvolutionResult, RoundInfo
+from .surface_common import scrub_host_env
 
 __all__ = [
     "STATES",
@@ -678,7 +679,12 @@ def launch(rd: RunDir, *, budget_usd: Optional[float] = None,
         argv += ["--budget", str(budget_usd)]
     if usd_per_call is not None:
         argv += ["--usd-per-call", str(usd_per_call)]
-    child_env = {**os.environ, "PYTHONPATH": _child_pythonpath(), **(env or {})}
+    # Scrub the merged dict, not just the ambient one: a caller-supplied
+    # ``env`` is spread last and could otherwise put ``MCP_*``/``DSH_*`` back
+    # into the run after the scrub (#1082). ``PYTHONPATH`` carries no marker
+    # prefix, so it survives either way.
+    child_env = scrub_host_env({**os.environ, "PYTHONPATH": _child_pythonpath(),
+                                **(env or {})})
     boot = subprocess.run([_python(), "-c", _BOOTSTRAP, rd.log_path, *argv],
                           capture_output=True, text=True, cwd=rd.path, env=child_env)
     if boot.returncode != 0 or not boot.stdout.strip().isdigit():

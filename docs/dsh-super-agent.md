@@ -108,6 +108,17 @@ your tree, under the operator's write allowlist).
   the Ticket.
 - `plan` is the budget line: it estimates cost without executing. Read it before
   `start`, and put the number in the Ticket.
+- A detached run no longer inherits the worker session: `launch` drops every
+  host-session marker (`SESSION_MARKERS`: `DSH_*`, `CLAUDE*`, `CODEX*`, `MCP_*`,
+  the OpenCode config carriers, `XDG_CONFIG_HOME`) before it starts the
+  grandchild, so the worker's session identity and MCP config stay with the
+  host while the API keys the run needs are passed through (`#1082`). The list
+  is the one the candidate worker drops, not a second copy of it. The host's
+  config/home directories (`DETACHED_KEEP_VARS`: `CLAUDE_CONFIG_DIR`,
+  `CODEX_HOME`, `DSH_HOME`, `XDG_CONFIG_HOME`) are kept: they name
+  configuration, not session, and this run resolves a host's real home from
+  them for `isolate: false` workers and for `agentdescent start` from a
+  terminal.
 
 ## 6. Long runs, Reports and Attention
 

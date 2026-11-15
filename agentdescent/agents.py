@@ -28,10 +28,14 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from typing import (Any, Callable, Dict, List, Mapping, Optional, Protocol,
-                    Sequence, Tuple, runtime_checkable)
+                    Sequence, runtime_checkable)
 
 from .evolvable import ContractError
 from ._subprocess import decode_output
+# The host-session denylist is shared with the detached-run scrub in
+# ``surface_common``: it used to be two lists, and the shorter one let
+# OpenCode/OpenAI-Agents markers through (#1082).
+from .surface_common import SESSION_MARKERS, is_session_marker
 
 Completion = Callable[[str], str]
 
@@ -270,28 +274,6 @@ class WorkspaceAgent(Protocol):
     def in_workspace(self, path: str) -> Completion: ...
 
 
-#: Environment variables a host agent sets in its own session and its children
-#: inherit. A worker that sees them believes it is *inside* that session:
-#: Claude Code refuses to start, DSH loads the parent's profile, and a worker
-#: whose host runs this package's MCP server would call it recursively.
-SESSION_MARKERS: Tuple[str, ...] = (
-    "CLAUDECODE", "CLAUDE_CODE_", "CLAUDE_CONFIG_DIR", "CODEX_", "DSH_",
-    "OPENAI_AGENT_", "MCP_",
-    # OpenCode reads three of these, and redirecting only the directory is not
-    # isolation: `OPENCODE_CONFIG` (a file) and `OPENCODE_CONFIG_CONTENT`
-    # (inline JSON) both win over `OPENCODE_CONFIG_DIR` -- measured, a config
-    # named by `OPENCODE_CONFIG` still supplied its MCP servers with the dir
-    # pointed at an empty directory. They are dropped by name rather than by an
-    # "OPENCODE_" prefix on purpose: `OPENCODE_API_KEY` is a provider
-    # credential, and a worker needs its keys.
-    "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT",
-    # Dropped so the redirect below can take: `setdefault` cannot override a
-    # value the parent already exported, and this one usually is exported.
-    # It is broader than the others -- every XDG-respecting tool the worker
-    # runs sees the workspace copy -- which is the point of an isolated worker.
-    "XDG_CONFIG_HOME",
-)
-
 #: Set for every worker so a tool the worker reaches (this package's own MCP
 #: server, when the plugin that hosts it is being evolved) can tell it is inside
 #: a run and refuse to start another. See ``agentdescent.mcp``.
@@ -338,8 +320,7 @@ def worker_env(workspace: Optional[str], extra: Optional[Mapping[str, str]] = No
     the user's setup.
     """
     env = {k: v for k, v in os.environ.items()
-           if not (isolate and any(k == m.rstrip("_") or k.startswith(m)
-                                   for m in SESSION_MARKERS))}
+           if not (isolate and is_session_marker(k))}
     env[NESTED_MARKER] = "1"
     if workspace:
         # `cwd=` moves the process, not `$PWD`, and a runtime that resolves its
