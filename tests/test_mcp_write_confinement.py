@@ -1,5 +1,6 @@
 """MCP apply must obey the same filesystem boundary as other write tools."""
 
+import json
 import os
 from pathlib import Path
 
@@ -144,3 +145,126 @@ def test_apply_does_not_reload_the_source_after_checking_paths(tmp_path, monkeyp
         assert sorted(p.name for p in dest.iterdir()) == ["first.txt"]
     else:
         assert dest.read_text(encoding="utf-8") == "first"
+
+
+# -- the CLI is a write surface too (#1082) ---------------------------------
+
+def _run_cli(argv, capsys):
+    from agentdescent import cli
+
+    code = cli.main(argv)
+    return code, capsys.readouterr()
+
+
+def test_cli_apply_refuses_a_destination_outside_the_allowlist(
+        tmp_path, capsys, monkeypatch):
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    src = tmp_path / "source.txt"
+    src.write_text("new", encoding="utf-8")
+    dest = tmp_path / "outside.txt"
+    monkeypatch.setenv("AGENTDESCENT_SURFACE_WRITE_DIRS", str(allowed))
+    code, out = _run_cli(["apply", "--from", str(src), "--to", str(dest)], capsys)
+    assert code == 2
+    assert "write allowlist" in out.err
+    assert not dest.exists()
+
+
+def test_cli_apply_refuses_a_tree_outside_the_allowlist(tmp_path, capsys, monkeypatch):
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    src = tmp_path / "source"
+    src.mkdir()
+    (src / "rules.md").write_text("RULE: new\n", encoding="utf-8")
+    dest = tmp_path / "outside"
+    monkeypatch.setenv("AGENTDESCENT_SURFACE_WRITE_DIRS", str(allowed))
+    code, out = _run_cli(["apply", "--from", str(src), "--to", str(dest)], capsys)
+    assert code == 2
+    assert "write allowlist" in out.err
+    assert not dest.exists()
+
+
+def test_cli_apply_writes_inside_the_allowlist(tmp_path, capsys, monkeypatch):
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    src = tmp_path / "source.txt"
+    src.write_text("new", encoding="utf-8")
+    dest = allowed / "result.txt"
+    monkeypatch.setenv("AGENTDESCENT_SURFACE_WRITE_DIRS", str(allowed))
+    code, out = _run_cli(["apply", "--from", str(src), "--to", str(dest)], capsys)
+    assert code == 0
+    assert dest.read_text(encoding="utf-8") == "new"
+
+
+def test_cli_apply_is_unchanged_when_the_allowlist_is_unset(
+        tmp_path, capsys, monkeypatch):
+    monkeypatch.delenv("AGENTDESCENT_SURFACE_WRITE_DIRS", raising=False)
+    src = tmp_path / "source.txt"
+    src.write_text("new", encoding="utf-8")
+    dest = tmp_path / "anywhere" / "result.txt"
+    dest.parent.mkdir()
+    code, _ = _run_cli(["apply", "--from", str(src), "--to", str(dest)], capsys)
+    assert code == 0
+    assert dest.read_text(encoding="utf-8") == "new"
+
+
+def test_cli_apply_refuses_the_backup_slot_outside_the_allowlist(
+        tmp_path, capsys, monkeypatch):
+    # The `.bak-N` copy is a write too: with only the destination itself allowed,
+    # the slot is outside, so the apply must stop before the destination changes.
+    dest = tmp_path / "result.txt"
+    dest.write_text("old", encoding="utf-8")
+    src = tmp_path / "source.txt"
+    src.write_text("new", encoding="utf-8")
+    monkeypatch.setenv("AGENTDESCENT_SURFACE_WRITE_DIRS", str(dest))
+    code, out = _run_cli(["apply", "--from", str(src), "--to", str(dest)], capsys)
+    assert code == 2
+    assert "write allowlist" in out.err
+    assert dest.read_text(encoding="utf-8") == "old"
+    assert not (tmp_path / "result.txt.bak-0").exists()
+
+
+def test_show_reports_a_refused_target_in_the_apply_plan(tmp_path, capsys, monkeypatch):
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    store, rid = _make_library_run(tmp_path)
+    monkeypatch.setenv("AGENTDESCENT_SURFACE_WRITE_DIRS", str(allowed))
+    code, out = _run_cli(["--store", store, "show", rid, "--json"], capsys)
+    assert code == 0
+    plan = json.loads(out.out)["apply_plan"]
+    assert "write allowlist" in plan["error"]
+
+
+def test_cli_apply_refuses_everything_when_the_allowlist_is_empty(
+        tmp_path, capsys, monkeypatch):
+    # An explicitly empty value is an instruction, not "unset": fail closed.
+    src = tmp_path / "source.txt"
+    src.write_text("new", encoding="utf-8")
+    dest = tmp_path / "result.txt"
+    monkeypatch.setenv("AGENTDESCENT_SURFACE_WRITE_DIRS", "")
+    code, out = _run_cli(["apply", "--from", str(src), "--to", str(dest)], capsys)
+    assert code == 2
+    assert "write allowlist" in out.err
+    assert not dest.exists()
+
+
+def test_cli_apply_in_a_nested_worker_defaults_to_cwd_and_home(
+        tmp_path, capsys, monkeypatch):
+    # A host worker with no allowlist named still does not get "write anywhere":
+    # the nested default is the run's cwd plus $AGENTDESCENT_HOME (#1082).
+    monkeypatch.delenv("AGENTDESCENT_SURFACE_WRITE_DIRS", raising=False)
+    monkeypatch.setenv("AGENTDESCENT_NESTED", "1")
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    src = tmp_path / "source.txt"
+    src.write_text("new", encoding="utf-8")
+    outside = tmp_path / "outside.txt"
+    code, out = _run_cli(["apply", "--from", str(src), "--to", str(outside)], capsys)
+    assert code == 2
+    assert "write allowlist" in out.err
+    assert not outside.exists()
+    inside = work / "result.txt"
+    code, _ = _run_cli(["apply", "--from", str(src), "--to", str(inside)], capsys)
+    assert code == 0
+    assert inside.read_text(encoding="utf-8") == "new"

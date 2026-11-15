@@ -259,7 +259,12 @@ all ~39 tools as the primary path.
   between sessions, so nothing blocks on `evolve()`.
 * **`apply` is its own tool and says it is destructive.** The evolved artifact
   reaches your real directory only through it, after `show` has displayed the
-  diff and the plan (`write_to(dry_run=True)`), and it backs up first.
+  diff and the plan (`write_to(dry_run=True)`), and it backs up first. The CLI
+  `apply` obeys `AGENTDESCENT_SURFACE_WRITE_DIRS` too, and in a nested worker
+  (`AGENTDESCENT_NESTED=1`) the allowlist defaults to the run's cwd plus
+  `$AGENTDESCENT_HOME` even when it is unset; outside a worker it is only
+  enforced when the variable is set. A refused write exits 2 before anything,
+  including the `.bak-N` copy, touches disk.
 * **Questions about an archive are read-only tools.** `safety` (safe to keep
   seeding from?), `portfolio` (layer ranking and a suggested budget split) and
   `audit_trace` (one adoption's evidence rings) return the same JSON as the

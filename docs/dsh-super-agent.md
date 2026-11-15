@@ -96,6 +96,8 @@ your tree, under the operator's write allowlist).
   default is the server's cwd plus `$AGENTDESCENT_HOME`
   (`agentdescent/surface_common.py:178-190`); an empty value refuses every MCP
   write path, which is the safest setting for a worker that should only plan.
+  The CLI `apply` reads the same variable, and inside a worker the server
+  default applies there as well even when the variable is unset (#1082).
   `algorithm_spec` obeys this allowlist from the release that carries
   [`#1018`](https://github.com/ThinkFlowLab/agentdescent/issues/1018) (fix in
   [`#1022`](https://github.com/ThinkFlowLab/agentdescent/pull/1022)). On an older

@@ -2920,6 +2920,25 @@ def _partial_show(rd: "runstore.RunDir", st: Any) -> Dict[str, Any]:
     return out
 
 
+def _refuse_plan_outside_write_dirs(payload: Dict[str, Any],
+                                   target: Optional[str]) -> None:
+    """Say so when the boundary would refuse the write ``apply_plan`` describes.
+
+    ``show`` writes nothing, so it still renders the diff; what it must not do is
+    print a plan naming a file ``apply`` would then refuse (#1082).
+    """
+    plan = payload.get("apply_plan")
+    if not target or not isinstance(plan, dict) or "error" in plan:
+        return
+    guard = _operator_write_guard()
+    if guard is None:
+        return
+    try:
+        guard(os.path.expanduser(target), "to")
+    except runstore.RunStoreError as e:
+        payload["apply_plan"] = {"error": str(e)}
+
+
 def show_payload(run_id: str, *, store: Optional[str] = None, diff: bool = True,
                  max_chars: int = 40_000) -> Dict[str, Any]:
     run_id = resolve_run_id(run_id, store=store) or run_id
@@ -2993,6 +3012,7 @@ def show_payload(run_id: str, *, store: Optional[str] = None, diff: bool = True,
     if spec.kind == "text":
         payload["rendered"] = result.rendered[:max_chars]
         payload["apply_plan"] = _text_plan(os.path.expanduser(spec.target), result.rendered)
+        _refuse_plan_outside_write_dirs(payload, spec.target)
         return payload
     payload["files"] = sorted(result.state)
     if diff:
@@ -3006,6 +3026,7 @@ def show_payload(run_id: str, *, store: Optional[str] = None, diff: bool = True,
             payload["apply_plan"] = result.write_to(os.path.expanduser(spec.target), dry_run=True)
         except Exception as e:  # noqa: BLE001
             payload["apply_plan"] = {"error": str(e)}
+        _refuse_plan_outside_write_dirs(payload, spec.target)
     return payload
 
 
@@ -3231,6 +3252,35 @@ def _grok_bot_apply_message(*, run_id: Optional[str] = None,
         f"grok-bot does not allow direct writes ({user_dir} is read-only); "
         "materialize with `agentdescent apply <run_id> --to <dir>` and ask "
         "Grok Bot to save each SKILL.md as a user skill")
+
+
+def _operator_write_guard() -> Optional[Callable[[str, str], Any]]:
+    """The CLI's write boundary, or ``None`` for today's allow-anywhere (#1082).
+
+    An operator who sets ``AGENTDESCENT_SURFACE_WRITE_DIRS`` means it, including
+    the empty value (refuse every write). A host worker that sets nothing still
+    does not write anywhere: inside a worker the boundary defaults to the MCP
+    one -- the run's cwd plus ``$AGENTDESCENT_HOME`` -- because a nested process
+    writing outside its run is the escape this guards against. Outside a worker,
+    unset keeps the behaviour every ``apply --to <path>`` already has.
+    """
+    chosen = "AGENTDESCENT_SURFACE_WRITE_DIRS" in os.environ
+    if not chosen and not os.environ.get(NESTED_ENV):
+        return None
+
+    from .surface_common import (SurfaceError, ensure_write_path,
+                                 surface_write_dirs_from_env)
+
+    allow = surface_write_dirs_from_env()
+
+    def check_write(path: str, name: str) -> None:
+        try:
+            ensure_write_path(path, name=name, allow=allow)
+        except SurfaceError as e:
+            # The CLI's one error envelope is RunStoreError -> exit 2.
+            raise runstore.RunStoreError(str(e)) from None
+
+    return check_write
 
 
 def apply_with_target(run_id: Optional[str] = None, *, to: Optional[str] = None,
@@ -3563,6 +3613,7 @@ def cmd_apply(a: argparse.Namespace) -> int:
             home=getattr(a, "home", None),
             dry_run=a.dry_run,
             backup=not a.no_backup,
+            check_write=_operator_write_guard(),
         )
     except runstore.RunStoreError as e:
         if getattr(a, "json", False):
