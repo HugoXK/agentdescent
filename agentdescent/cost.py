@@ -33,11 +33,14 @@ This module is the second ledger, at transaction grain:
 
 Placement of the price is caller-supplied by design.
 :class:`~agentdescent.policies.MergeContext` carries ``diff_cost`` when a
-caller supplies one, and the policy falls back to the cost the
-contributing
-:class:`~agentdescent.evolvable.EvidenceCard`\\ s recorded, which is what the
-loop already collects. ``aggregator._decide`` does not fill ``diff_cost`` yet,
-so the card fallback is what every in-tree caller takes today.
+caller supplies one, and a caller that wants the gate to price a diff passes
+``Cost.from_usage(usage)`` there. The policy otherwise falls back to the cost
+the contributing
+:class:`~agentdescent.evolvable.EvidenceCard`\\ s recorded -- and in-tree no
+producer writes ``cost_tokens``/``cost_wallclock`` onto a card, so that
+fallback is unknown, never a free diff. ``aggregator._decide`` does not fill
+``diff_cost`` yet, so the card fallback is what every in-tree caller takes
+today.
 ``agentdescent.promotion.PromotionRules.require_cost``
 is the matching fail-closed bar on the promotion side.
 
@@ -155,10 +158,12 @@ class Cost:
     def from_cards(cls, cards: Iterable[Any]) -> "Cost":
         """The cost the contributing evidence cards recorded for this diff.
 
-        The loop already records one proposing rollout's usage on each card, so
-        the diff's price is the sum over the cards that justify it. A card with
-        no measurement contributes nothing; a run where no card measured
-        anything yields ``Cost()`` -- unknown, not free.
+        In-tree this is always unknown: no producer writes ``cost_tokens`` or
+        ``cost_wallclock`` onto a card (``evolution.py`` and ``async_evolve.py``
+        build cards without them), so the sum is empty and this returns
+        ``Cost()`` -- unknown, not free. A caller that wants the gate to price a
+        diff passes the measurement as ``MergeContext.diff_cost =
+        Cost.from_usage(usage)`` instead of relying on the cards.
         """
         tokens = 0
         wallclock = 0.0
