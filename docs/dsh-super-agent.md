@@ -131,6 +131,80 @@ Do not start a nested run from inside a run's turn. A worker that evolves a
 harness which itself starts runs multiplies cost with no ceiling — keep one run
 per Ticket, and make the second one a follow-up Ticket.
 
+### Handing a run off instead of holding the slot
+
+A worker's background shell job is killed at 30 minutes; an evolution run is
+often longer. Start it outside the worker's process group and give the slot
+back:
+
+```bash
+bash scripts/dsh-superagent-run.sh --store "$RUN_STORE" -- \
+    agentdescent --store "$RUN_STORE" evolve spec.json --detach \
+    --budget 5 --usd-per-call 0.01
+# waiting 3f9c1a… round 2 /runs/3f9c1a…
+# report /runs/3f9c1a…/waiting.json
+```
+
+`--budget` needs `--usd-per-call`: the engine counts calls, and a per-call price
+is the only way a dollar figure becomes a stop rule. With one and not the other
+the CLI exits 2 before creating anything (`budget_usd needs usd_per_call`), so
+the pair is what makes the run stop itself and write why.
+
+Two stores, one variable: the wrapper's `--store` is where the report goes, and
+the run's store is the CLI's own `--store`, so pass the same value on both. The
+wrapper cannot see the child's store — give it only to the wrapper and `evolve`
+writes to the default store, the wrapper waits out its deadline and reports
+`found: false`, and the read-back below cannot find the run.
+
+It starts the command in a detached `tmux` session (`setsid` when tmux is
+absent), waits for the run's own `status.json`, writes `waiting.json` beside it
+with `run_id`, `round`, `state`, `run_dir`, `driver`, `session` and `log`, and
+exits 0 within seconds. Post the run id, the round and the run directory on the
+Ticket and end the turn; nothing holds the slot.
+
+A store is reused for every Ticket, so it already holds earlier runs. The
+wrapper only reports a `status.json` that appears or changes after it launches,
+so a handoff into a used store reports `found: false` until its own run writes
+one, instead of naming a finished run from last week. The tmux session carries a
+per-launch suffix for the same reason: two handoffs into stores both called
+`runs` get two sessions, not one shared, refused name. One live handoff per
+store: two launched into one store inside the same wait window both read that
+store's `waiting.json` and the second can report the first's run, so give each
+handoff its own store or wait for the first to finish.
+
+Read it back from a follow-up Trigger, a person, or a scheduled check — the
+wrapper adds no daemon and no scheduler. `--store` is a **global** flag, so it
+goes before the verb: after the verb the CLI exits 2 with `unrecognized
+arguments`, and without it the run is looked up in the default store
+(`~/.agentdescent/runs`, or `$AGENTDESCENT_HOME/runs`), not in the handoff's.
+
+```bash
+agentdescent --store "$RUN_STORE" status "$RUN_ID" --brief   # one line; safe to poll
+agentdescent --store "$RUN_STORE" show "$RUN_ID"             # the artifact, once there is one
+```
+
+Measured against a handoff of a fake run, a second in — `status` keeps it to
+one line, and `show` reports the gap instead of inventing a result:
+
+```console
+$ agentdescent --store "$RUN_STORE" status fake-run-1 --brief
+fake-run-1  running   round 2      calls=0  skill_dir:./skill
+$ agentdescent --store "$RUN_STORE" show fake-run-1
+run_id: fake-run-1
+state: running
+note: no result yet
+```
+
+What the wrapper changes, and what it cannot:
+
+| failure | what happens |
+|---|---|
+| the worker's turn ends, or its background job is killed | with the `--detach` above, the run is in its own session — not the worker's process group, and not the wrapper's tmux session either, which holds only the launcher — so it keeps going when either ends |
+| no tmux on the host (`setsid` fallback) | survives the group kill, not a reboot; the run directory is still the handoff |
+| the host restarts | the run directory reads `failed`; `agentdescent resume <run_id>` continues it |
+| an orphan outlives the Ticket | `agentdescent --store "$RUN_STORE" cancel <run_id>` sends SIGTERM to the run's process group; `tmux kill-session -t <session>` only stops the wrapper's own launcher, because a `--detach` run is not in that session |
+| the budget runs out | the run stops itself and writes why into its status; the follow-up reads it, nobody is waiting |
+
 ## 7. The check
 
 ```bash
