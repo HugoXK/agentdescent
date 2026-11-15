@@ -279,7 +279,10 @@ Two habits worth keeping from the first run:
 * `--probe` when the run is remote and the answer has to be known now: it sends
   one minimal call per model-backed agent and reflector, so an expired plan, a
   wrong model name or a dead endpoint is refused before a run store entry is
-  written. CLI agents are reported as `probe: … skipped (cli agent)` because one
+  written. If the probe fails, the last line is the repair action (not
+  `next: agentdescent evolve`); `then:` is `plan <spec> --probe` to re-test,
+  and `--json` sets `ready: false` while leaving `ok` about the plan itself.
+  CLI agents are reported as `probe: … skipped (cli agent)` because one
   call would cost a whole session.
 * `--budget 5 --usd-per-call 0.02` on the first real run. A dollar budget
   needs a per-call price (the engine counts calls; a tool-using agent's price

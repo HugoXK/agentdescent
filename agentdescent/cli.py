@@ -2381,10 +2381,19 @@ def _plan_agent_line(spec: Dict[str, Any]) -> Optional[str]:
     return line
 
 
+def _first_failed_probe_next(probe: Mapping[str, Any]) -> str:
+    """The repair action from the first refused probe row (#1093)."""
+    for row in probe.get("rows") or []:
+        if row.get("state") == "failed" and row.get("next"):
+            return str(row["next"])
+    return "run `agentdescent doctor`, then re-run plan --probe"
+
+
 def _print_plan(payload: Dict[str, Any], *, spec_path: str,
                 next_line: Optional[str] = None,
                 printed: Optional[set] = None,
-                probe_lines: Optional[Sequence[str]] = None) -> None:
+                probe_lines: Optional[Sequence[str]] = None,
+                then_line: Optional[str] = None) -> None:
     """Print the human `plan` summary; warnings and the held-out note go to stderr.
 
     `payload` is exactly the object `--json` prints, so both surfaces carry the
@@ -2429,7 +2438,11 @@ def _print_plan(payload: Dict[str, Any], *, spec_path: str,
         lines.append(f"note: (+{len(other_notes) - 3} more; --json lists every note)")
     # The preflight (#1048) sits between the plan and the step it qualifies:
     # `next:` stays the last line, so a reader who stops early still sees it.
+    # When the probe refused, that last line is the repair action, not evolve
+    # (#1093); `then:` names the command that re-runs the probe after the fix.
     lines.extend(probe_lines or ())
+    if then_line:
+        lines.append(f"then: {then_line}")
     lines.append(f"next: {next_line or f'agentdescent evolve {spec_path}'}")
     print("\n".join(lines))
 
@@ -2497,24 +2510,35 @@ def cmd_plan(a: argparse.Namespace) -> int:
         print(f"error: {payload.get('error', 'plan failed')}", file=sys.stderr)
         return 2
     probe = _probe_if_asked(a, spec) if payload.get("ok", True) else None
+    # Default next is evolve; a refused probe replaces it with the repair
+    # action so a reader (or a host following `next`) does not start a run
+    # that cannot work (#1093). `ok` stays about the plan/spec itself.
+    next_line = f"agentdescent evolve {a.spec}"
+    # Keep an ad-hoc `--algorithm` / `--param` override in the suggested
+    # command: it lives in memory, not in the spec file.
+    if getattr(a, "algorithm", None):
+        next_line += f" --algorithm {a.algorithm}"
+        for param in getattr(a, "param", None) or []:
+            next_line += f" --param {param}"
+    then_line = None
     if probe is not None:
         payload["probe"] = probe
+        payload["ready"] = bool(probe.get("ok", True))
+        if not payload["ready"]:
+            next_line = _first_failed_probe_next(probe)
+            payload["next"] = next_line
+            then_line = f"agentdescent plan {a.spec} --probe"
     if a.json:
         _out(payload, as_json=True)
     else:
         # The human form is the default; `--json` above is the machine form and
-        # stays exactly the object it always was (#919).
-        next_line = f"agentdescent evolve {a.spec}"
-        # Keep an ad-hoc `--algorithm` / `--param` override in the suggested
-        # command: it lives in memory, not in the spec file.
-        if getattr(a, "algorithm", None):
-            next_line += f" --algorithm {a.algorithm}"
-            for param in getattr(a, "param", None) or []:
-                next_line += f" --param {param}"
+        # stays exactly the object it always was (#919) when the probe is not
+        # asked. `ready` is added only when `--probe` ran.
         from .probe import probe_lines as _probe_lines
 
         _print_plan(payload, spec_path=a.spec, next_line=next_line,
-                    probe_lines=(_probe_lines(probe) if probe is not None else None))
+                    probe_lines=(_probe_lines(probe) if probe is not None else None),
+                    then_line=then_line)
     if not payload.get("ok", True):
         return 2
     # A refused probe is a config answer, not a spec error: the same non-zero
@@ -4558,11 +4582,19 @@ def _cmd_algorithms_run(a: argparse.Namespace) -> int:
     report = obj.get("_report") or []
     ok = bool(obj.get("ok", True))
     probe = None
+    then_line = None
     if getattr(a, "probe", False) and stage == "done" and ok:
         # The same preflight `plan --probe` runs, on the spec this verb just
         # wrote: one call, before the `evolve` it recommends (#1048).
         probe = _probe_if_asked(a, load_spec(obj["spec_path"]))
         obj["probe"] = probe
+        # `ok` stays about the written plan; `ready` is whether evolve can
+        # start. A refused probe also replaces `next` so a host does not
+        # follow it into a run that cannot work (#1093).
+        obj["ready"] = bool(probe.get("ok", True))
+        if not obj["ready"]:
+            obj["next"] = _first_failed_probe_next(probe)
+            then_line = f"agentdescent plan {obj['spec_path']} --probe"
     if as_json:
         # Exactly one JSON object on stdout for success and error (#674).
         _out(_public(obj), as_json=True)
@@ -4603,7 +4635,8 @@ def _cmd_algorithms_run(a: argparse.Namespace) -> int:
     from .probe import probe_lines as _probe_lines
 
     _print_plan(payload, spec_path=out, next_line=obj["next"], printed=printed,
-                probe_lines=(_probe_lines(probe) if probe is not None else None))
+                probe_lines=(_probe_lines(probe) if probe is not None else None),
+                then_line=then_line)
     calls = (payload.get("estimate") or {}).get("agent_calls_upper_bound")
     if (getattr(a, "rounds", None) is None and getattr(a, "workers", None) is None
             and isinstance(calls, (int, float)) and calls > QUICK_TRIAL_CALLS):

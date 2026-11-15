@@ -127,8 +127,11 @@ def test_an_expired_subscription_fails_the_plan_before_a_run(tmp_path, endpoint)
     # One call, and no run store entry: the whole point of the flag.
     assert _Handler.hits == 1
     assert _store_is_empty(store)
-    # `next:` stays the last thing a reader sees.
-    assert out.strip().splitlines()[-1].startswith("next: agentdescent evolve ")
+    # `next:` stays last, but it is the repair action, not evolve (#1093).
+    last = out.strip().splitlines()[-1]
+    assert last.startswith("next: renew the subscription")
+    assert "next: agentdescent evolve " not in out
+    assert f"then: agentdescent plan {tmp_path / 'spec.json'} --probe" in out
 
 
 def test_a_runnable_endpoint_reports_ok_and_exits_zero(tmp_path, endpoint):
@@ -227,10 +230,10 @@ def _prompt(tmp_path):
     return str(path)
 
 
-def _algorithms_run_args(tmp_path, *, extra=()):
+def _algorithms_run_args(tmp_path, *, extra=(), base_url="http://127.0.0.1:1"):
     return ["algorithms", "run", "gepa", _prompt(tmp_path), _cases(tmp_path),
             "--agent", "openai_compatible", "--model", "m",
-            "--key-env", "FAKE_KEY", "--base-url", "http://127.0.0.1:1",
+            "--key-env", "FAKE_KEY", "--base-url", base_url,
             "--rounds", "1", "--workers", "1",
             "--out", str(tmp_path / "algo.spec.json"), *extra]
 
@@ -239,24 +242,32 @@ def test_algorithms_run_json_exits_nonzero_on_a_refused_probe(tmp_path, monkeypa
                                                               endpoint):
     """A host gates on this exit code before it starts the run (#1048 review)."""
     endpoint(body=ARK_SUBSCRIPTION)
-    monkeypatch.setenv("FAKE_BASE_URL", _Handler.url)
 
-    code, out, err = _run(_algorithms_run_args(tmp_path, extra=["--json", "--probe"]))
+    code, out, err = _run(_algorithms_run_args(
+        tmp_path, extra=["--json", "--probe"], base_url=_Handler.url))
 
     payload = json.loads(out)
     assert payload["probe"]["ok"] is False
     assert payload["ok"] is True, "the plan itself is fine; only the probe refused"
+    assert payload["ready"] is False
+    assert payload["next"] == (
+        "renew the subscription at the provider, or point api_key_env / "
+        "model at another plan")
+    assert "evolve" not in payload["next"]
     assert code == 1, (code, err)
 
 
 def test_algorithms_run_human_form_exits_nonzero_too(tmp_path, monkeypatch, endpoint):
     endpoint(body=ARK_SUBSCRIPTION)
-    monkeypatch.setenv("FAKE_BASE_URL", _Handler.url)
 
-    code, out, err = _run(_algorithms_run_args(tmp_path, extra=["--probe"]))
+    code, out, err = _run(_algorithms_run_args(
+        tmp_path, extra=["--probe"], base_url=_Handler.url))
 
     assert code == 1, (code, out, err)
     assert "probe: agent failed" in out + err
+    last = out.strip().splitlines()[-1]
+    assert last.startswith("next: renew the subscription")
+    assert "next: agentdescent evolve" not in out
 
 
 def test_the_probe_caps_the_reply_budget_and_the_wait(tmp_path, monkeypatch, endpoint):
@@ -279,3 +290,48 @@ def test_the_probe_caps_the_reply_budget_and_the_wait(tmp_path, monkeypatch, end
     assert code == 0, (out, err)
     assert seen["max_tokens"] == probe_module.PROBE_MAX_TOKENS
     assert seen["timeout"] == probe_module.DEFAULT_PROBE_TIMEOUT
+
+def test_plan_json_marks_a_refused_probe_unready_and_keeps_ok(tmp_path, endpoint):
+    """`ok` stays about the plan; `ready` and `next` are how a host gates (#1093)."""
+    endpoint(body=ARK_SUBSCRIPTION)
+
+    code, out, err = _run(["plan", _write_spec(tmp_path), "--json", "--probe"])
+
+    payload = json.loads(out)
+    assert code == 1, (code, err)
+    assert payload["ok"] is True
+    assert payload["ready"] is False
+    assert payload["probe"]["ok"] is False
+    assert payload["next"] == (
+        "renew the subscription at the provider, or point api_key_env / "
+        "model at another plan")
+
+
+def test_a_successful_probe_still_recommends_evolve(tmp_path, endpoint):
+    endpoint(code=200)
+    spec = _write_spec(tmp_path)
+
+    code, out, err = _run(["plan", spec, "--probe"])
+    assert code == 0, (out, err)
+    assert out.strip().splitlines()[-1].startswith("next: agentdescent evolve ")
+    assert "then: " not in out
+
+    json_code, json_out, json_err = _run(["plan", spec, "--json", "--probe"])
+    payload = json.loads(json_out)
+    assert json_code == 0, (json_out, json_err)
+    assert payload["ok"] is True
+    assert payload["ready"] is True
+    assert payload["probe"]["ok"] is True
+    assert "next" not in payload
+
+
+def test_without_the_flag_json_has_no_ready_field(tmp_path, endpoint):
+    endpoint(code=200)
+
+    code, out, err = _run(["plan", _write_spec(tmp_path), "--json"])
+
+    assert code == 0, (out, err)
+    payload = json.loads(out)
+    assert "probe" not in payload
+    assert "ready" not in payload
+    assert "next" not in payload
