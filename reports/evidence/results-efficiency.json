@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "held_out": "not reviewed -- these are dispatch microbenchmarks, not a scoring experiment.",
+  "matched_budget": "8 threads against 1 in every row: the same work is fixed and only the dispatch shape changes, so the ratio is not work saved.",
+  "cross_model": "not reviewed -- glm-5.2 for the parallel row, with pure-Python CPU work at 1.1× as the control.",
+  "cost": "not reviewed",
+  "disjoint_search": "not reviewed",
+  "reliability": "examples/efficiency.py generates every row, and tests/test_efficiency.py pins the arithmetic the rows depend on -- ::test_barrier_and_free_do_equal_work (both dispatch shapes do the same work, so the comparison is wall-clock and not work), ::test_constant_latency and ::test_heavy_tailed_latency_values_and_spread (the heavy tail is exactly the two latencies, with no third value inventing the 1.7×). The five numbers themselves need live API calls and are not reproducible offline: `python -m examples.efficiency --only all`.",
+  "code": "claim: the parallel paths buy 5.8× on glm-5.2 for 8 threads of real API calls (1.1× on pure-Python CPU work, the control), 1.8× end-to-end of 8 workers at uniform latency, 1.7× when latency is heavy-tailed because the round barrier waits on the slowest worker, 2.65× for the barrier-free dispatch microbenchmark, and the gate at eval_concurrency 8 takes 3.6 s -> 1.2 s. Published in docs/results.md, 'Efficiency' (lines 99-126), with the breakdown in docs/efficiency.md; commands `examples.efficiency --only gil|distribution|async|gate`.",
+  "evolved_artifact": "not reviewed",
+  "who_edits": "not reviewed",
+  "feedback": "not reviewed",
+  "timing": "The numbers are the timing claim. Every row was re-measured rather than carried over, and the previous table's 7.1× / 5.9× / 2.4× / 3.0× / 193.6 s could not be re-run because nothing in the repository generated it.",
+  "topology": "not reviewed"
+}

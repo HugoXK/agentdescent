@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "held_out": "12 of the 40 HotpotQA items are held out and never scored against during evolution; every number in the table is on those 12.",
+  "matched_budget": "not reviewed -- one arm, so there was no second budget to match it against.",
+  "cross_model": "not reviewed -- the page names no second model for this run.",
+  "cost": "338 model calls over about 25 minutes for the whole four-round evolution, stated beside the table in docs/results.md.",
+  "disjoint_search": "not reviewed",
+  "reliability": "The snippet is the README's own front page and tests/test_docs_examples.py::test_readme_quickstart_runs_as_written executes it unchanged offline, with ::test_readme_quickstart_needs_no_credentials refusing a version that needs a key. The score table itself is a live measurement -- 338 calls, ~25 minutes -- and is not reproducible offline: re-run that snippet on a model and count held-out exact match on the same 40 items.",
+  "code": "claim: one evolve() call on 40 HotpotQA items with 12 held out moves the starting instruction \"You are a helpful assistant.\" from 2/12 = 0.167 to 7/12 = 0.583, over four rounds stopped by patience, with outcomes() == {'committed': 1, 'below-threshold': 3}. Published in docs/results.md, 'The one-call path' (lines 71-85); the snippet is docs/quickstart-skill.md's front page, run as written.",
+  "evolved_artifact": "The instruction the run kept, quoted in docs/results.md: \"Respond with only the requested answer, omitting any extra explanation or restatement.\"",
+  "who_edits": "not reviewed",
+  "feedback": "not reviewed",
+  "timing": "About 25 minutes for the 338-call run; the report records no per-call latency.",
+  "topology": "not reviewed"
+}

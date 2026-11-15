@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "held_out": "12 of 40 money word problems are held out, and the 3/12 -> 12/12 move is on those 12.",
+  "matched_budget": "not reviewed -- the page compares one agent against itself, not two budgets.",
+  "cross_model": "not reviewed -- one model, deepseek-v4-flash.",
+  "cost": "141 s and 63 model calls for the single evolving round (docs/evolution.md).",
+  "disjoint_search": "not reviewed",
+  "reliability": "The guide's own code block is executed unchanged by tests/test_docs_examples.py::test_evolution_guide_bring_your_own_agent_block_is_complete, so the wiring is checked offline. The 3/12 -> 12/12 is a live run on deepseek-v4-flash (141 s, 63 calls) and is not reproducible offline: the evidence inside it is the control row, a reflector blind to meta that plateaus at 0.500, which is what rules out the run having been told the cent convention.",
+  "code": "claim: an agent a user already has, dropped into evolve() unchanged, goes from 3/12 = 0.250 to 12/12 = 1.000 held out in one round, writing the cent convention the scorer never states. Published in docs/evolution.md, 'Bring an agent you already have' (lines 52-122), and summarised in docs/results.md, 'Bringing your own agent' (lines 86-98).",
+  "evolved_artifact": "The rule it wrote: \"Express all monetary amounts as integers representing cents, without dollar signs or decimal points.\" -- quoted in docs/evolution.md, which notes it generalised rather than memorising this task's answer.",
+  "who_edits": "not reviewed",
+  "feedback": "not reviewed",
+  "timing": "141 s for the evolving round, 63 calls, one round.",
+  "topology": "not reviewed"
+}

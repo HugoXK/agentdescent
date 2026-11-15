@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "held_out": "20 of the 80 HotpotQA rows are the test split and no gate ever sees them; 20 more are the gate (val); 40 are train.",
+  "matched_budget": "9 rollouts pinned on every arm and seed. Calls are not equalised and cannot be: median 93 serial, 132 fork, 73 merge, reported beside quality as the confound.",
+  "cross_model": "not reviewed -- one model, GLM-5.2.",
+  "cost": "53 minutes, 1298 calls, 2.7M tokens, 11.3 h of model time for the nine arm-runs of the three seeds (docs/results.md).",
+  "disjoint_search": "not reviewed",
+  "reliability": "Recomputed offline by tests/test_evidence_card_reports.py from bench/results/equal-budget-hotpotqa-3seed.json, which is committed: agentdescent.baselines.compare(arms, fixed=\"rollouts\") reports unequal == [], spreads serial (0.650, 0.700, 0.850), fork-of-3 (0.700, 0.700, 0.750) and merge-of-3 (0.600, 0.800, 0.850), and separates() False for merge against both arms -- the published 'no separation', asserted rather than read. The same file carries the caveat the page states: fusion.contested == 0 on every arm and seed, because GEPA's InstructionSlot is one key.",
+  "code": "claim: at an equal 9-rollout budget on HotpotQA with GLM-5.2, three seeds each, merge-of-3 (median test 0.800 on 73 calls) overlaps best-of-N fork-of-3 (0.700 on 132 calls) and serial (0.700 on 93 calls) across seeds -- merge holds the highest median at the lowest call count and still has not been shown to win, because the intervals overlap. Published in docs/results.md, 'Measured: merge-of-N against best-of-N fork, HotpotQA -- no separation' (lines 227-302); the verdict is agentdescent/baselines.py's Comparison.separates.",
+  "evolved_artifact": "not reviewed",
+  "who_edits": "not reviewed",
+  "feedback": "not reviewed",
+  "timing": "53 minutes wall-clock; latency is dominated by ~38 s a call, which is why the confound is reported in calls, not seconds.",
+  "topology": "not reviewed"
+}

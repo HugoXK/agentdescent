@@ -400,7 +400,12 @@ are **not** the papers' full setups, and where a full setup needs heavy
 infrastructure (SWE-bench in Docker, gated data) the boundary is stated on the
 algorithm's page.
 
-Claims are published as 12-field evidence cards, and
-`python -m tools.evidence_card --check [CARD ...]` refuses a card that omits a
-field, names an unknown one, or leaves a value blank — `not reviewed` is the
-explicit way to say a field has no evidence.
+Claims are published as 12-field evidence cards under
+[`reports/evidence/`](https://github.com/ThinkFlowLab/agentdescent/tree/main/reports/evidence)
+— one per result above — and `python -m tools.evidence_card --check [CARD ...]`
+refuses a card that omits a field, names an unknown one, or leaves a value
+blank. `not reviewed` is the explicit way to say a field has no evidence. The
+cards index themselves in `reports/evidence/README.md`,
+`tests/test_evidence_card_reports.py` recomputes the two bench cards from the
+committed runs, and every other card names the live run behind its number, so
+the gap between "measured" and "you can check it" is visible on the card.

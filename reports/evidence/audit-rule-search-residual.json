@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "held_out": "not reviewed -- the search scores rule combinations against the audit store, not against a fresh held-out split.",
+  "matched_budget": "not reviewed",
+  "cross_model": "not reviewed -- one model and one workload (HotpotQA).",
+  "cost": "Not recorded; 7 rules in 28 combinations over the HotpotQA audit store, part of the campaign's ~3,140 calls.",
+  "disjoint_search": "not reviewed",
+  "reliability": "This claim is not reproducible offline: the search needs the HotpotQA dataset join (scripts/audit_diagnose.py --search) and the audit store, neither of which is committed at main. The rules it searches are unit-tested offline by tests/test_audit_diagnose_script.py, but no test recomputes 0.2421 or 0.2203; reports/README.md says regenerating reports/verifier_diagnosis_f55dec40cec559f7.md byte-identical is the check that stands in for one.",
+  "code": "claim: searching rule combinations does not close the gap -- 7 rules in 28 combinations, ranked on residual sigma, and the best pair (far-shorter(0.6) + far-longer(1.6)) reaches sigma 0.2421, fixing 20 of the 31 disagreements and breaking 0, which is a 36% cut against the un-repaired 0.3812 and still above the 0.2203 floor; going lower would redefine the oracle, not improve the verifier. Published in reports/verifier_diagnosis_f55dec40cec559f7.md -- the combination table at line 56 and the sigma floor at lines 13 and 52.",
+  "evolved_artifact": "not reviewed",
+  "who_edits": "not reviewed",
+  "feedback": "not reviewed",
+  "timing": "not reviewed",
+  "topology": "not reviewed"
+}
