@@ -44,7 +44,16 @@ LOG="$STORE/worker.log"
 # both in a directory called `runs` -- so the session carries a per-launch
 # suffix. Two handoffs then never ask tmux for the same name (#1084 review).
 SESSION="ad-$(printf '%s' "$(basename "$STORE")" | tr -c 'A-Za-z0-9_.-' '-')-$$-$RANDOM"
+# Report text only: this string is what `waiting.json` shows as `command`, and
+# nothing ever executes it.
 QUOTED="$(printf '%q ' "${CMD[@]}")"
+# The log path and the command reach the driver as **arguments**, never spliced
+# into a shell string: the old `>> '$LOG'` let an apostrophe in --store close the
+# quote, and the rest of the path ran as shell words outside the worker's process
+# group with the operator's privileges (#1109). `exec >>"$1"` opens the log,
+# `shift` drops it from argv, and the run is exec'd in this process, so it keeps
+# the same process group and exit status and nothing re-parses either value.
+LAUNCH=(bash -c 'exec >>"$1" 2>&1; shift; exec "$@"' _ "$LOG")
 
 # What the store already holds, taken before the launch: a reused store always
 # has earlier runs in it, and reporting the newest of those as this handoff is
@@ -67,11 +76,11 @@ with open(out, "w", encoding="utf-8") as fh:
 PY
 if command -v tmux >/dev/null 2>&1; then
   DRIVER=tmux
-  tmux new-session -d -s "$SESSION" -c "$PWD" "$QUOTED >> '$LOG' 2>&1" \
+  tmux new-session -d -s "$SESSION" -c "$PWD" "${LAUNCH[@]}" "${CMD[@]}" \
     || die "tmux refused the session $SESSION"
 elif command -v setsid >/dev/null 2>&1; then
   DRIVER=setsid
-  setsid sh -c "$QUOTED >> '$LOG' 2>&1" >/dev/null 2>&1 &
+  setsid "${LAUNCH[@]}" "${CMD[@]}" >/dev/null 2>&1 &
 else
   die "neither tmux nor setsid is available; this host cannot hand off a run"
 fi

@@ -162,6 +162,11 @@ with `run_id`, `round`, `state`, `run_dir`, `driver`, `session` and `log`, and
 exits 0 within seconds. Post the run id, the round and the run directory on the
 Ticket and end the turn; nothing holds the slot.
 
+The wrapper hands the log path and the run's command to the driver as
+arguments rather than splicing them into a shell string, so a `--store`
+containing a quote, a space, `$` or `;` is used literally instead of being read
+as shell syntax (`#1109`).
+
 A store is reused for every Ticket, so it already holds earlier runs. The
 wrapper only reports a `status.json` that appears or changes after it launches,
 so a handoff into a used store reports `found: false` until its own run writes

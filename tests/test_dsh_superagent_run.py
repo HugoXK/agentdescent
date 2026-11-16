@@ -135,6 +135,69 @@ def test_the_page_documents_a_wrapper_that_exists_and_takes_its_flags():
     assert "--detach" in evolve.stdout, "the page tells a worker to pass a flag the CLI dropped"
 
 
+def _path_without_tmux(base: Path) -> str:
+    """A PATH holding the wrapper's tools and no `tmux` (the fallback row).
+
+    The setsid row has to reach the fallback on a host that has tmux installed,
+    so `command -v tmux` must fail without also removing bash or python3.
+    """
+    shim = base / "shim"
+    shim.mkdir()
+    for tool in ("bash", "sh", "basename", "tr", "mkdir", "python3", "setsid",
+                 "sleep", "rm"):
+        found = shutil.which(tool)
+        assert found is not None, f"the wrapper needs {tool}, which this host lacks"
+        os.symlink(found, shim / tool)
+    return str(shim)
+
+
+@pytest.mark.parametrize("driver", ["tmux", "setsid"])
+def test_a_store_path_with_shell_metacharacters_hands_off_without_running_them(
+        tmp_path, driver):
+    # The launch command used to be built as a shell string with the log path
+    # spliced in as `>> '$LOG'`: an apostrophe in --store closed the quote, and
+    # the rest of the path became shell words run outside the worker's process
+    # group with the operator's privileges (#1109). The path below carries an
+    # apostrophe, a semicolon, spaces and a dollar sign.
+    pwned = tmp_path / "PWNED"
+    store = tmp_path / f"it's; > {pwned}; echo '$HOME"
+
+    env = dict(os.environ, DSH_RUN_HANDOFF_WAIT="1")
+    if driver == "tmux":
+        if shutil.which("tmux") is None:
+            pytest.skip("no tmux on this host: the session row cannot run")
+    else:
+        if shutil.which("setsid") is None:
+            pytest.skip("no setsid on this host: the fallback row cannot run")
+        env["PATH"] = _path_without_tmux(tmp_path)
+
+    # The child writes a marker, so "the run started" is measured rather than
+    # inferred from a log file the redirection alone would have created.
+    marker = tmp_path / "ran.txt"
+    child = [sys.executable, "-c",
+             "import pathlib, sys; pathlib.Path(sys.argv[1]).write_text('ran\\n')",
+             str(marker)]
+    handed = subprocess.run(
+        ["bash", str(WRAPPER), "--store", str(store), "--"] + child,
+        cwd=REPO, capture_output=True, text=True, timeout=60, env=env)
+
+    assert handed.returncode == 0, handed.stderr
+    assert not pwned.exists(), (
+        f"the --store path ran as shell code and created {pwned}; "
+        f"wrapper stderr: {handed.stderr!r}")
+    report = json.loads((store / "waiting.json").read_text(encoding="utf-8"))
+    assert report["driver"] == driver, report
+    assert report["log"] == str(store / "worker.log"), report
+    assert report["command"].strip().startswith(sys.executable), report
+    # `waiting.json` is the page's contract; a quoting fix must not rename, add
+    # or drop a field the read-back documents.
+    assert set(report) == {"status", "found", "run_id", "round", "state",
+                           "run_dir", "driver", "session", "log", "command"}
+    assert (store / "worker.log").is_file(), report
+    assert marker.read_text(encoding="utf-8") == "ran\n", (
+        f"the run did not start through the handed-off log: {report}")
+
+
 @pytest.mark.skipif(os.environ.get("AGENTDESCENT_LONG_RUN_SMOKE") != "1",
                     reason="set AGENTDESCENT_LONG_RUN_SMOKE=1 to run the detached smoke")
 def test_a_run_outlives_the_turn_that_started_it_and_leaves_no_orphan(tmp_path):
