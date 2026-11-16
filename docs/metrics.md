@@ -74,7 +74,10 @@ if exporter is not None:
   credentials (`https://user:token@host/`) is refused without the value being
   repeated in the error, and plain `http://` is accepted only for a literal
   loopback collector (`localhost`, `127.0.0.0/8`, `[::1]`). A remote collector
-  needs TLS terminated in front of it.
+  needs TLS terminated in front of it. Credentials belong in
+  `OTEL_EXPORTER_OTLP_HEADERS`, never in the URL: this module does not echo an
+  accepted endpoint, but the SDK's httpx errors quote the request URL, so a
+  token in the path or query would still reach a log.
 - Delivery is per exporter and explicit. Each `OtlpExporter` owns its tracer and
   meter providers, so a second exporter in the same process does not export
   through the first one's endpoint or headers. The SDK batches spans for 5 s and
@@ -89,3 +92,12 @@ if exporter is not None:
   guarantee belongs to `export_run`, while an `ExportedSpan` handed straight to
   `export_span` has its `attributes` copied verbatim, so a caller building one
   by hand owns what goes in it.
+- The wire path is exercised in CI, not only faked: the `otel-wire` job installs
+  the `[otel]` extra and runs `scripts/otel_wire_smoke.py`, which exports one
+  span and one metric to a closed port on `127.0.0.1` and asserts the refusal is
+  reported and contained — `export_run` still returns its count, `force_flush()`
+  and `shutdown()` still return, and nothing escapes.
+- `export_span` copies `ExportedSpan.attributes` **verbatim**: it neither drops
+  nor invents a key, so a caller that builds a span by hand owns its contents,
+  and the fixed attribute set above is `export_run`'s guarantee alone
+  (`tests/test_otel_wire.py`, `tests/test_otel_export.py`).

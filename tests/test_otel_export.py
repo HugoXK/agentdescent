@@ -151,20 +151,45 @@ def test_the_exporter_is_off_unless_an_endpoint_is_configured() -> None:
     assert exporter_from_env({"OTEL_EXPORTER_OTLP_ENDPOINT": ""}) is None
 
 
-def test_a_configured_endpoint_needs_the_extra_at_construction() -> None:
-    """Constructing the exporter imports the SDK, so a missing extra fails
-    before a run starts instead of on the first span written."""
-    try:                              # the same probe the exporter uses
-        otel_export._load_otel()
-    except ImportError:
-        pass
-    else:
-        pytest.skip("the [otel] extra is installed here")
+@pytest.fixture
+def missing_sdk(monkeypatch):
+    """Make ``import opentelemetry`` fail even when the extra is installed.
 
+    The `otel-wire` leg installs `[otel]`, so a probe-and-skip row would stop
+    testing the fail-fast contract in exactly the environment that has the SDK
+    (#1083). ``None`` in ``sys.modules`` is the interpreter's own "import
+    halted" marker, so this walks the real ImportError path and not a fake
+    seam: `_load_otel` catches it and re-raises with the install line.
+    """
+    for name in [n for n in sys.modules
+                 if n == "opentelemetry" or n.startswith("opentelemetry.")]:
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    monkeypatch.setitem(sys.modules, "opentelemetry", None)
+
+
+def test_a_configured_endpoint_needs_the_extra_at_construction(
+        missing_sdk) -> None:
+    """Constructing the exporter imports the SDK, so a missing extra fails
+    before a run starts instead of on the first span written -- asserted with
+    the SDK absent, whether or not this host installed it."""
     with pytest.raises(ImportError) as excinfo:
         exporter_from_env(
             {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4318"})
     assert "agentdescent[otel]" in str(excinfo.value)
+
+    with pytest.raises(ImportError) as excinfo:   # and the direct entry point
+        otel_export.OtlpExporter("http://127.0.0.1:4318")
+    assert "agentdescent[otel]" in str(excinfo.value)
+
+
+def test_the_install_line_is_named_when_the_extra_really_is_absent() -> None:
+    """One real-import row: skipped only where the SDK is genuinely present."""
+    try:
+        otel_export._load_otel()
+    except ImportError as exc:
+        assert "agentdescent[otel]" in str(exc)
+    else:
+        pytest.skip("the [otel] extra is installed here")
 
 
 @pytest.mark.parametrize("endpoint", [
@@ -204,14 +229,16 @@ def test_a_plaintext_endpoint_off_the_loopback_is_refused(endpoint) -> None:
     "http://127.1.2.3:4318",
     "http://[::1]:4318",
 ])
-def test_a_loopback_collector_may_be_plain_http(endpoint) -> None:
-    """Loopback http stays legal; the SDK missing is the only error here."""
-    try:
-        otel_export.OtlpExporter(endpoint)
-    except ImportError as exc:
-        assert "agentdescent[otel]" in str(exc)
-    else:                                  # the extra is installed here
-        pytest.skip("the [otel] extra is installed here")
+def test_a_loopback_collector_may_be_plain_http(endpoint, monkeypatch) -> None:
+    """Loopback http stays legal: the endpoint is accepted and kept as given.
+
+    The SDK seam is stubbed, so this row asserts the bridge's own decision and
+    opens no live provider pointed at `127.0.0.1:4318` -- before #1083 it built
+    a real exporter on a host with the extra and then skipped itself.
+    """
+    monkeypatch.setattr(otel_export, "_load_otel", _fake_otel)
+    exporter = otel_export.OtlpExporter(endpoint)
+    assert exporter.endpoint == endpoint
 
 
 def test_the_environment_path_refuses_a_refused_endpoint_too() -> None:
@@ -475,3 +502,24 @@ def test_the_instrument_methods_match_the_sdk(monkeypatch) -> None:
         "run.id": "run-1"})]
     assert instruments["agentdescent_rsi_decisions_total"].added == [(2.0, {})]
     assert instruments["agentdescent_rsi_acceptance_rate"].set_values
+
+
+def test_export_span_copies_attributes_verbatim_and_invents_nothing(monkeypatch) -> None:
+    """``export_span`` copies what it is given: no filtering, no invented keys.
+
+    So the no-content guarantee is ``export_run``'s (its writer builds a fixed
+    attribute set), and a caller handing the exporter its own ``ExportedSpan``
+    owns every key in it -- load-bearing while ``rsi_telemetry`` spans can feed
+    the exporter with the redaction question in #947 still open (#1083).
+    """
+    monkeypatch.setattr(otel_export, "_load_otel", _fake_otel)
+    exporter = otel_export.OtlpExporter("https://a.example:4318")
+    attributes = {"run.id": "run-1", "caller.note": "free text, spaces, 42"}
+    span = ExportedSpan("agentdescent.round", attributes, 1.0, 2.0)
+
+    exporter.export_span(span)
+
+    recorded = exporter._tracer.spans[-1]
+    assert recorded.attributes == attributes          # verbatim, nothing dropped
+    assert recorded.attributes is not attributes      # a copy, not an alias
+    assert "caller.note" in recorded.attributes       # nothing invented either
