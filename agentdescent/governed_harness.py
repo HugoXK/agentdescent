@@ -40,6 +40,7 @@ from dataclasses import asdict, dataclass, replace
 from typing import Any, Mapping, Optional
 
 from .approval import ApprovalRequest, ApprovalStore
+from .harness_integrity import HarnessIntegrity, HarnessIntegrityReport
 from .promotion import (
     PromotionDecision,
     PromotionRules,
@@ -67,6 +68,7 @@ class GovernedHarnessReport:
     rollback: Mapping[str, Any]
     verdict: str
     detail: str
+    integrity: Optional[HarnessIntegrityReport] = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.rollback, MappingABC):
@@ -90,6 +92,8 @@ class GovernedHarnessReport:
             "rollback": dict(self.rollback),
             "verdict": self.verdict,
             "detail": self.detail,
+            "integrity": (None if self.integrity is None
+                          else self.integrity.to_dict()),
             "promoted": self.promoted,
         })
 
@@ -120,7 +124,8 @@ def _report(artifact_id: str, safety: SafetyDecision, *,
             evidence: Optional[TrustEvidence] = None,
             rollback: Optional[Mapping[str, Any]] = None,
             verdict: Optional[str] = None,
-            detail: Optional[str] = None) -> GovernedHarnessReport:
+            detail: Optional[str] = None,
+            integrity: Optional[HarnessIntegrityReport] = None) -> GovernedHarnessReport:
     return GovernedHarnessReport(
         artifact_id=artifact_id,
         safety=safety,
@@ -131,6 +136,7 @@ def _report(artifact_id: str, safety: SafetyDecision, *,
         rollback={} if rollback is None else rollback,
         verdict=decision.action if verdict is None else verdict,
         detail=_detail(decision) if detail is None else detail,
+        integrity=integrity,
     )
 
 
@@ -204,6 +210,7 @@ def govern_harness_change(
         rollback_current: Optional[Mapping[str, str]] = None,
         rollback_previous: Optional[Mapping[str, str]] = None,
         kind: str = "harness",
+        integrity: Optional[HarnessIntegrity] = None,
         contaminated: bool = False,
         risk: Optional[float] = None,
         **evidence_kwargs: Any) -> GovernedHarnessReport:
@@ -223,6 +230,8 @@ def govern_harness_change(
         approval_key = _require_text(approval_key, "approval_key")
     approval_reason = _require_text(approval_reason, "approval_reason")
     kind = _require_text(kind, "kind")
+    if integrity is not None and not isinstance(integrity, HarnessIntegrity):
+        raise TypeError("integrity must be a HarnessIntegrity or None")
     if not isinstance(contaminated, bool):
         raise TypeError("contaminated must be a bool")
     risk = _check_risk(risk)
@@ -237,6 +246,20 @@ def govern_harness_change(
         decision = _synthetic(artifact_id, "reject", safety.reason,
                               risk=modification.risk)
         return _report(artifact_id, safety, decision=decision)
+
+    # The composition check runs on the applied diff and before anything
+    # expensive: a broken guardrail order must not buy a proof, an approval or
+    # a promotion. ``_report`` keeps the per-relationship detail for the caller.
+    integrity_report: Optional[HarnessIntegrityReport] = None
+    if integrity is not None:
+        integrity_report = integrity.check()
+        if not integrity_report.ok:
+            decision = _synthetic(
+                artifact_id, "reject",
+                "harness integrity: " + integrity_report.reason,
+                risk=modification.risk)
+            return _report(artifact_id, safety, decision=decision,
+                           integrity=integrity_report)
 
     certificate: Optional[ProofCertificate] = None
     proof_evidence: Optional[ProofEvidence] = None
@@ -335,4 +358,5 @@ def govern_harness_change(
 
     return _report(artifact_id, safety, decision=decision,
                    approval=approval_request, proof=certificate,
-                   evidence=evidence, rollback=rollback)
+                   evidence=evidence, rollback=rollback,
+                   integrity=integrity_report)

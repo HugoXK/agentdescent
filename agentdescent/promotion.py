@@ -41,6 +41,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Mapping, Optional, Tuple
 
 from .conformal import ConformalReport
+from .cost import Cost
 from .evalops import EvalResult
 from .goodhart import GoodhartReport
 from .metamorphic import MetamorphicReport
@@ -57,8 +58,38 @@ __all__ = [
     "ProofEvidence",
     "PromotionRequest",
     "PromotionDecision",
+    "ReviewCost",
     "promote",
 ]
+
+
+# The review-minutes heuristic (#950). These are the numbers a team can argue
+# with; they are deliberately few and documented rather than a model. They
+# over-count rather than under-count: a promotion that looks cheap to review is
+# the one that burns an afternoon.
+REVIEW_BASE_MINUTES = 2.0        # context, diff, and closing the loop
+REVIEW_MINUTES_PER_FILE = 1.5
+REVIEW_MINUTES_PER_100_LINES = 2.0
+REVIEW_MINUTES_PER_BLAST_POINT = 6.0
+REVIEW_MINUTES_PER_RISK_TIER = 5.0
+REVIEW_MINUTES_PER_EVIDENCE_ITEM = 2.0
+#: Upper bound of each coarse risk tier below T3, as a fraction of ``risk``.
+REVIEW_RISK_TIER_BOUNDS = (0.25, 0.5, 0.75)
+
+
+def _risk_tier(risk: Optional[float]) -> Optional[str]:
+    """Coarse T0..T3 label for a promotion risk, or None when it is unknown.
+
+    This is the reviewer's language, not the CI risk gate: the gate reads file
+    paths (``.github/agent/risk-rules.json``), which a promotion decision does
+    not have.
+    """
+    if risk is None:
+        return None
+    for index, bound in enumerate(REVIEW_RISK_TIER_BOUNDS):
+        if risk < bound:
+            return f"T{index}"
+    return "T3"
 
 
 class PromotionAction:
@@ -112,11 +143,22 @@ class PromotionRules:
     require_goodhart: bool = False
     require_metamorphic: bool = False
     require_verifier: bool = False
+    require_verifier_admission: bool = False
     require_calibration: bool = False
     allow_contaminated: bool = False
     min_effect: float = 0.0
     min_tasks: int = 2
     max_risk: float = 1.0
+    #: Review-cost budget (#950). ``0`` is off, so the default decision is the
+    #: one this policy produced before the field existed.
+    max_review_cost: float = 0.0
+    max_review_minutes: float = 0.0
+    #: Cost evidence (#945). Appended rather than inserted: a later positional
+    #: caller cannot be shifted by it (``#950`` added its own field the same
+    #: way). ``False`` is the pre-existing decision -- a caller that supplies no
+    #: cost keeps the same hash and verdict; with ``True`` a request without a
+    #: measured cost defers, and an unknown diff is never priced at zero.
+    require_cost: bool = False
 
     def __post_init__(self) -> None:
         for name in ("require_eval", "require_contamination", "require_risk",
@@ -124,7 +166,8 @@ class PromotionRules:
                      "require_canary", "require_proof", "require_admission",
                      "require_approval", "require_goodhart",
                      "require_metamorphic", "require_verifier",
-                     "require_calibration", "allow_contaminated"):
+                     "require_verifier_admission", "require_calibration",
+                     "require_cost", "allow_contaminated"):
             if not isinstance(getattr(self, name), bool):
                 raise TypeError(f"{name} must be a bool")
         if _finite(self.min_effect, "min_effect") < 0:
@@ -135,6 +178,92 @@ class PromotionRules:
         risk = _finite(self.max_risk, "max_risk")
         if not 0.0 <= risk <= 1.0:
             raise ValueError("max_risk must be in [0, 1]")
+        for name in ("max_review_cost", "max_review_minutes"):
+            if _finite(getattr(self, name), name) < 0:
+                raise ValueError(f"{name} must be >= 0 (0 turns the limit off)")
+
+
+def _policy_payload(policy: "PromotionRules") -> Dict[str, Any]:
+    """The policy fields a decision hash covers.
+
+    A review limit that is off (#950) is not part of the decision: a decision
+    made before the field existed keeps its hash, so a stored hash still
+    verifies after the upgrade. The ledger verifies with this same payload.
+    """
+    payload = asdict(policy)
+    for name in ("max_review_cost", "max_review_minutes",
+                 "require_verifier_admission", "require_cost"):
+        if not getattr(policy, name):
+            payload.pop(name, None)
+    return payload
+
+
+@dataclass(frozen=True)
+class ReviewCost:
+    """What reviewing one proposed diff costs a human (#950).
+
+    Every field is an input the reviewer can check. ``cost`` is the weighted
+    burden in minutes before the fixed base; ``review_minutes`` is the number to
+    budget with. Both are computed from the constants above, never guessed, and
+    ``to_dict`` returns the inputs next to the estimate so a reader can see why
+    a diff was called expensive.
+    """
+
+    files_changed: int
+    lines_changed: int
+    blast_radius: float = 0.2
+    risk: Optional[float] = None
+    evidence_items: int = 0
+    risk_tier: Optional[str] = field(init=False, default=None)
+    cost: float = field(init=False, default=0.0)
+    review_minutes: float = field(init=False, default=0.0)
+
+    @classmethod
+    def estimate(cls, *, files_changed: int, lines_changed: int,
+                 blast_radius: float = 0.2, risk: Optional[float] = None,
+                 evidence_items: int = 0) -> "ReviewCost":
+        """Build a cost from the diff's measured shape."""
+        return cls(files_changed=files_changed, lines_changed=lines_changed,
+                   blast_radius=blast_radius, risk=risk,
+                   evidence_items=evidence_items)
+
+    def __post_init__(self) -> None:
+        for name in ("files_changed", "lines_changed", "evidence_items"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be an int >= 0")
+        blast = _finite(self.blast_radius, "blast_radius")
+        if not 0.0 <= blast <= 1.0:
+            raise ValueError("blast_radius must be in [0, 1]")
+        if self.risk is not None:
+            risk = _finite(self.risk, "risk")
+            if not 0.0 <= risk <= 1.0:
+                raise ValueError("risk must be in [0, 1]")
+        tier = _risk_tier(self.risk)
+        tier_index = 0 if tier is None else int(tier[1:])
+        cost = (
+            REVIEW_MINUTES_PER_FILE * self.files_changed
+            + REVIEW_MINUTES_PER_100_LINES * self.lines_changed / 100.0
+            + REVIEW_MINUTES_PER_BLAST_POINT * blast
+            + REVIEW_MINUTES_PER_RISK_TIER * tier_index
+            + REVIEW_MINUTES_PER_EVIDENCE_ITEM * self.evidence_items
+        )
+        object.__setattr__(self, "risk_tier", tier)
+        object.__setattr__(self, "cost", round(cost, 1))
+        object.__setattr__(self, "review_minutes",
+                           round(REVIEW_BASE_MINUTES + cost, 1))
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "files_changed": self.files_changed,
+            "lines_changed": self.lines_changed,
+            "blast_radius": self.blast_radius,
+            "risk": self.risk,
+            "risk_tier": self.risk_tier,
+            "evidence_items": self.evidence_items,
+            "cost": self.cost,
+            "review_minutes": self.review_minutes,
+        }
 
 
 @dataclass(frozen=True)
@@ -170,6 +299,11 @@ class PromotionRequest:
     metamorphic: Optional[MetamorphicReport] = None
     verifier: Optional[EnsembleReport] = None
     calibration: Optional[CalibrationReport] = None
+    review_cost: Optional[ReviewCost] = None
+    #: What producing this candidate's diff cost (#945). ``None`` is "not
+    #: measured"; an all-``None`` :class:`~agentdescent.cost.Cost` is "measured,
+    #: but nothing usable" -- both defer under ``require_cost``.
+    cost: Optional[Cost] = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -187,6 +321,11 @@ class PromotionRequest:
                 raise ValueError("risk must be in [0, 1]")
         if self.approved is not None and not isinstance(self.approved, bool):
             raise TypeError("approved must be a bool or None")
+        if self.review_cost is not None and not isinstance(
+                self.review_cost, ReviewCost):
+            raise TypeError("review_cost must be a ReviewCost or None")
+        if self.cost is not None and not isinstance(self.cost, Cost):
+            raise TypeError("cost must be a Cost or None")
         object.__setattr__(self, "metadata", dict(self.metadata or {}))
 
 
@@ -255,6 +394,18 @@ def _evidence(request: PromotionRequest) -> Dict[str, Any]:
         evidence["verifier"] = request.verifier.to_dict()
     if request.calibration is not None:
         evidence["calibration"] = asdict(request.calibration)
+    if request.cost is not None:
+        evidence["cost"] = request.cost.to_dict()
+    if request.review_cost is not None:
+        # Only when a caller measured it: the default decision, its evidence
+        # hash and its decision hash stay exactly what they were before #950.
+        cost = request.review_cost
+        evidence["review_cost"] = cost.to_dict()
+        delta = (request.eval_result.delta
+                 if request.eval_result is not None else None)
+        evidence["attention_per_accepted_gain"] = (
+            None if not delta or delta <= 0
+            else round(cost.review_minutes / (delta / 0.01), 3))
     return _safe(evidence)
 
 
@@ -290,7 +441,10 @@ def promote(request: PromotionRequest,
                 f"eval has {result.n} task(s), needs {policy.min_tasks}")
         if not result.passed:
             hard_fail = True
-            reasons.append("eval gate did not pass")
+            # The detail is what says *why* the gate failed -- a censored run
+            # carries its failure count and rate there (#993), and a bare
+            # "did not pass" would hide it.
+            reasons.append(f"eval gate did not pass: {result.detail}")
         if result.delta < policy.min_effect:
             hard_fail = True
             reasons.append(
@@ -408,6 +562,18 @@ def promote(request: PromotionRequest,
             f"verifier ensemble rejected the candidate "
             f"(score {report.score:.3g})")
 
+    if policy.require_verifier_admission:
+        admission = getattr(report, "admission", None)
+        if admission is None:                   # no report is no admission either
+            missing.append("verifier admission")
+        elif admission.recommendation == "reject":
+            hard_fail = True
+            reasons.append(f"verifier admission failed: {admission.reason}")
+        elif admission.recommendation != "admit":
+            # One source for the bar: incomplete and insufficient-evidence
+            # reports both arrive here as "defer", never as a pass or a fail.
+            deferred.append(f"verifier admission: {admission.reason}")
+
     report = request.calibration
     if report is None:
         if policy.require_calibration:
@@ -417,6 +583,29 @@ def promote(request: PromotionRequest,
         reasons.append(f"calibration {report.verdict}: {report.detail}")
     elif report.verdict in ("insufficient", "miscalibrated"):
         deferred.append(f"calibration {report.verdict}: {report.detail}")
+
+    cost = request.review_cost
+    if cost is not None:
+        if policy.max_review_minutes > 0 and (
+                cost.review_minutes > policy.max_review_minutes):
+            deferred.append(
+                f"review cost {cost.review_minutes:.1f} min > max_review_minutes "
+                f"{policy.max_review_minutes:.1f}: defer and batch it with other "
+                f"promotions")
+        if policy.max_review_cost > 0 and cost.cost > policy.max_review_cost:
+            deferred.append(
+                f"review cost {cost.cost:.1f} > max_review_cost "
+                f"{policy.max_review_cost:.1f}: defer and batch it with other "
+                f"promotions")
+
+    if request.cost is None:
+        if policy.require_cost:
+            missing.append("cost")
+    elif not request.cost.known and policy.require_cost:
+        # Present but unpriced (no calls/tokens/seconds/USD). A requirement for
+        # cost data is not satisfied by an empty block, and it is not a
+        # rejection: the caller can measure it and re-ask (#945).
+        missing.append("cost (present but unknown)")
 
     if policy.require_risk and request.risk is None:
         missing.append("risk")
@@ -444,7 +633,7 @@ def promote(request: PromotionRequest,
 
     evidence = _evidence(request)
     evidence_hash = hashlib.sha256(_canonical(evidence).encode()).hexdigest()
-    policy_dict = asdict(policy)
+    policy_dict = _policy_payload(policy)
     decision_hash = hashlib.sha256(_canonical({
         "evidence_hash": evidence_hash, "policy": policy_dict,
         "action": action}).encode()).hexdigest()

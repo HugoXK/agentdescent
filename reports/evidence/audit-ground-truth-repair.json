@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "held_out": "not reviewed -- the report gives the loop's own gate sizes (9 and 30 units) and a held-out sigma, not a quality split.",
+  "matched_budget": "not reviewed -- the two runs are deliberately at different pool sizes; that difference is the variable.",
+  "cross_model": "not reviewed -- one model and one workload (MBPP).",
+  "cost": "Not recorded per run; the whole audit campaign is about 3,140 calls over about 81 minutes (reports/README.md).",
+  "disjoint_search": "not reviewed",
+  "reliability": "This claim is not reproducible offline: the run needs the MBPP dataset join plus a live model, and the stores behind the table are preserved only at commit c86e216, which a squash merge does not reach. What the repair path does have offline is its rule machinery -- tests/test_audit_diagnose_script.py pins evaluate_fix, the per-rule measurements and the union/hiding behaviour -- but nothing here recomputes 0.778 or 0.967.",
+  "code": "claim: a small gate cannot repair the judge and a larger one can, and the pair is the result -- with 9 units (resolution 1/9) the MBPP reward sat at 0.778 over ten rounds, accepted 7 rules, moved sigma 0.4272 -> 0.3125 on held-out and the scorecard refused; with 30 units it moved 0.800 -> 0.967 on 2 accepted rules, sigma 0.4747 -> 0.2549, false negatives 3.2% -> 0.0%, and nothing blocks. The two accepted rules were the ones with content: same syntactic form as the reference, and a valid implementation of the specification rather than a literal output. Published as the two-column table in reports/README.md, 'Can ground truth repair the judge?' (lines 46-66); produced by scripts/audit_evolve_judge.py.",
+  "evolved_artifact": "The two rules kept at 30 units, quoted in reports/README.md: the candidate must be of the same syntactic form as the reference, and must satisfy the problem specification rather than reproduce a literal output.",
+  "who_edits": "not reviewed",
+  "feedback": "not reviewed",
+  "timing": "not reviewed",
+  "topology": "not reviewed"
+}

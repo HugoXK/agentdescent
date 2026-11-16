@@ -34,8 +34,10 @@ or a near-threshold score buys the next verifier.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+
+from .admission import AdmissionReport
 
 __all__ = [
     "VerifierSpec",
@@ -97,13 +99,14 @@ class EnsembleReport:
     complete: bool = True
     errors: int = 0
     detail: str = ""
+    admission: Optional[AdmissionReport] = None   # #940; absent is not a pass
 
     @property
     def names(self) -> Tuple[str, ...]:
         return tuple(vote.name for vote in self.votes)
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        data: Dict[str, Any] = {
             "score": self.score,
             "passed": self.passed,
             "confidence": self.confidence,
@@ -118,6 +121,10 @@ class EnsembleReport:
                 for v in self.votes
             ],
         }
+        if self.admission is not None:
+            # Only when measured: an unchanged report keeps the same hash.
+            data["admission"] = asdict(self.admission)
+        return data
 
 
 def _finite_score(value: Any, name: str) -> float:

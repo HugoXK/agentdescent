@@ -126,6 +126,27 @@ def test_algorithms_run_kind_mismatch_speaks_run_not_init(tmp_path, capsys, monk
     assert not list(tmp_path.glob("agentdescent.*.spec.json"))
 
 
+def test_algorithms_run_text_only_card_on_a_library_says_it_is_text_only(
+        tmp_path, capsys, monkeypatch):
+    # #846: "applies to kind ['text']" alone leaves a library user guessing
+    # whether the card can see their skills at all; say the card is text-only
+    # and keep naming the cards that do apply.
+    monkeypatch.chdir(tmp_path)
+    library = tmp_path / "library"
+    for name in ("alpha", "beta"):
+        (library / name).mkdir(parents=True)
+        (library / name / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: d\n---\nbody\n")
+    _prompt, cases = _prompt_and_cases(tmp_path)
+    assert cli.main(["algorithms", "run", "gepa", str(library), str(cases),
+                     "--kind", "skill_library", "--model", "m"]) == 2
+    err = capsys.readouterr().err
+    assert "'gepa' is text-only" in err
+    assert "not a skill_library target" in err
+    assert "archive_selection" in err and "evoskill" in err
+    assert not list(tmp_path.glob("agentdescent.*.spec.json"))
+
+
 def test_algorithms_run_kind_mismatch_on_file_says_it_needs_a_directory(
         tmp_path, capsys, monkeypatch):
     monkeypatch.chdir(tmp_path)
@@ -244,7 +265,57 @@ def test_algorithms_run_agent_passthrough(tmp_path, capsys, monkeypatch):
     capsys.readouterr()
     spec = json.loads(out.read_text())
     assert spec["agent"] == {"ref": "dsh"}
-    assert spec["algorithm"] == "evoskill"
+    assert spec["algorithm"] == {"name": "evoskill", "params": {"batch_size": 1}}
+
+
+def test_algorithms_run_param_hyphen_alias(tmp_path, capsys, monkeypatch):
+    """#876: `--param batch-size=2` is the same as `batch_size=2`."""
+    monkeypatch.chdir(tmp_path)
+    skill = _skill(tmp_path)
+    _, cases = _prompt_and_cases(tmp_path)
+    out = tmp_path / "s.json"
+    rc = cli.main(["algorithms", "run", "evoskill", str(skill), str(cases),
+                   "--param", "batch-size=2", "--out", str(out)])
+    assert rc in (0, 2)
+    capsys.readouterr()
+    spec = json.loads(out.read_text())
+    assert spec["algorithm"]["params"]["batch_size"] == 2
+
+
+def test_algorithms_run_param_choice_hyphen_alias(tmp_path, capsys, monkeypatch):
+    """#888: `--param sampling=sigmoid-novelty` stores the canonical choice."""
+    monkeypatch.chdir(tmp_path)
+    prompt, cases = _prompt_and_cases(tmp_path)
+    out = tmp_path / "s.json"
+    rc = cli.main(["algorithms", "run", "archive_selection", str(prompt), str(cases),
+                   "--param", "sampling=sigmoid-novelty",
+                   "--model", "m", "--base-url", "https://example.test/v1",
+                   "--out", str(out)])
+    assert rc in (0, 2)
+    capsys.readouterr()
+    spec = json.loads(out.read_text())
+    params = spec["algorithm"]["params"] if isinstance(spec["algorithm"], dict) else None
+    assert params is not None and params["sampling"] == "sigmoid_novelty"
+
+
+def test_algorithms_run_invalid_choice_names_near_miss(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    prompt, cases = _prompt_and_cases(tmp_path)
+    assert cli.main(["algorithms", "run", "archive_selection", str(prompt), str(cases),
+                     "--param", "sampling=novlty"]) == 2
+    err = capsys.readouterr().err
+    assert "must be one of" in err and "did you mean 'novelty'?" in err
+    assert not list(tmp_path.glob("agentdescent.*.spec.json"))
+
+
+def test_algorithms_run_unknown_param_names_near_miss(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    skill = _skill(tmp_path)
+    assert cli.main(["algorithms", "run", "evoskill", str(skill),
+                     "--param", "bacth_size=1"]) == 2
+    err = capsys.readouterr().err
+    assert "no parameter" in err and "did you mean 'batch_size'?" in err
+    assert not list(tmp_path.glob("agentdescent.*.spec.json"))
 
 
 def test_algorithms_run_agent_mismatch_refused(tmp_path, capsys, monkeypatch):
@@ -344,3 +415,37 @@ def test_algorithms_run_resolves_a_case_variant_to_the_registered_name(
     assert out.exists()
     assert json.loads(out.read_text())["algorithm"] == "gepa"
     assert f"next: agentdescent evolve {out.name}" in capsys.readouterr().out
+
+
+def test_algorithms_run_plan_failure_keeps_backup_note(tmp_path, capsys, monkeypatch):
+    """A failed plan still says where the overwritten spec went (#749)."""
+    monkeypatch.chdir(tmp_path)
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("be terse\n")
+    out = tmp_path / "out.spec.json"
+    out.write_text('{"edited": 1}\n')
+    # No cases.jsonl: the spec is written, then plan refuses it.
+    assert cli.main(["algorithms", "run", "gepa", str(prompt),
+                     "--out", str(out)]) == 2
+    captured = capsys.readouterr()
+    backup = f"{out}.bak-0"
+    assert Path(backup).read_text() == '{"edited": 1}\n'
+    assert f"wrote {out}" in captured.out
+    assert f"note: {out} already existed" in captured.out
+    assert backup in captured.out
+    assert "error:" in captured.err
+
+
+def test_algorithms_run_plan_failure_json_has_notes(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("be terse\n")
+    out = tmp_path / "out.spec.json"
+    out.write_text('{"edited": 1}\n')
+    assert cli.main(["algorithms", "run", "gepa", str(prompt),
+                     "--out", str(out), "--json"]) == 2
+    obj = json.loads(capsys.readouterr().out)
+    assert obj["ok"] is False
+    assert isinstance(obj["warnings"], list)
+    assert any(f"{out}.bak-0" in n for n in obj["notes"])
+    assert not any(k.startswith("_") for k in obj)

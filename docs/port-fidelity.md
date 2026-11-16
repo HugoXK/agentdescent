@@ -1,5 +1,9 @@
 # Port fidelity — what each port follows, and where it departs
 
+Product surface note (**cards-only contract**, #384 closed): `agentdescent algorithms list` / `show` and host pick UIs list **Algorithm cards** (`surface=card`) shipped in the wheel. When a card shares a slug with an `examples/<algo>/` research port (ACE, GEPA, DGM, SkillOpt, EvoSkill), `show` / `plan` carry `research_port` and a `fidelity_note` so a mechanism slice is never read as the paper port. Filter cards with `--kind` / `kind=` for the host artifact.
+
+Choosing card vs MethodPolicy vs full port vs `aggregator_factory`: [algorithm decision tree](algorithm-decision-tree.md).
+
 Twenty-three published self-evolution algorithms run on this engine — eight as benchmark-faithful ports, fifteen as declared microports and analogues. Every one of them
 was published as a **serial** loop, and every one of them here runs in parallel
 with a merge step the original does not have. That is only an interesting claim
@@ -47,7 +51,7 @@ scheduling and merge timing only"* on every row. A row saying anything else is
 either a bug or a finding, and either way it has to be written down.
 
 !!! note "That column is generated, not typed"
-    It is [`bench.matrix_run.SEMANTICS`](https://github.com/Birfy/agentdescent/blob/main/bench/matrix_run.py)
+    It is [`bench.matrix_run.SEMANTICS`](https://github.com/ThinkFlowLab/agentdescent/blob/main/bench/matrix_run.py)
     — one entry per row **per arm**, declared beside the rows the sweep runs, and
     `bench/matrix_report.py` refuses to render a row that has no entry. A column
     filled in afterwards is filled in from memory by whoever is writing up the
@@ -518,7 +522,7 @@ section naming exactly what its compact or substituted domain gives up, and a
 `!!! danger` block for every defect found in it and fixed — which is the same
 *paper says / released code does / this port follows* audit, written where the
 port is. Start from the
-[table of all eleven](self-evolution-examples.md#the-eleven-microports-and-analogues);
+[MethodPolicy table](self-evolution-examples.md#the-methodpolicy-microports-and-analogues);
 their measured results are
 [in one place](self-evolution-examples.md#measured-results-all-twenty-three), and the
 scheduler comparison they exist for is the [runtime matrix](matrix-overview.md).

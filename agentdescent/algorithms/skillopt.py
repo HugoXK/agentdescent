@@ -105,13 +105,15 @@ class LRScheduler:
 
     def step(self) -> int:
         import math
+        # Clamp so steps past total_steps stay at min_lr instead of climbing
+        # back up the cosine/linear curve (#840).
+        denom = max(1, self.total_steps - 1)
+        frac = min(1.0, max(0.0, self._t / denom))
         if self.mode == "constant":
             budget = self.max_lr
         elif self.mode == "linear":
-            frac = self._t / max(1, self.total_steps - 1)
             budget = round(self.max_lr + (self.min_lr - self.max_lr) * frac)
         else:  # cosine (repo default)
-            frac = self._t / max(1, self.total_steps - 1)
             cos = 0.5 * (1 + math.cos(math.pi * frac))
             budget = round(self.min_lr + (self.max_lr - self.min_lr) * cos)
         self._t += 1
@@ -374,11 +376,21 @@ class StrictGateAggregator(AggregatorProtocol):
 
 def strict_gate_factory(ctx: SkillOptContext, *, artifact_id: str = "skill_document",
                         acceptance: Optional[StrictImprovement] = None):
-    """The `aggregator_factory=` evolve() expects for SkillOpt."""
-    def factory(ledger, verifier, audit, config, policy):
-        return StrictGateAggregator(ledger, verifier, ctx,
-                                    artifact_id=artifact_id,
-                                    acceptance=acceptance)
+    """The `aggregator_factory=` evolve() expects for SkillOpt.
+
+    Merge-side ``Policies`` (``acceptance=``, ``fusion=``) are forwarded by
+    ``evolve`` into this factory (#807); a caller-supplied acceptance wins over
+    the captured default, and ``fusion`` lands on ``merge_round``.
+    """
+    default_acceptance = acceptance
+
+    def factory(ledger, verifier, audit, config, policy,
+                acceptance=None, fusion=None, **_ignored):
+        return StrictGateAggregator(
+            ledger, verifier, ctx, artifact_id=artifact_id,
+            acceptance=(acceptance if acceptance is not None
+                        else default_acceptance),
+            merge_round=fusion)
     return factory
 
 
@@ -422,7 +434,7 @@ register(Algorithm(
     params=(
         Param("max_lr", "int", 4, "largest edit budget per step", minimum=1),
         Param("min_lr", "int", 2, "smallest edit budget per step", minimum=1),
-        Param("total_steps", "int", 8, "steps the budget anneals over", minimum=1),
+        Param("total_steps", "int", 8, "steps the budget anneals over (independent of evolve rounds; past this, budget stays at min_lr)", minimum=1),
         Param("mode", "str", "cosine", "anneal schedule",
               choices=("cosine", "linear", "constant")),
     ),

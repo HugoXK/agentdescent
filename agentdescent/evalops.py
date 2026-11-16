@@ -25,7 +25,7 @@ import hashlib
 import json
 import math
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -362,17 +362,17 @@ class EvalOps:
         before = baseline
         boot = bootstrap_ci(before, after, n=spec.bootstrap, alpha=spec.alpha)
         delta = boot.mean
-        passed = delta >= spec.min_effect and (
-            boot.n < 2 or boot.lo > spec.min_effect)
         result = EvalResult(
             eval_id=eval_id, dataset_id=dataset.dataset_id,
             version=dataset.version, content_hash=dataset.content_hash,
             n=boot.n, score=sum(after.values()) / len(after),
             baseline=sum(before.values()) / len(before), delta=delta,
-            ci=(boot.lo, boot.hi), passed=passed, cost=cost,
+            ci=(boot.lo, boot.hi), passed=False, cost=cost,
             per_task=dict(per_task),
             detail=f"delta={delta:+.4f}, CI=[{boot.lo:+.4f},{boot.hi:+.4f}], "
                    f"cost={cost:g}")
+        decision = RegressionGate(min_effect=spec.min_effect).check(result)
+        result = replace(result, passed=decision.passed)
         self._results[eval_id] = result
         self.last_run[eval_id] = float(self.clock() if now is None else now)
         return result

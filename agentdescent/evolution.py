@@ -55,7 +55,7 @@ from .governance import FROZEN_IDS, GovernanceError, assert_mutable
 from .ledger import Ledger, LedgerFailure
 from .metrics import Meter, measured
 from .pipeline import EarlyStop, FirstError, WorkerHealth, describe as _describe
-from .policies import FusionTrial, Policies
+from .policies import FusionTrial, Policies, policy_digest
 from .sampling import RoundRobin, TaskSampler
 from .selection import SingleHead
 from .scheduler import AuditScheduler
@@ -238,6 +238,7 @@ def claude_agent(model: str = "claude-opus-4-8", max_tokens: int = 1024) -> LLMA
 from .strategies import (  # noqa: E402
     AppendRules,
     KeyedRules,
+    SeededAppendRules,
     SingleSlot,
     Strategy,
     rule_id,
@@ -284,12 +285,33 @@ class RewardContractError(ContractError, ValueError):
 
 
 def _checked_proposal(value, task: "Task"):
-    """``propose`` may return text or ``None``; anything else is a caller error."""
-    if value is None or isinstance(value, str):
-        return value
+    """Normalise ``propose`` output to a list of proposal strings (#808).
+
+    A callable may return ``None``, one string, or a sequence of strings. A
+    ``ProposalPolicy`` that samples k variants returns a sequence; each entry
+    becomes its own evidence card. Non-text values are still a contract error.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value else []
+    if isinstance(value, (list, tuple)):
+        out = []
+        for i, item in enumerate(value):
+            if item is None:
+                continue
+            if not isinstance(item, str):
+                raise ProposalContractError(
+                    f"propose(task={task.id!r}, ...) returned a sequence whose "
+                    f"item {i} is {type(item).__name__} ({item!r:.40}); each "
+                    "proposal must be a string")
+            if item:
+                out.append(item)
+        return out
     raise ProposalContractError(
         f"propose(task={task.id!r}, ...) returned {type(value).__name__} "
-        f"({value!r:.40}); it must return a string or None")
+        f"({value!r:.40}); it must return a string, a sequence of strings, "
+        "or None")
 
 
 def _checked_reward(value, task: "Task") -> float:
@@ -844,31 +866,123 @@ def _publish_stable(aggregator) -> None:
         pass
 
 
-#: What `evolve` can honour from a `Policies` bundle today. Everything else
+#: What each driver can honour from a `Policies` bundle today. Everything else
 #: raises rather than being accepted and ignored -- see
-#: `Policies.require_supported`. The set grows as the implementations land.
-_WIRED_POLICIES = ("task_sampler", "selection", "proposal", "conflict", "fusion",
-                   "acceptance", "promotion", "staleness", "verifier", "ledger",
-                   "aggregator_factory", "eval_cache", "sandbox_spec", "evaluator",
-                   "executor", "screen")
+#: `Policies.require_supported`. One table so sync and async cannot drift
+#: apart without a test noticing (#809). ``executor`` is sync-only: the
+#: barrier-free worker calls ``eng.run`` directly and has no executor seam yet.
+#: ``accept_orphaned_merge_policies`` is on both drivers (#807).
+_POLICY_DRIVER_SUPPORT = {
+    "evolve": (
+        "task_sampler", "selection", "proposal", "conflict", "fusion",
+        "acceptance", "promotion", "staleness", "verifier", "ledger",
+        "aggregator_factory", "eval_cache", "sandbox_spec", "evaluator",
+        "executor", "screen", "accept_orphaned_merge_policies",
+    ),
+    "async_evolve": (
+        "task_sampler", "selection", "proposal", "conflict", "fusion",
+        "acceptance", "promotion", "staleness", "verifier", "ledger",
+        "aggregator_factory", "eval_cache", "sandbox_spec", "evaluator",
+        "screen", "accept_orphaned_merge_policies",
+    ),
+}
+_WIRED_POLICIES = _POLICY_DRIVER_SUPPORT["evolve"]
+_ASYNC_WIRED_POLICIES = _POLICY_DRIVER_SUPPORT["async_evolve"]
 
-#: The same bundle, minus the one field the barrier-free loop does not read.
-#: `async_evolve`'s worker calls `eng.run` directly; there is no executor seam in
-#: it yet, so a supplied one was accepted and then dropped -- the exact outcome
-#: `require_supported` exists to make impossible, arriving through a *shared*
-#: constant rather than a missing check. It matters more since a supplied
-#: executor started working on the synchronous path: flipping
-#: `asynchronous=True` would otherwise silently stop honouring it.
-_ASYNC_WIRED_POLICIES = tuple(p for p in _WIRED_POLICIES if p != "executor")
+#: Merge-side Policies the default Aggregator (and population_factory) wire.
+#: An aggregator_factory that cannot take them used to warn and drop them;
+#: #807 fails that combination unless accept_orphaned_merge_policies=True.
+_MERGE_POLICY_NAMES = ("conflict", "fusion", "acceptance", "promotion", "screen")
+
+
+
+def _requested_merge_policies(pol) -> list:
+    return [name for name in _MERGE_POLICY_NAMES
+            if getattr(pol, name, None) is not None]
+
+
+def _apply_merge_policies(aggregator, pol) -> list:
+    """Attach merge-side Policies onto an aggregator that exposes the seats.
+
+    ``PopulationAggregator`` / ``Aggregator`` store them as ``*_policy`` at
+    construction (``population_factory`` closes over the Policies values);
+    mechanism cards such as GEPA/SkillOpt expose ``acceptance`` and often
+    ``merge_round`` as the fusion seat. Returns the names that landed.
+    """
+    applied = []
+    for name in _MERGE_POLICY_NAMES:
+        val = getattr(pol, name, None)
+        if val is None:
+            continue
+        attrs = [name]
+        if name == "fusion":
+            attrs.append("merge_round")
+        attrs.append(f"{name}_policy")
+        landed = False
+        for attr in attrs:
+            if not hasattr(aggregator, attr):
+                continue
+            current = getattr(aggregator, attr)
+            if current is None:
+                try:
+                    setattr(aggregator, attr, val)
+                except AttributeError:
+                    continue
+                if attr == "merge_round" and hasattr(val, "bind"):
+                    binder = getattr(aggregator, "verifier", None)
+                    if binder is not None:
+                        val.bind(binder)
+                landed = True
+                break
+            if current is val:
+                # Factory already closed this Policies value into the seat
+                # (Aggregator uses ``conflict_policy`` / ``fusion_policy`` / …).
+                landed = True
+                break
+        if landed:
+            applied.append(name)
+    return applied
+
+
+def _call_aggregator_factory(factory, ledger, verifier, audit, config, staleness,
+                             pol):
+    """Build via factory, forwarding merge Policies the callable can take (#807)."""
+    import inspect
+    merge_kwargs = {name: getattr(pol, name)
+                    for name in _MERGE_POLICY_NAMES
+                    if getattr(pol, name, None) is not None}
+    kwargs = {}
+    try:
+        params = inspect.signature(factory).parameters
+    except (TypeError, ValueError):
+        params = {}
+    accepts_var = any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+    for name, val in merge_kwargs.items():
+        if name in params or accepts_var:
+            kwargs[name] = val
+    if kwargs:
+        try:
+            aggregator = factory(ledger, verifier, audit, config, staleness,
+                                 **kwargs)
+        except TypeError:
+            # Signature lied or is a partial that rejects the kwargs — fall back.
+            aggregator = factory(ledger, verifier, audit, config, staleness)
+    else:
+        aggregator = factory(ledger, verifier, audit, config, staleness)
+    applied = _apply_merge_policies(aggregator, pol)
+    return aggregator, applied
 
 
 def _propose_via_policy(policy, settled_reader=None):
-    """Adapt a `ProposalPolicy` back to the engine's one-proposal contract.
+    """Adapt a `ProposalPolicy` to the engine's propose callable (#808).
 
-    A policy that returns several is refused rather than truncated: the engine
-    turns one proposal into one diff per rollout, so quietly keeping the first
-    would discard work the policy did and make a k-sampling algorithm look like
-    it ran when only a fraction of it did.
+    The Protocol returns ``Sequence[str]`` and ``ProposalContext.k`` says how
+    many variants the caller wants. The adapter passes ``k`` (from
+    ``getattr(policy, "k", 1)``) and returns every non-empty string the policy
+    produced — one string for the single-proposal case, a list when ``k > 1`` —
+    so the worker can ingest one evidence card per proposal. Truncating would
+    make a k-sampling algorithm look like it ran when only a fraction did.
 
     ``settled_reader`` is an optional mutable cell ``[callable]``, set later by
     the engine after the aggregator is built, that returns the recent settled
@@ -877,23 +991,35 @@ def _propose_via_policy(policy, settled_reader=None):
     """
     from .policies import ProposalContext
 
+    try:
+        k = int(getattr(policy, "k", 1) or 1)
+    except (TypeError, ValueError):
+        k = 1
+    if k < 1:
+        k = 1
+
     def propose(rendered, task, output, reward):
         rejected = ()
         if settled_reader is not None and settled_reader[0] is not None:
             rejected = settled_reader[0](task, n=3)
         out = list(policy.propose(ProposalContext(
             rendered=rendered, task=task, output=output, reward=reward,
-            rejected=rejected)))
-        if len(out) > 1:
-            # A caller-contract violation, not a backend failure: raised as one so
-            # it travels the channel the engine already has for "this run is
-            # meaningless" rather than being folded into `error` as a transient
-            # and retried.
-            raise ProposalContractError(
-                f"the engine consumes one proposal per rollout; this policy "
-                f"returned {len(out)}, and keeping the first would silently drop "
-                f"{len(out) - 1}. Batched rollouts are what makes k > 1 usable.")
-        return out[0] if out else None
+            k=k, rejected=rejected)))
+        cleaned = []
+        for i, item in enumerate(out):
+            if item is None:
+                continue
+            if not isinstance(item, str):
+                raise ProposalContractError(
+                    f"ProposalPolicy.propose returned a non-string at index {i} "
+                    f"({type(item).__name__})")
+            if item:
+                cleaned.append(item)
+        if not cleaned:
+            return None
+        if len(cleaned) == 1:
+            return cleaned[0]
+        return cleaned
 
     return propose
 
@@ -1410,6 +1536,42 @@ class FusionStats:
                 f"{self.below_baseline} below baseline), {self.ties} ties")
 
 
+def _file_tree_backup_path(dest: str) -> str:
+    """Return a ``bak-N`` directory that will not sit beside ``dest``.
+
+    Sibling ``<dest>.bak-N`` copies are scanned by host skill loaders (OpenCode,
+    Claude Code) as another skill with the same frontmatter ``name``, so the
+    backup can shadow the evolved tree after ``apply`` (#758). Keep backups
+    under ``$AGENTDESCENT_HOME/backups`` (else ``~/.agentdescent/backups``),
+    keyed by the target basename plus a short digest of the absolute path.
+    """
+    abs_dest = os.path.abspath(dest)
+    raw_name = os.path.basename(abs_dest.rstrip(os.sep)) or "dir"
+    name = re.sub(r"[^A-Za-z0-9._-]+", "-", raw_name).strip(".-") or "dir"
+    digest = hashlib.sha256(abs_dest.encode("utf-8")).hexdigest()[:12]
+    home = os.environ.get("AGENTDESCENT_HOME") or os.path.join(
+        os.path.expanduser("~"), ".agentdescent")
+    home = os.path.abspath(os.path.expanduser(home))
+    base = os.path.join(home, "backups", f"{name}-{digest}")
+    n = 0
+    # `lexists`, not `exists`: a dangling link at `bak-0` is still a link, so
+    # `exists` would hand that slot to `copytree`, which dies on it (#977).
+    while os.path.lexists(os.path.join(base, f"bak-{n}")):
+        n += 1
+    return os.path.join(base, f"bak-{n}")
+
+
+def _check_apply_paths(dest: str, written: Sequence[str], backup: Optional[str],
+                       check_write: Optional[Callable[[str, str], Any]]) -> None:
+    """Check the selected write set before any artifact or backup is changed."""
+    if check_write is not None:
+        check_write(dest, "to")
+        for path in written:
+            check_write(path, "to")
+        if backup is not None:
+            check_write(backup, "backup")
+
+
 @dataclass
 class EvolutionResult:
     state: Dict[str, str]
@@ -1421,6 +1583,17 @@ class EvolutionResult:
     #: ``None`` when seed scoring failed (dead backend) or the result was written
     #: before this field existed. Never aborts the run.
     initial_reward: Optional[float] = None
+    #: Reward on the **test** split, when the run carved one out with
+    #: ``evolve(test_frac=...)`` (#843). ``None`` when there is no test split, or
+    #: when its one scoring pass failed -- a missing number rather than a
+    #: misleading one. Never read by a commit decision: ``final_reward`` is the
+    #: select-set number, and this is what generalisation actually measured.
+    test_reward: Optional[float] = None
+    #: Sizes of the two partitions the numbers rest on: the select set
+    #: (``final_reward``) and the test set (``test_reward``). ``test_tasks == 0``
+    #: means the old single-split run.
+    test_tasks: int = 0
+    select_tasks: int = 0
     #: ``None`` on a clean run; otherwise a description of the failure that either
     #: ended the run early **or** made its final measurement unusable (in which case
     #: ``final_reward`` falls back to the last measured round, and the message says
@@ -1597,6 +1770,15 @@ class EvolutionResult:
     #: budget ran out" from "it converged" — and to know whether the tail of
     #: the search ran degraded (fewer ranking passes) or at full quality.
     budget: Optional[Dict[str, Any]] = None
+    #: Which decision procedure produced this run (#943), as
+    #: :func:`~agentdescent.policies.policy_digest`'s 64-hex content hash.
+    #: ``""`` on a result that was not produced by ``evolve()`` / the joint
+    #: drivers, or one written before this field existed. It lives here rather
+    #: than in :meth:`outcomes` because ``outcomes()`` is a
+    #: ``Dict[str, int]`` of merge categories -- a version hash is not a count,
+    #: and a caller comparing two runs reads this against
+    #: ``RunManifest.policy_digest``.
+    policy_digest: str = ""
 
     def fusion_stats(self) -> "FusionStats":
         """How often merging beat the best single diff -- and how badly it lost.
@@ -1812,14 +1994,25 @@ class EvolutionResult:
         Deliberately conservative, because this is the one call in the whole
         package that writes into a directory the user cares about:
 
-        * ``backup=True`` (default) copies the existing directory to
-          ``<path>.bak-N`` first -- but only when something is about to change;
+        * ``backup=True`` (default) copies the existing directory under
+          ``$AGENTDESCENT_HOME/backups/<name>-<digest>/bak-N`` (or
+          ``~/.agentdescent/backups/...``) first -- but only when something is
+          about to change. The backup is deliberately **not** a sibling of
+          ``path``: hosts that scan a skills folder (OpenCode, Claude Code)
+          would otherwise load ``<name>.bak-0`` as another skill and shadow the
+          evolved copy (#758);
         * files present in the target but **not** in the artifact are reported as
           ``extra`` and left alone unless ``prune=True`` -- the run only ever knew
           about the files its ``TreeSpec`` selected, so deleting by omission would
           take out anything the spec excluded;
         * ``dry_run=True`` returns the same plan without touching the disk.
         """
+        return self._write_to(path, backup=backup, prune=prune, dry_run=dry_run)
+
+    def _write_to(self, path: str, *, backup: bool = True, prune: bool = False,
+                  dry_run: bool = False,
+                  check_write: Optional[Callable[[str, str], Any]] = None) -> Dict[str, Any]:
+        """The same apply operation, with an optional surface write boundary."""
         import os
         import shutil
 
@@ -1886,14 +2079,15 @@ class EvolutionResult:
                 "extra": [] if prune else extra,
                 "deleted": extra if prune else [], "backup": [],
                 "noop": not changed and not (prune and extra)}
+        bak = (_file_tree_backup_path(dest)
+               if backup and not plan["noop"] and os.path.isdir(dest) else None)
+        _check_apply_paths(dest, [os.path.join(dest, rel.replace("/", os.sep))
+                                 for rel in changed + plan["deleted"]], bak, check_write)
         if dry_run or plan["noop"]:
             return plan
-        if backup and os.path.isdir(dest):
-            n = 0
-            while os.path.exists(f"{dest}.bak-{n}"):
-                n += 1
-            shutil.copytree(dest, f"{dest}.bak-{n}", symlinks=True)
-            plan["backup"] = [f"{dest}.bak-{n}"]
+        if bak is not None:
+            shutil.copytree(dest, bak, symlinks=True)
+            plan["backup"] = [bak]
         materialize({rel: self.state[rel] for rel in changed}, dest)
         if prune:
             for rel in extra:
@@ -1992,6 +2186,11 @@ class _Engine:
     #: (whose ``Contract.depends_on`` names A) has cached evaluations taken under
     #: the old contract, so the engine re-measures them.
     contract_dependents: Dict[str, List[str]] = field(default_factory=dict)
+    #: The test partition carved out of ``held_out`` when the caller passed
+    #: ``test_frac`` (#843). Empty is the old run exactly. Selection and every
+    #: gate read ``held_out`` (now the *select* set); this is scored once, at the
+    #: end, and never enters a commit decision.
+    test: List[Task] = field(default_factory=list)
 
     def invalidate_dependents(self, changed_artifact_id: str,
                               branch: str = Ledger.DEV) -> None:
@@ -2050,6 +2249,15 @@ class _Engine:
     #: reports ``round 0`` for a search 40 rounds deep, and hands
     #: ``_prune_round_files`` a history that no longer sorts.
     checkpoint_round_base: int = 0
+    #: Which decision procedure this run is using (#943), as
+    #: :func:`~agentdescent.policies.policy_digest`'s 64-hex content hash.
+    #: Computed once in ``_build_engine`` from the *resolved* Policies (legacy
+    #: shortcuts already folded in), the aggregator config after
+    #: ``fusion_tournament=`` was applied, and the verifier that actually
+    #: measures. Stamped on the aggregator, on every commit message and on the
+    #: result, so a later reader can say which procedure admitted a commit
+    #: without reconstructing the call.
+    policy_digest: str = ""
 
     def _record_rollout(self, *, artifact_id: str, rendered: str, task: Task,
                         base_version: VersionVector, purpose: str,
@@ -2239,6 +2447,31 @@ def _contract_dependents(primary_id: str, primary_contract: Any,
 #: note the same condition from the same helpers, so the two cannot drift (#414).
 MIN_HELD_OUT = 4
 
+#: What the printed reward actually is, once a run has no separate test split
+#: (#843). Selection -- which candidate becomes head, which diff commits -- and
+#: the reported number both read the same held-out split by default, so the
+#: reward is the score of the set that chose the winner. Saying so is the honest
+#: half of the fix; ``evolve(test_frac=...)`` is the measurable half.
+SELECT_SET_NOTE = ("reward is the select set (the split used for accept/select), "
+                   "not an unseen test set")
+
+
+def reward_set_line(final_reward: float,
+                    test_reward: Optional[float] = None) -> str:
+    """One line naming which set a printed reward is (#843).
+
+    With a test split, both numbers are printed and the test reward is labelled
+    as never having been used for selection. Without one, the line says the
+    reward is the select set rather than an unseen test -- the alternative was
+    letting a reader assume generalisation that the run never measured.
+    """
+    if test_reward is None:
+        return (f"reward: {final_reward:.3f}  "
+                f"({SELECT_SET_NOTE})")
+    return (f"select reward: {final_reward:.3f}  "
+            f"test reward: {test_reward:.3f}  "
+            "(the test split was never used for accept/select)")
+
 
 class SmallHeldOutWarning(RuntimeWarning):
     """``evolve()``'s held-out set is smaller than :data:`MIN_HELD_OUT`.
@@ -2314,7 +2547,8 @@ def _build_engine(tasks, reward, *, agent, run, propose, strategy, initial_state
                   trajectory_store: Optional[Any] = None,
                   contract: Optional[Contract] = None,
                   extra_artifacts: Optional[Dict[str, "EvolvingArtifact"]] = None,
-                  population_islands: int = 0) -> _Engine:
+                  population_islands: int = 0,
+                  test_frac: float = 0.0) -> _Engine:
     """Wire the ledger, runtime, verifier and aggregator (shared by
     :func:`evolve` and :func:`~agentdescent.async_evolve.async_evolve`)."""
     import tempfile
@@ -2395,6 +2629,27 @@ def _build_engine(tasks, reward, *, agent, run, propose, strategy, initial_state
     # pushed one train item into held-out for many dataset sizes.
     cut = len(tasks) - held_out_size(len(tasks), held_out_frac)
     train, held_out = tasks[:cut], tasks[cut:]
+    # The test split (#843) is carved off the *tail* of the held-out set, so the
+    # select split keeps the positional promise `Dataset.val_frac` makes and the
+    # test tasks are simply the last `test_frac` of what used to be held out.
+    # Nothing in the run measures on them: every gate below reads `held_out`,
+    # which is now the select set. 0.0 (the default) leaves both variables
+    # exactly as they were.
+    test: List[Task] = []
+    if test_frac:
+        if not 0.0 < test_frac < 1.0:
+            raise ValueError(f"test_frac must be in (0, 1), got {test_frac}")
+        n_test = round(len(held_out) * test_frac)
+        if n_test < 1:
+            raise ValueError(
+                f"test_frac={test_frac} leaves no test task out of "
+                f"{len(held_out)} held-out tasks; pass more tasks or a larger "
+                "test_frac")
+        if len(held_out) - n_test < 1:
+            raise ValueError(
+                f"test_frac={test_frac} would leave no select task out of "
+                f"{len(held_out)} held-out tasks")
+        held_out, test = held_out[:len(held_out) - n_test], held_out[len(held_out) - n_test:]
     # Every gate in the run -- the Beta acceptance test, target_reward, patience,
     # final_reward -- is measured on this set. At 3 items a single binary rollout
     # moves the reported reward by 0.33, and at 1 it is 0.0 or 1.0 and nothing
@@ -2666,23 +2921,10 @@ def _build_engine(tasks, reward, *, agent, run, propose, strategy, initial_state
             "factory if it does its own candidate selection, the policy if it "
             "should run on the shipped merge pipeline.")
 
-    # A custom factory builds its own optimizer, so the merge-side policies never
-    # reach anything -- `policies=Policies(**reflective_merge(...))` alongside
-    # `aggregator_factory=` looks configured and changes nothing. Silence there is
-    # the bug: the caller paid for a model-merging run and got the factory's own
-    # behaviour. The task/proposal/eval-cache halves of `Policies` are read above
-    # and are unaffected, so only the merge side is named.
-    if aggregator_factory is not None:
-        dropped = [name for name in ("conflict", "fusion", "acceptance", "promotion",
-                                     "screen")
-                   if getattr(pol, name, None) is not None]
-        if dropped:
-            warnings.warn(
-                f"aggregator_factory= replaces the optimizer, so policies "
-                f"{sorted(dropped)} are not used. Drop one or the other -- an "
-                f"aggregator that ignores the policies it was given is "
-                f"indistinguishable from one that honours them.",
-                RuntimeWarning, stacklevel=3)
+    # Merge-side Policies used to be warned-and-dropped under aggregator_factory=
+    # (#504 quieted a false warning; #807 makes composition the default). The
+    # requested names are recorded here and checked after the factory returns.
+    _merge_requested = _requested_merge_policies(pol)
 
     def _default_aggregator(ledger, verifier, audit, config, policy):
         return Aggregator(ledger, verifier, audit, config, staleness_policy=policy,
@@ -2719,8 +2961,25 @@ def _build_engine(tasks, reward, *, agent, run, propose, strategy, initial_state
     if fusion_tournament is not None:
         cfg = _replace(cfg, fusion_tournament=fusion_tournament)
 
-    aggregator = (aggregator_factory or _default_aggregator)(
-        ledger, verifier, AuditScheduler(), cfg, staleness_policy)
+    if aggregator_factory is not None:
+        aggregator, _merge_applied = _call_aggregator_factory(
+            aggregator_factory, ledger, verifier, AuditScheduler(), cfg,
+            staleness_policy, pol)
+        orphaned = [n for n in _merge_requested if n not in _merge_applied]
+        if orphaned:
+            allow = bool(getattr(pol, "accept_orphaned_merge_policies", None))
+            msg = (
+                f"aggregator_factory= left Policies({sorted(orphaned)}) unused. "
+                "Pass the slots into the factory (see population_factory), expose "
+                "them on the returned aggregator, or set "
+                "Policies(accept_orphaned_merge_policies=True).")
+            if allow:
+                warnings.warn(msg, RuntimeWarning, stacklevel=3)
+            else:
+                raise ValueError(msg)
+    else:
+        aggregator = _default_aggregator(
+            ledger, verifier, AuditScheduler(), cfg, staleness_policy)
     # Wire the value allocator (if any) so the merge path can report commit
     # outcomes back into it. The worker asks the allocator its per-candidate
     # spend decision through the budget governor; this is the feedback half.
@@ -2754,6 +3013,18 @@ def _build_engine(tasks, reward, *, agent, run, propose, strategy, initial_state
                 f"aggregator_factory returned {type(aggregator).__name__}, which has "
                 f"no callable {method}(). An aggregator needs ingest(card) and "
                 "step() -> list[MergeReport] (see AggregatorProtocol).")
+
+    # Which decision procedure this run is (#943): the resolved bundle, the
+    # config after `fusion_tournament=` was folded in, and the verifier that
+    # will actually measure. Computed once here and stamped on the aggregator --
+    # including a factory-built one, whose signature predates this field and
+    # cannot be handed a new keyword -- so every MergeContext, every ledger
+    # commit message and the result carry one consistent value.
+    policy_digest_value = policy_digest(pol, config=cfg, verifier=verifier)
+    try:
+        aggregator.policy_digest = policy_digest_value
+    except AttributeError:      # slots, or a read-only property
+        pass
 
     # Restore the aggregator's in-memory search state if a checkpoint exists
     # from a previous run on this ledger. Only runs when checkpointing is on —
@@ -2820,9 +3091,11 @@ def _build_engine(tasks, reward, *, agent, run, propose, strategy, initial_state
                       aid for aid in (extra_artifacts or {}) if aid != artifact_id),
                   artifact_strategies=artifact_strategies,
                   contract_dependents=contract_dependents,
+                  test=test,
                   executor=executor, meter=meter, scratch_repo=scratch,
                   checkpoint_payload=_cp_payload, checkpointing=checkpointing,
-                  checkpoint_round_base=_cp_round_base)
+                  checkpoint_round_base=_cp_round_base,
+                  policy_digest=policy_digest_value)
     # A contract-breaking commit lands atomically (commit_atomic); this is the
     # consumer side -- re-measure the artifacts that depended on the changed
     # contract. Wired here, after the engine exists, so the callback has
@@ -2922,6 +3195,13 @@ def evolve(
     #: (default) means the per-call ceiling never changes.
     self_verify: bool = True,
     held_out_frac: float = 0.4,
+    #: Carve a **test** partition out of the held-out tail (#843). Selection and
+    #: every gate keep reading the select partition, so the winner is never
+    #: chosen on the numbers that are reported as generalisation; the test split
+    #: is scored once, at the end, and returned as
+    #: :attr:`EvolutionResult.test_reward`. ``0.0`` (default) is the old run
+    #: exactly, except that the CLI now says the printed reward is select-set.
+    test_frac: float = 0.0,
     repo_path: Optional[str] = None,
     #: Checkpoint the aggregator's search state every round, so a process
     #: restart can resume the search rather than just the artifact. Off by
@@ -3003,6 +3283,18 @@ def evolve(
     #: (``CladeThompson``, ``FlatPuct``) score *clades* -- the metaproductivity
     #: signal HGM's population search is built on.
     population_islands: int = 0,
+    #: Typed spend/stop bag (#804). Prefer this (or ``runtime`` /
+    #: ``observability``) for new numerics and flags rather than another
+    #: top-level kwarg. Flat ``max_seconds=`` / ``max_rollouts=`` / … stay as
+    #: shortcuts onto the bag's fields — see
+    #: :class:`~agentdescent.evolve_settings.BudgetSettings`.
+    budget: Optional["BudgetSettings"] = None,
+    #: Typed runtime bag (#804): workers, gates, split, search extras. Flat
+    #: ``n_workers=`` / ``rounds=`` / … stay as shortcuts.
+    runtime: Optional["RuntimeSettings"] = None,
+    #: Typed observability bag (#804): hooks, meters, trajectory recording.
+    #: Flat ``on_round=`` / ``verbose=`` / … stay as shortcuts.
+    observability: Optional["ObservabilitySettings"] = None,
 ) -> EvolutionResult:
     """Evolve an artifact. Provide either ``agent`` (with ``solve``/``propose``)
     or the ``run`` / ``propose`` callables directly.
@@ -3091,8 +3383,9 @@ def evolve(
         Name of the evolving artifact; becomes a filename, so it must match
         ``[A-Za-z0-9_.-]+``.
     rounds:
-        Number of round barriers to run. Under ``asynchronous=True`` this becomes
-        a worker-rollout budget of ``rounds * n_workers`` instead.
+        Number of round barriers to run. Sync-only. ``evolve(asynchronous=True)``
+        no longer reinterprets this as a rollout budget (#809) — pass
+        ``max_rollouts=`` or call :func:`~agentdescent.async_evolve.async_evolve`.
     n_workers:
         Workers per round (``>= 1``).
     max_concurrency:
@@ -3157,8 +3450,12 @@ def evolve(
         documents what it does and does not fix -- a commit landing mid-rollout
         still produces a stale card.
     asynchronous, async_ratio:
-        Delegate to :func:`~agentdescent.async_evolve.async_evolve` -- no round
-        barrier, with ``async_ratio`` as the staleness lag budget.
+        **Deprecated bridge** to :func:`~agentdescent.async_evolve.async_evolve`
+        (#809). Sync and async are two contracts, not a mode flag: prefer
+        calling ``async_evolve`` directly. When ``asynchronous=True``, both
+        ``max_seconds`` and ``max_rollouts`` are required (no silent
+        reinterpretation of ``rounds``, no invented 20-second budget).
+        ``async_ratio`` is the async lag budget.
     max_seconds:
         Wall-clock budget. ``None`` (default) means unbounded; the async path
         uses ``20.0`` when unset.
@@ -3219,6 +3516,14 @@ def evolve(
         score candidates only on held-out should pass ``False``.
     held_out_frac:
         Fraction of ``tasks`` reserved for held-out scoring, in ``(0, 1)``.
+    test_frac:
+        Carve a **test** partition out of the held-out tail (#843). Selection and
+        every gate keep reading the select partition; the test split is scored
+        once, after the loop, and returned as :attr:`EvolutionResult.test_reward`
+        (with ``test_tasks`` / ``select_tasks`` for the sizes). ``0.0`` (the
+        default) is the old single-split run exactly -- the CLI then says the
+        printed reward is select-set rather than an unseen test. Synchronous
+        only: the async path warns that it does not split yet.
     repo_path:
         Where the git-backed ledger lives. Omit for a throwaway repo that is
         removed when this call returns (not held until interpreter exit, so a
@@ -3329,7 +3634,7 @@ def evolve(
         rather than being accepted and ignored: a caller who passes a custom
         acceptance rule and sees a finished run would reasonably conclude it ran.
         New capabilities go here rather than adding another parameter to a
-        function that already has thirty-five.
+        function whose flat surface is already large — prefer a Policies field or a BudgetSettings / RuntimeSettings / ObservabilitySettings bag (#804).
     allocator:
         Value-directed budget allocation (see :mod:`agentdescent.allocator`).
         ``None`` (the default) is the old behaviour exactly: optional spend
@@ -3396,6 +3701,18 @@ def evolve(
         (``CladeThompson``, ``FlatPuct``) score *clades* -- the metaproductivity
         signal HGM's population search is built on. Islands checkpoint and
         resume like the rest of the population archive.
+    budget:
+        Typed spend/stop bag (:class:`~agentdescent.evolve_settings.BudgetSettings`).
+        Prefer this for new budget knobs; flat ``max_seconds`` / ``max_rollouts``
+        / ``max_calls`` / ``max_tokens`` / … remain shortcuts onto its fields.
+        See #804 and :data:`~agentdescent.evolve_settings.EVOLVE_STABLE_SUBSET`.
+    runtime:
+        Typed runtime bag (:class:`~agentdescent.evolve_settings.RuntimeSettings`).
+        Workers, gates, data split, search extras. Flat kwargs remain shortcuts.
+    observability:
+        Typed observability bag
+        (:class:`~agentdescent.evolve_settings.ObservabilitySettings`). Hooks,
+        meters, trajectory recording. Flat kwargs remain shortcuts.
 
     Returns
     -------
@@ -3409,14 +3726,90 @@ def evolve(
     """
     from concurrent.futures import ThreadPoolExecutor, wait as futures_wait
     from .parallel import DataParallel
+    from .evolve_settings import (
+        resolve_budget, resolve_observability, resolve_runtime,
+    )
+
+    # Fold typed bags + flat shortcuts. Bags are the extension point (#804);
+    # flat kwargs keep working for pip callers and for JSON spec.evolve knobs.
+    _budget = resolve_budget(
+        budget,
+        max_seconds=max_seconds, max_rollouts=max_rollouts, max_calls=max_calls,
+        max_tokens=max_tokens,
+        stop_on_diminishing_returns=stop_on_diminishing_returns,
+        efficiency_floor=efficiency_floor, call_budget=call_budget,
+        target_reward=target_reward, patience=patience,
+        oracle_budget=oracle_budget,
+    )
+    _runtime = resolve_runtime(
+        runtime,
+        rounds=rounds, n_workers=n_workers, max_concurrency=max_concurrency,
+        refresh_interval=refresh_interval, round_timeout=round_timeout,
+        eval_concurrency=eval_concurrency, max_worker_errors=max_worker_errors,
+        async_ratio=async_ratio, resync_on_commit=resync_on_commit,
+        pipelined_gate=pipelined_gate, gate_workers=gate_workers,
+        self_verify=self_verify, held_out_frac=held_out_frac,
+        checkpointing=checkpointing, cheap_eval_tasks=cheap_eval_tasks,
+        fusion_tournament=fusion_tournament, solved_threshold=solved_threshold,
+        shuffle=shuffle, seed=seed, population_islands=population_islands,
+    )
+    _obs = resolve_observability(
+        observability,
+        on_round=on_round, on_reports=on_reports, stop_when=stop_when,
+        verbose=verbose, usage=usage,
+        record_trajectories=record_trajectories,
+        trajectory_store=trajectory_store,
+    )
+    max_seconds = _budget.max_seconds
+    max_rollouts = _budget.max_rollouts
+    max_calls = _budget.max_calls
+    max_tokens = _budget.max_tokens
+    stop_on_diminishing_returns = _budget.stop_on_diminishing_returns
+    efficiency_floor = _budget.efficiency_floor
+    call_budget = _budget.call_budget
+    target_reward = _budget.target_reward
+    patience = _budget.patience
+    oracle_budget = _budget.oracle_budget
+    rounds = _runtime.rounds
+    n_workers = _runtime.n_workers
+    max_concurrency = _runtime.max_concurrency
+    refresh_interval = _runtime.refresh_interval
+    round_timeout = _runtime.round_timeout
+    eval_concurrency = _runtime.eval_concurrency
+    max_worker_errors = _runtime.max_worker_errors
+    async_ratio = _runtime.async_ratio
+    resync_on_commit = _runtime.resync_on_commit
+    pipelined_gate = _runtime.pipelined_gate
+    gate_workers = _runtime.gate_workers
+    self_verify = _runtime.self_verify
+    held_out_frac = _runtime.held_out_frac
+    checkpointing = _runtime.checkpointing
+    cheap_eval_tasks = _runtime.cheap_eval_tasks
+    fusion_tournament = _runtime.fusion_tournament
+    solved_threshold = _runtime.solved_threshold
+    shuffle = _runtime.shuffle
+    seed = _runtime.seed
+    population_islands = _runtime.population_islands
+    on_round = _obs.on_round
+    on_reports = _obs.on_reports
+    stop_when = _obs.stop_when
+    verbose = _obs.verbose
+    usage = _obs.usage
+    record_trajectories = _obs.record_trajectories
+    trajectory_store = _obs.trajectory_store
 
     if asynchronous:
-        # barrier-free mode: hand the same plug-ins to the async runtime. `rounds`
-        # becomes a worker-rollout budget (rounds x n_workers) alongside max_seconds.
-        # Two sync-only knobs have no meaning here and were previously dropped in
-        # silence, so `parallel=TensorParallel(...)` looked honoured while the run
-        # was plain DP. Say so instead: the async runtime shards round-robin itself
-        # and its concurrency *is* `n_workers`.
+        # The asynchronous driver does not split a test partition yet (#843).
+        # Refusing is the honest option: accepting the argument and silently
+        # running without a test split would report a select-set number as if a
+        # generalisation measurement had been asked for and produced. It goes
+        # through the warn-and-ignore loop below, which is this path's contract
+        # for a knob it does not honour (`test_no_evolve_argument_is_dropped_
+        # without_notice` pins that no new kwarg falls through silently).
+        # Deprecated bridge (#809): sync and async are two contracts, not a mode
+        # flag. Prefer ``async_evolve`` directly. Validate budgets before the
+        # deprecation warning so a misconfigured call fails closed without the
+        # extra noise.
         for name, value, why in (
             ("parallel", parallel,
              f"the async runtime shards data-parallel across its own {n_workers} "
@@ -3430,41 +3823,44 @@ def evolve(
             ("refresh_interval", None if refresh_interval == 1 else refresh_interval,
              "it staggers snapshot refresh across round barriers, and the async "
              "path has none -- async_ratio is its lag budget"),
+            ("test_frac", None if not test_frac else test_frac,
+             "the barrier-free runtime has no select/test split yet, so a run "
+             "would report a select-set reward as if a test split had been "
+             "measured -- run synchronously to get a test_reward (#843)"),
         ):
             if value is not None:
                 warnings.warn(
                     f"evolve(asynchronous=True) ignores {name}=: {why}. Use the "
                     f"synchronous path if you need it.", RuntimeWarning,
                     stacklevel=2)
-        # The two above that are *not* ignored but silently REDEFINED were the
-        # sharper edge, because nothing said so. Flipping one boolean turned an
-        # unbounded run into a 20-second one, and a partial artifact with
-        # `error=None` and a populated `history` is indistinguishable from a
-        # converged one.
         if max_seconds is None:
-            warnings.warn(
-                "evolve(asynchronous=True) has no unbounded mode: max_seconds=None "
-                "becomes 20.0 seconds here, where it means 'no limit' on the "
-                "synchronous path. Pass max_seconds= explicitly, and check "
-                "result.stop_reason -- a budget expiry otherwise looks exactly "
-                "like convergence.", RuntimeWarning, stacklevel=2)
-        if rounds != 15 and max_rollouts is None:   # i.e. the caller chose a value
-            warnings.warn(
-                f"evolve(asynchronous=True) has no round barrier, so rounds={rounds} "
-                f"is reinterpreted as a budget of {rounds * max(1, n_workers)} worker "
-                "rollouts, and RoundInfo.round becomes a merger-sweep index -- "
-                "len(result.history) is not comparable with the synchronous path. "
-                "Pass max_rollouts= to say the budget outright.",
-                RuntimeWarning, stacklevel=2)
+            raise ValueError(
+                "evolve(asynchronous=True) no longer invents max_seconds=20.0 "
+                "(that made an unbounded sync run look like a 20-second async "
+                "one). Pass max_seconds= explicitly, or call "
+                "async_evolve(max_seconds=...).")
+        if max_rollouts is None:
+            raise ValueError(
+                "evolve(asynchronous=True) no longer reinterprets "
+                f"rounds={rounds} as a budget of "
+                f"{rounds * max(1, n_workers)} worker rollouts. Pass "
+                "max_rollouts= for an equal-budget stop (or "
+                "budget=BudgetSettings(max_rollouts=...)), or call "
+                "async_evolve(max_iters=...).")
+        warnings.warn(
+            "evolve(asynchronous=True) is a deprecated bridge to async_evolve(): "
+            "sync and async are two contracts (different budgets, different "
+            "Policies wiring). Call async_evolve(...) directly; see docs/async.md "
+            "and #809.",
+            FutureWarning, stacklevel=2)
         from .async_evolve import async_evolve
         return async_evolve(
             tasks, reward, agent=agent, run=run, propose=propose, strategy=strategy,
             initial_state=initial_state, blast_radius=blast_radius, artifact_id=artifact_id,
             n_workers=n_workers, async_ratio=async_ratio,
             resync_on_commit=resync_on_commit,
-            max_seconds=20.0 if max_seconds is None else max_seconds,
-            max_iters=(max_rollouts if max_rollouts is not None
-                       else rounds * max(1, n_workers)),
+            max_seconds=max_seconds,
+            max_iters=max_rollouts,
             max_calls=max_calls, max_tokens=max_tokens, held_out_frac=held_out_frac,
             repo_path=repo_path, agg_config=agg_config, staleness_policy=staleness_policy,
             aggregator_factory=aggregator_factory, oracle_budget=oracle_budget,
@@ -3485,7 +3881,11 @@ def evolve(
             record_trajectories=record_trajectories,
             trajectory_store=trajectory_store, contract=contract,
             extra_artifacts=extra_artifacts,
-            population_islands=population_islands)
+            population_islands=population_islands,
+            # Bags already folded into the flat locals above; forward them so
+            # the async surface does not look like it dropped the new knobs,
+            # and a bag-only caller still works if resolve is re-run (#804).
+            budget=budget, runtime=runtime, observability=observability)
 
     if pipelined_gate:
         # The mirror of the block above, and the same reasoning: a knob accepted
@@ -3539,7 +3939,7 @@ def evolve(
         initial_state=initial_state, blast_radius=blast_radius, artifact_id=artifact_id,
         held_out_frac=held_out_frac, repo_path=repo_path, agg_config=agg_config,
         staleness_policy=staleness_policy, aggregator_factory=aggregator_factory,
-        selection=selection,
+        selection=selection, test_frac=test_frac,
         oracle_budget=oracle_budget, eval_concurrency=eval_concurrency,
         cheap_eval_tasks=cheap_eval_tasks, fusion_tournament=fusion_tournament,
             shuffle=shuffle, seed=seed,
@@ -3890,82 +4290,90 @@ def evolve(
                     print(f"round {r:>3}  worker {unit.worker} propose failed: "
                           f"{type(e).__name__}: {str(e)[:100]}")
                 return
-            proposal = _checked_proposal(raw_proposal, task)
-            if not proposal:
+            proposals = _checked_proposal(raw_proposal, task)
+            if not proposals:
                 return
+            # One evidence card per proposal: a k-sampling ProposalPolicy's
+            # variants each pay self_verify (when on) and reach the aggregator
+            # on their own (#808).
             strat = eng.artifact_strategies.get(aid, strategy)
-            diff = strat.to_diff(mine.state, proposal, f"w{unit.worker}", mine_v, aid)
-            if diff is None:
-                return
-            # Tensor parallelism means each worker owns a disjoint *section* of the
-            # artifact, which is what makes the merge a conflict-free union. The
-            # plan assigns the section; enforce it here, or the guarantee is only a
-            # comment: without this every worker could edit the same hot key and TP
-            # degenerated into differently-sharded DP. Extras are whole-artifact
-            # proposals, so the check applies to the primary only.
-            if unit.section is not None and aid == artifact_id:
-                outside = [k for k in diff.ops
-                           if section_map.get(k) != unit.section]
-                if outside:
-                    # Counted, not swallowed. These never reach the aggregator, so
-                    # no MergeReport can mention them: without this a TP run that
-                    # dropped most of its proposals was indistinguishable from one
-                    # whose reflector had nothing useful to say -- opposite fixes.
-                    with tp_lock:
-                        section_violations[0] += 1
-                    if verbose:
-                        print(f"round {r:>3}  worker {unit.worker} proposed "
-                              f"{outside[0]!r}, outside its section {unit.section}")
-                    return
-            # The self-verify rollout doubles the cost of every proposal, so it is
-            # opt-out here exactly as it is on the async path. The governor can
-            # also turn it off mid-run when the token budget is nearly spent:
-            # the delta it produces feeds the acceptance test's tie-breaker
-            # (``observe_delta``), never the commit gates, so skipping it costs
-            # ranking precision on the advantage signal and nothing else.
-            # With an allocator installed the decision becomes per-candidate:
-            # once the budget is tight it spends the self-verify rollout only on
-            # candidates its value model expects to commit (see
-            # :mod:`agentdescent.allocator`).
-            if self_verify and governor.candidate_worth(_allocator_context(
-                    diff, adv, score, getattr(mine, "blast_radius", 0.2))):
-                t_self = time.time()
-                # The candidate's render is computed once and used for both the
-                # rollout and the record, so the trajectory and the measurement
-                # agree by construction.
-                rendered_after = mine.apply(diff).render()
-                after_output = run(rendered_after, task)
-                after = _checked_reward(reward(task, after_output), task)
-                delta = after - score
-                # The self-verify re-run is itself evidence: it is the first
-                # measurement of the *candidate*, against the same task, and a
-                # learning consumer reads it exactly because it predates the
-                # gate's own (cheaper) view. The boundary record carries the
-                # provider's output, not just the score -- the same contract as
-                # the rollout path.
-                self_trace = eng._record_rollout(
-                    artifact_id=aid, rendered=rendered_after, task=task,
-                    base_version={aid: mine_v}, purpose="self_verify",
-                    output=after_output, reward=after, wallclock=time.time() - t_self,
-                    worker_id=f"w{unit.worker}")
-            else:
-                delta = 0.0
-                self_trace = None
-            aggregator.ingest(EvidenceCard(
-                diff=diff, base_version={aid: mine_v}, touched=[aid],
-                before_after_delta=delta, trajectory_refs=[task],
-                branch=mine_branch,
-                # The records that justify this card, when recording is on: the
-                # rollout that produced the diff and the self-verify re-run.
-                # Each entry is None-safe -- None means "recording off / dedupe /
-                # write failed", and a consumer reads the empty tuple that way.
-                trace_ids=tuple(t for t in (trace, self_trace) if t is not None),
-                # Recorded always, acted on by nobody unless a policy from
-                # `agentdescent.advantage` is installed. It is arithmetic over
-                # two numbers the round already has, and a signal that is only
-                # computed when something consumes it can never be looked at to
-                # decide whether anything should.
-                advantage=adv))
+            for p_i, proposal in enumerate(proposals):
+                author = (f"w{unit.worker}" if len(proposals) == 1
+                          else f"w{unit.worker}/p{p_i}")
+                diff = strat.to_diff(mine.state, proposal, author, mine_v, aid)
+                if diff is None:
+                    continue
+                # Tensor parallelism means each worker owns a disjoint *section* of the
+                # artifact, which is what makes the merge a conflict-free union. The
+                # plan assigns the section; enforce it here, or the guarantee is only a
+                # comment: without this every worker could edit the same hot key and TP
+                # degenerated into differently-sharded DP. Extras are whole-artifact
+                # proposals, so the check applies to the primary only.
+                if unit.section is not None and aid == artifact_id:
+                    outside = [k for k in diff.ops
+                               if section_map.get(k) != unit.section]
+                    if outside:
+                        # Counted, not swallowed. These never reach the aggregator, so
+                        # no MergeReport can mention them: without this a TP run that
+                        # dropped most of its proposals was indistinguishable from one
+                        # whose reflector had nothing useful to say -- opposite fixes.
+                        with tp_lock:
+                            section_violations[0] += 1
+                        if verbose:
+                            print(f"round {r:>3}  worker {unit.worker} proposed "
+                                  f"{outside[0]!r}, outside its section {unit.section}")
+                        continue
+                # The self-verify rollout doubles the cost of every proposal, so it is
+                # opt-out here exactly as it is on the async path. The governor can
+                # also turn it off mid-run when the token budget is nearly spent:
+                # the delta it produces feeds the acceptance test's tie-breaker
+                # (``observe_delta``), never the commit gates, so skipping it costs
+                # ranking precision on the advantage signal and nothing else.
+                # With an allocator installed the decision becomes per-candidate:
+                # once the budget is tight it spends the self-verify rollout only on
+                # candidates its value model expects to commit (see
+                # :mod:`agentdescent.allocator`).
+                # Cost note for k>1: self_verify runs per proposal when enabled.
+                if self_verify and governor.candidate_worth(_allocator_context(
+                        diff, adv, score, getattr(mine, "blast_radius", 0.2))):
+                    t_self = time.time()
+                    # The candidate's render is computed once and used for both the
+                    # rollout and the record, so the trajectory and the measurement
+                    # agree by construction.
+                    rendered_after = mine.apply(diff).render()
+                    after_output = run(rendered_after, task)
+                    after = _checked_reward(reward(task, after_output), task)
+                    delta = after - score
+                    # The self-verify re-run is itself evidence: it is the first
+                    # measurement of the *candidate*, against the same task, and a
+                    # learning consumer reads it exactly because it predates the
+                    # gate's own (cheaper) view. The boundary record carries the
+                    # provider's output, not just the score -- the same contract as
+                    # the rollout path.
+                    self_trace = eng._record_rollout(
+                        artifact_id=aid, rendered=rendered_after, task=task,
+                        base_version={aid: mine_v}, purpose="self_verify",
+                        output=after_output, reward=after,
+                        wallclock=time.time() - t_self,
+                        worker_id=f"w{unit.worker}")
+                else:
+                    delta = 0.0
+                    self_trace = None
+                aggregator.ingest(EvidenceCard(
+                    diff=diff, base_version={aid: mine_v}, touched=[aid],
+                    before_after_delta=delta, trajectory_refs=[task],
+                    branch=mine_branch,
+                    # The records that justify this card, when recording is on: the
+                    # rollout that produced the diff and the self-verify re-run.
+                    # Each entry is None-safe -- None means "recording off / dedupe /
+                    # write failed", and a consumer reads the empty tuple that way.
+                    trace_ids=tuple(t for t in (trace, self_trace) if t is not None),
+                    # Recorded always, acted on by nobody unless a policy from
+                    # `agentdescent.advantage` is installed. It is arithmetic over
+                    # two numbers the round already has, and a signal that is only
+                    # computed when something consumes it can never be looked at to
+                    # decide whether anything should.
+                    advantage=adv))
 
         def _run_unit_inner(unit) -> None:
             if not unit.keys:
@@ -3997,18 +4405,27 @@ def evolve(
                 # then kept the process alive -- round_timeout bounded the round and
                 # not the program.
                 gate = threading.Semaphore(min(max_concurrency, len(units)))
+                cancelled = threading.Event()
 
-                def _bounded(u=None):
+                def _bounded(u=None, gate=gate, cancelled=cancelled,
+                             run_unit=_run_unit):
                     with gate:              # preserve max_concurrency
-                        _run_unit(u)
+                        if not cancelled.is_set():
+                            run_unit(u)
 
                 threads = [threading.Thread(target=_bounded, args=(u,), daemon=True)
                            for u in units]
-                for t in threads:
-                    t.start()
-                cutoff = None if round_timeout is None else time.time() + round_timeout
-                for t in threads:
-                    t.join(None if cutoff is None else max(0.0, cutoff - time.time()))
+                try:
+                    for t in threads:
+                        t.start()
+                    cutoff = None if round_timeout is None else time.time() + round_timeout
+                    for t in threads:
+                        t.join(None if cutoff is None else max(0.0, cutoff - time.time()))
+                finally:
+                    # In-flight calls may finish, but waiting workers must not
+                    # start new rollouts. Bind this round's state above: a later
+                    # round must not reactivate its predecessor's queued work.
+                    cancelled.set()
                 pending = [t for t in threads if t.is_alive()]
                 if pending:
                     straggler_rounds += 1
@@ -4182,6 +4599,16 @@ def evolve(
     except Exception as e:  # noqa: BLE001 - report, keep the partial result
         run_error = run_error or _describe(e)
         final_reward = history[-1].held_out_reward if history else 0.0
+    # The test split is measured exactly once, after the loop, so no commit can
+    # ever have been influenced by it (#843). A failed test score is reported as
+    # missing rather than as a number: a run whose select score is fine but whose
+    # test sweep died must not look like "the lesson generalised".
+    test_reward: Optional[float] = None
+    if eng.test:
+        try:
+            test_reward = float(final.score(eng.test))
+        except Exception:  # noqa: BLE001 - a missing test score is not a crash
+            test_reward = None
     if run_error:
         # Never end a run silently: verbose=False is the default, so a partial
         # result is otherwise indistinguishable from a converged one.
@@ -4200,10 +4627,14 @@ def evolve(
                              ledger_log=_safe_log(ledger),
                              initial_reward=initial_reward, error=run_error,
                              stop_reason="error" if run_error else stop_reason,
+                             test_reward=test_reward,
+                             test_tasks=len(eng.test),
+                             select_tasks=len(held_out),
                              fusion_trials=_fusion_trials(aggregator),
                              budget=governor.summary() if governor.active else None,
                              trajectories_path=getattr(
                                  eng.runtime.trajectory_store, "root", None),
+                             policy_digest=getattr(eng, "policy_digest", ""),
                              **_cost_fields(eng.meter))
     eng.cleanup()
     result.replay = _replay_stats(sampler)

@@ -1,6 +1,6 @@
 # The data model — what a gradient is here
 
-*Module:* [`agentdescent.evolvable`](https://github.com/Birfy/agentdescent/blob/main/agentdescent/evolvable.py)
+*Module:* [`agentdescent.evolvable`](https://github.com/ThinkFlowLab/agentdescent/blob/main/agentdescent/evolvable.py)
 · *API:* [`Evolvable`, `Diff`, `EvidenceCard`, `Contract`, `VersionVector`](api.md#the-data-model)
 
 Four types carry everything that flows through the system. They are small on
@@ -192,6 +192,24 @@ pinned, so anything reproducible — seeding an RNG, assigning a tensor-parallel
 section — must hash through here instead. If you write a custom
 [strategy](strategies.md) or [parallel strategy](parallelism.md) that hashes
 keys, use it, or your `seed=` argument silently means nothing.
+
+## Ports — an artifact store and an evaluation provider
+
+`agentdescent.ports` turns the two things a run assumes about storage and data
+into protocols (#924). `ArtifactStore` is the five-method shape of "a tree of
+files with revisions" — `read_tree`, `write_tree`, `list_revisions`, `diff`,
+`promote` — and `FileArtifactStore` is the reference backend over
+`<root>/<artifact_id>/<revision>/`. `EvaluationProvider` is the five-method shape
+of "where the split and the score come from" — `tasks`, `reward`, `oracle`,
+`judge`, `contamination` — and `CsvEvaluationProvider` is the reference backend
+over one `<root>/<split>.csv` per split.
+
+Both are `@runtime_checkable`, so `isinstance(backend, EvaluationProvider)` is
+the conformance check: a platform that keeps skills in a database or evaluates
+through an internal judge service implements the methods instead of copying data
+into temporary files. `oracle` and `judge` return `None` when they cannot score
+a task — no label, no judge injected — because a `0.0` there would read as a
+failed model rather than a missing measurement.
 
 ## Errors
 

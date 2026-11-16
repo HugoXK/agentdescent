@@ -32,9 +32,11 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import (Any, Callable, Dict, Iterable, List, Mapping, Optional,
+                    Sequence, Tuple)
 
 from .credit import Edit, CreditReport, leave_one_out_credit, shapley_credit
+from .replay_fidelity import ReplayNotEligible
 
 __all__ = [
     "TraceStep",
@@ -43,6 +45,7 @@ __all__ = [
     "CounterfactualResult",
     "CounterfactualReport",
     "ReplayLab",
+    "ReplayNotEligible",
     "apply_interventions",
 ]
 
@@ -190,17 +193,40 @@ def apply_interventions(trace: ReplayTrace,
 
 
 class ReplayLab:
-    """Counterfactual replay over a deterministic evaluator."""
+    """Counterfactual replay over a deterministic evaluator.
+
+    ``manifest`` is the run's :class:`~agentdescent.manifest.RunManifest`, when
+    the counterfactual belongs to a run that has one. A lab built with an
+    ineligible manifest refuses to *claim* a counterfactual --
+    :meth:`counterfactual` and :meth:`shapley` raise :class:`ReplayNotEligible`
+    naming what was not reconstructed -- because the two scores were then taken
+    under inputs nobody recorded. ``baseline`` still works: scoring what happened
+    is not a counterfactual claim. A lab with no manifest (the default) makes no
+    replay claim either way, which is the pre-#939 behaviour.
+    """
 
     def __init__(self, evaluate: Evaluator, *,
                  cache: Optional[Dict[Any, float]] = None,
-                 key: Optional[Callable[[TraceStep], Any]] = None) -> None:
+                 key: Optional[Callable[[TraceStep], Any]] = None,
+                 manifest: Optional[Any] = None) -> None:
         if not callable(evaluate):
             raise TypeError("evaluate must be callable")
         self.evaluate = evaluate
         self.cache = cache if cache is not None else {}
         self.key = key
         self.calls = 0
+        self.manifest = manifest
+        #: ``None`` when no manifest was given: no claim is being made, so there
+        #: is nothing to check. Otherwise the manifest's own verdict.
+        self.replay_eligible = (None if manifest is None
+                                else bool(getattr(manifest, "replay_eligible", False)))
+        self.replay_notes: Tuple[str, ...] = tuple(
+            getattr(manifest, "replay_notes", ()) or ())
+
+    def _require_replayable(self) -> None:
+        """Refuse a counterfactual claim the manifest cannot back (#939)."""
+        if self.replay_eligible is False:
+            raise ReplayNotEligible(self.replay_notes)
 
     def _step_key(self, step: TraceStep) -> Any:
         if self.key is not None:
@@ -240,6 +266,7 @@ class ReplayLab:
 
     def counterfactual(self, trace: ReplayTrace,
                        interventions: Iterable[Intervention]) -> CounterfactualResult:
+        self._require_replayable()
         base = self.baseline(trace)
         interventions = tuple(interventions)
         if not interventions:
@@ -254,6 +281,11 @@ class ReplayLab:
                                     delta=delta, cost=cost, detail=detail)
 
     def leave_one_out(self, trace: ReplayTrace) -> CounterfactualReport:
+        # Guarded here and not only through `counterfactual()`: an empty trace
+        # never reaches that call, and it used to return a report from an
+        # ineligible manifest -- the gate has to hold on every entry point
+        # (#952 Security review).
+        self._require_replayable()
         base = self.baseline(trace)
         results = []
         for step in trace.steps:
@@ -268,6 +300,7 @@ class ReplayLab:
     def shapley(self, trace: ReplayTrace, *, permutations: int = 64,
                 seed: int = 0, exact_limit: int = 7) -> CreditReport:
         """Shapley attribution over steps, using ``agentdescent.credit``."""
+        self._require_replayable()
         edits = [Edit(step.step_id, payload=step) for step in trace.steps]
 
         def evaluate_subset(subset: Sequence[Edit]) -> float:

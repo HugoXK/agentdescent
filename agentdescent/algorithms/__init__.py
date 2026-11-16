@@ -40,9 +40,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
-__all__ = ["Algorithm", "AlgorithmError", "BuildContext", "ENTRY_POINT_GROUP",
-           "FIDELITY", "Overrides", "Param", "external_errors", "get", "names",
-           "kind_mismatch_message", "register", "resolve_params", "listing"]
+__all__ = ["Algorithm", "AlgorithmError", "BuildContext", "CARDS_VS_PORTS_NOTE",
+           "ENTRY_POINT_GROUP", "FIDELITY", "Overrides", "Param", "external_errors",
+           "get", "names", "kind_mismatch_message", "register", "resolve_params",
+           "listing", "research_port_for"]
 
 FIDELITY = ("benchmark_faithful", "mechanism_microport", "preset")
 
@@ -76,6 +77,11 @@ class Param:
         Strict about type -- ``"3"`` is not an ``int`` and ``true`` is not a
         number -- except that an ``int`` is a valid ``float``, which JSON does
         not distinguish.
+
+        A string that matches exactly one ``choices`` entry once case and
+        ``-``/``_`` are ignored resolves to it (``sigmoid-novelty`` →
+        ``sigmoid_novelty``). A remaining unknown that is a close typo of one
+        choice names that guess (#888).
         """
         t = self.type
         if t == "bool":
@@ -95,7 +101,23 @@ class Param:
         if t == "list[str]":
             value = list(value)
         if self.choices is not None and value not in self.choices:
-            raise AlgorithmError(f"{where}: must be one of {list(self.choices)}, got {value!r}")
+            if isinstance(value, str):
+                folded = _fold(value)
+                matches = [c for c in self.choices
+                           if isinstance(c, str) and _fold(c) == folded]
+                if len(matches) == 1:
+                    value = matches[0]
+            if value not in self.choices:
+                msg = (f"{where}: must be one of {list(self.choices)}, "
+                       f"got {value!r}")
+                if isinstance(value, str):
+                    import difflib
+                    named = [c for c in self.choices if isinstance(c, str)]
+                    close = difflib.get_close_matches(
+                        _fold(value), named, n=1, cutoff=0.75)
+                    if close:
+                        msg += f"; did you mean {close[0]!r}?"
+                raise AlgorithmError(msg)
         if self.minimum is not None and isinstance(value, (int, float)) and value < self.minimum:
             raise AlgorithmError(f"{where}: must be >= {self.minimum}, got {value!r}")
         if self.maximum is not None and isinstance(value, (int, float)) and value > self.maximum:
@@ -168,11 +190,28 @@ class Algorithm:
             raise ValueError(f"{self.name}: fidelity must be one of {FIDELITY}")
 
     def describe(self) -> Dict[str, Any]:
-        """The JSON-able card ``show`` prints and ``plan`` echoes."""
-        return {"name": self.name, "summary": self.summary, "kinds": list(self.kinds),
-                "fidelity": self.fidelity, "source": self.source,
-                "extra_calls": self.extra_calls, "doc": self.doc,
-                "params": [p.to_dict() for p in self.params]}
+        """The JSON-able card ``show`` prints and ``plan`` echoes.
+
+        Always labels the entry as an Algorithm **card** (``surface: "card"``).
+        When the same slug also has an ``examples/<name>/`` research port, the
+        card carries ``research_port`` and a ``fidelity_note`` so hosts never
+        read a mechanism slice as the paper port (#384 fidelity addendum).
+        """
+        out: Dict[str, Any] = {
+            "name": self.name, "summary": self.summary, "kinds": list(self.kinds),
+            "fidelity": self.fidelity, "surface": "card", "source": self.source,
+            "extra_calls": self.extra_calls, "doc": self.doc,
+            "params": [p.to_dict() for p in self.params],
+        }
+        port = research_port_for(self.name)
+        if port is not None:
+            out["research_port"] = port
+            out["fidelity_note"] = (
+                f"Algorithm card ({self.fidelity}) — not the benchmark-faithful "
+                f"research port at {port} (docs/port-fidelity.md). Same name, "
+                "different propose/strategy path."
+            )
+        return out
 
 
 _REGISTRY: Dict[str, Algorithm] = {}
@@ -183,6 +222,42 @@ _BUILTIN_NAMES: set = set()
 ENTRY_POINT_GROUP = "agentdescent.algorithms"
 _EXTERNAL_ERRORS: Dict[str, str] = {}
 _external_loaded = False
+
+#: Documented ``examples/`` research-port slugs that are *not* named Algorithm
+#: cards. ``algorithms show`` / ``run`` / MCP describe only accept registered
+#: cards; naming one of these after reading the ports docs is a common miss
+#: (#801). Keep in sync with ``docs/algo-*.md`` minus the registered cards.
+_EXAMPLES_ONLY_PORTS = frozenset({
+    "absolute_zero", "adas", "aflow", "agent0", "dynamic_cheatsheet", "era",
+    "genesis", "godel_agent", "gskill", "openevolve", "promptbreeder",
+    "r_zero", "reflexion", "self_refine", "sica", "skillweaver", "textgrad",
+    "voyager",
+})
+
+#: Registered card names that *also* have a full ``examples/<name>/`` research
+#: port. Card ≠ port: the wheel entry is a mechanism slice; the checkout script
+#: is the paper-faithful path (#384 fidelity addendum). Keep in sync with the
+#: shipped cards that share a slug with ``docs/algo-*.md`` ports.
+_CARDS_WITH_RESEARCH_PORT = frozenset({
+    "ace", "dgm", "evoskill", "gepa", "skillopt",
+})
+
+
+def research_port_for(name: str) -> Optional[str]:
+    """``examples/<name>/`` when this card shares a slug with a research port."""
+    if name in _CARDS_WITH_RESEARCH_PORT:
+        return f"examples/{name}/"
+    return None
+
+
+#: One-line product-surface note for ``algorithms list`` / MCP list_algorithms.
+CARDS_VS_PORTS_NOTE = (
+    "Listed names are Algorithm cards shipped in the wheel (mechanism slices). "
+    "A same-name examples/<algo>/ research port is a separate, source-only "
+    "script and may use a different propose/strategy path — see "
+    "docs/port-fidelity.md. Filter with --kind / kind= so hosts are not offered "
+    "cards that cannot run on that artifact."
+)
 
 
 def register(algorithm: Algorithm, *, replace: bool = False) -> Algorithm:
@@ -250,10 +325,34 @@ def get(name: Any, *, where: str = "algorithm") -> Algorithm:
             raise AlgorithmError(f"{where}: algorithm {broken!r} failed to load: "
                                  f"{_EXTERNAL_ERRORS[broken]}")
     if not isinstance(name, str) or name not in _REGISTRY:
-        raise AlgorithmError(
-            f"{where}: unknown algorithm {name!r}; available: {sorted(_REGISTRY)} "
-            "(see `agentdescent algorithms list`)")
+        raise AlgorithmError(_unknown_algorithm_message(where, name))
     return _REGISTRY[name]
+
+
+def _unknown_algorithm_message(where: str, name: Any) -> str:
+    """Error text for an unknown algorithm name (#801).
+
+    Always lists the registered cards. When ``name`` folds to a documented
+    examples-only research port, add a one-line tip so the user is not left
+    thinking the port name was a typo.
+    """
+    msg = (f"{where}: unknown algorithm {name!r}; available: {sorted(_REGISTRY)} "
+           "(see `agentdescent algorithms list`)")
+    if not isinstance(name, str):
+        return msg
+    slug = _fold(name)
+    if slug not in _EXAMPLES_ONLY_PORTS:
+        # A near-miss typo (`gepaa`, `evo_skill`) names the card it most
+        # likely meant, so the fix is one word rather than a list scan.
+        import difflib
+        close = difflib.get_close_matches(slug, sorted(_REGISTRY), n=1, cutoff=0.75)
+        if close:
+            return f"{msg}; did you mean {close[0]!r}?"
+        return msg
+    doc = f"docs/algo-{slug.replace('_', '-')}.md"
+    return (f"{msg}. {slug!r} is an examples/ research port ({doc}), not a "
+            "named Algorithm card — run it from a source checkout "
+            f"(`python -m examples.{slug}…`), or pick a registered name above")
 
 
 def listing(kind: Optional[str] = None, *,
@@ -280,7 +379,10 @@ def kind_mismatch_message(algorithm: Algorithm, kind: str, *,
     Names the algorithms that do apply (computed from the registry, so a
     plugin-registered algorithm shows up too) and, when the algorithm runs on
     ``text`` and ``target`` is a skill directory holding ``SKILL.md`` (or a
-    single file), how to run it on that one file instead.
+    single file), how to run it on that one file instead. A card that declares
+    only ``text`` says so in as many words (#846): ``applies to kind ['text']``
+    alone left a ``skill_library`` user guessing whether the card could read
+    the tree at all.
 
     ``via="run"`` phrases that route as ``agentdescent algorithms run NAME
     FILE --kind text`` (the name is positional there, #702); the default is
@@ -291,6 +393,9 @@ def kind_mismatch_message(algorithm: Algorithm, kind: str, *,
     name = algorithm.name
     msg = (f"{prefix} {name!r} applies to kind {list(algorithm.kinds)}, "
            f"not {kind!r}")
+    if kind != "text" and set(algorithm.kinds) == {"text"}:
+        msg += (f"; {name!r} is text-only: it reads a single text file, not a "
+                f"{kind} target")
     usable = [a.name for a in listing(kind)]
     if usable:
         msg += (f"; for kind {kind!r}: {usable} "
@@ -315,16 +420,48 @@ def kind_mismatch_message(algorithm: Algorithm, kind: str, *,
     return msg
 
 
+def _canonical_param_map(algorithm: Algorithm, params: Mapping[str, Any], *,
+                         where: str) -> Dict[str, Any]:
+    """Rewrite keys to declared names. Alias collisions are errors (#876)."""
+    known = {p.name: p for p in algorithm.params}
+    canonical: Dict[str, Any] = {}
+    seen_as: Dict[str, str] = {}
+    for key, value in params.items():
+        name = key if (not isinstance(key, str) or key in known) else _resolve_alias(key, known)
+        if name in canonical and seen_as.get(name) != key:
+            raise AlgorithmError(
+                f"{where}: {key!r} and {seen_as[name]!r} both refer to "
+                f"{algorithm.name}'s {name!r} parameter")
+        canonical[name] = value
+        if isinstance(key, str):
+            seen_as[name] = key
+    return canonical
+
+
 def resolve_params(algorithm: Algorithm, params: Optional[Mapping[str, Any]], *,
                    where: str = "algorithm.params") -> Dict[str, Any]:
-    """Defaults, overridden by ``params``; unknown names and wrong types are errors."""
-    params = dict(params or {})
+    """Defaults, overridden by ``params``; unknown names and wrong types are errors.
+
+    A name that matches exactly one declared parameter once case and
+    ``-``/``_`` are ignored resolves to it (``batch-size``, ``BATCH_SIZE``),
+    matching algorithm-name aliasing (#876). A remaining unknown that is a
+    close typo of one parameter names that guess (``bacth_size``).
+    """
+    params = _canonical_param_map(algorithm, dict(params or {}), where=where)
     known = {p.name: p for p in algorithm.params}
     unknown = sorted(set(params) - set(known))
     if unknown:
-        raise AlgorithmError(
-            f"{where}: {algorithm.name!r} has no parameter(s) {unknown}; "
-            f"parameters: {sorted(known) or 'none'}")
+        msg = (f"{where}: {algorithm.name!r} has no parameter(s) {unknown}; "
+               f"parameters: {sorted(known) or 'none'}")
+        # A near-miss typo (`bacth_size`, `maxlr`) names the parameter it most
+        # likely meant, so the fix is one word rather than a list scan (#876).
+        if len(unknown) == 1 and isinstance(unknown[0], str):
+            import difflib
+            close = difflib.get_close_matches(
+                _fold(unknown[0]), sorted(known), n=1, cutoff=0.75)
+            if close:
+                msg += f"; did you mean {close[0]!r}?"
+        raise AlgorithmError(msg)
     out = {p.name: p.default for p in algorithm.params}
     for key, value in params.items():
         out[key] = known[key].coerce(value, where=f"{where}.{key}")

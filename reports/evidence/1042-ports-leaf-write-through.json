@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "held_out": "not reviewed",
+  "matched_budget": "not reviewed",
+  "cross_model": "not reviewed",
+  "cost": "not reviewed",
+  "disjoint_search": "not reviewed",
+  "reliability": "8/8 tests in tests/test_ports_symlink_leaf.py pass on the merged tree: four link shapes at a written leaf (sidecar, stale target, target directory, write_tree) are refused with ValueError, two hardlink sidecars leave the outside bytes unchanged and keep.st_nlink == 1, and two controls still write and promote; measured by Dev-4 at a095a6504b92b5788c7228649577b6241a0c2939. PR #1042 reported the same 8 tests plus 146 process/ports tests (154 passed) at tip ea975d83.",
+  "code": "claim: FileArtifactStore no longer writes through a link at a leaf it writes -- a link at a sidecar or a promotion target is refused with ValueError, and a hardlink is replaced by rename instead of truncated. agentdescent/ports.py:97 _refuse_linked_leaf wraps filetree.leaf_problem as ValueError, called at :173 in promote before is_dir/rmtree and at :194 in _commit before mkdir/staging; :72 _write_sidecar stages with mkstemp + os.fdopen + os.replace. tests/test_ports_symlink_leaf.py:36-148. Merged as a095a6504b92b5788c7228649577b6241a0c2939, squash of PR #1042 (head ea975d83aba253dbde4a78a44f925cd2630c2fbe); the pre-fix measurement is in the PR body at 9e8118c7.",
+  "evolved_artifact": "not reviewed",
+  "who_edits": "not reviewed",
+  "feedback": "not reviewed",
+  "timing": "not reviewed",
+  "topology": "not reviewed"
+}

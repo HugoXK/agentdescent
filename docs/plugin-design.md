@@ -70,7 +70,7 @@ enough for an LLM to author correctly and complete enough to reproduce a run.
 ```jsonc
 {
   "version": 1,
-  "kind": "skill_dir",                 // text | skill_dir | agent_dir | agent_code | plugin
+  "kind": "skill_dir",                 // text | skill_dir | skill_library | agent_dir | agent_code | plugin | policy_slot
   // "host": "dsh",                    // plugin kind only: dsh | claude_code | codex
   "target": "~/.claude/skills/pdf-audit",
   "name": "pdf-audit",                 // artifact_id; defaults to basename
@@ -310,7 +310,7 @@ small script so they cannot drift.
 
 ```
 .claude-plugin/plugin.json      name, version, description
-.claude-plugin/marketplace.json in the repo root so `/plugin marketplace add Birfy/agentdescent` works
+.claude-plugin/marketplace.json in the repo root so `/plugin marketplace add ThinkFlowLab/agentdescent` works
 skills/agentdescent/SKILL.md    the shared skill
 commands/evolve.md              /agentdescent:evolve <path> — a slash-command shortcut that
                                 invokes the skill with the argument prefilled
@@ -376,10 +376,11 @@ MCP server starts with no provider credentials, `doctor` reports every reflector
 as unavailable, and nothing else explains why. `install dsh` therefore prints the
 variables it forwarded and `doctor` checks for the scrubbed set explicitly.
 
-**Tier B, native Cordis plugin `dsh-agentdescent` (later, optional).** A small
+**Tier B, native Cordis plugin `dsh-agentdescent` (shipped, optional).** A small
 TypeScript package installable with
-`dsh plugin --profile web add github:Birfy/dsh-agentdescent#main` that does what
-config alone cannot:
+`dsh plugin --profile web add link:$PWD/integrations/dsh-agentdescent` (it ships in
+this repository under `integrations/dsh-agentdescent/`; there is no separate
+GitHub repo) that does what config alone cannot:
 
 * registers the skill through `ctx.skills.registerProvider()` and the MCP
   server through the same `mcp-client` plugin, so one `add` installs everything;
@@ -588,7 +589,9 @@ Two guards keep this from folding in on itself:
   `AGENTDESCENT_NESTED=1`. The MCP server's `start` refuses under it and
   returns a stub run id, so the transcript still shows *that* the host called
   `start` (which the grader wants) without a nested evolution actually
-  running; `doctor` reports nested mode explicitly.
+  running; the CLI refuses too — `evolve` exits 2 with `reason: nested-run`
+  before it reads the spec or creates a run — and `doctor` reports nested mode
+  plus the guard (`nested`, `nested_guard`).
 * **The controller never hot-swaps itself.** A self-evolved plugin reaches the
   user's real installation only through `apply`, which is a human decision on
   a diff, after an L1 oracle gate, with a backup. The loop can improve its own

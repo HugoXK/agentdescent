@@ -209,6 +209,21 @@ class ConsolidationStore:
     def _path(self, run_id: str) -> str:
         return os.path.join(self._runs_dir, self._digest_name(run_id))
 
+    def _refuse_linked_leaf(self, path: str) -> None:
+        """Refuse a link planted at this record's own filename (#1030).
+
+        ``os.replace`` does not follow the final symlink: the write would land
+        in a fresh regular file and the operator's link would vanish with no
+        word, while the outside target keeps its bytes. The rule is
+        ``filetree.leaf_problem``, so a symlinked archive *root* above the
+        record stays legal. Raising here means no temporary is ever created.
+        """
+        from .filetree import leaf_problem
+
+        problem = leaf_problem(path)
+        if problem is not None:
+            raise ValueError(f"cannot write {path}: {problem}")
+
     def _legacy_path(self, run_id: str) -> str:
         return os.path.join(self._runs_dir, self._legacy_name(run_id))
 
@@ -259,6 +274,7 @@ class ConsolidationStore:
         )
         with self._lock:
             path = self._path(run_id)
+            self._refuse_linked_leaf(path)
             tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
             try:
                 os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -341,6 +357,7 @@ class ConsolidationStore:
         payload["exam_note"] = note
         with self._lock:
             path = self._path(run_id)
+            self._refuse_linked_leaf(path)
             tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
             try:
                 os.makedirs(os.path.dirname(path), exist_ok=True)

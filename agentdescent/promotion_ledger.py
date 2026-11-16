@@ -40,6 +40,7 @@ from .promotion import (
     PromotionDecision,
     PromotionRules,
     _canonical,
+    _policy_payload,
 )
 
 __all__ = ["ReleaseRecord", "PromotionLedger"]
@@ -123,7 +124,7 @@ class PromotionLedger:
             raise ValueError("decision evidence_hash does not match its evidence")
         decision_hash = hashlib.sha256(_canonical({
             "evidence_hash": decision.evidence_hash,
-            "policy": asdict(rules),
+            "policy": _policy_payload(rules),
             "action": decision.action}).encode()).hexdigest()
         if decision_hash != decision.decision_hash:
             raise ValueError("decision_hash does not match the supplied rules")

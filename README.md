@@ -1,148 +1,56 @@
 # AgentDescent
 
-**[Website & interactive demo](https://birfy.github.io/agentdescent/)** ·
-[Get started](https://birfy.github.io/agentdescent/install/) ·
-[Documentation](https://birfy.github.io/agentdescent/docs/)
+**[Website & interactive demo](https://thinkflowlab.github.io/agentdescent/)** ·
+[Get started](https://thinkflowlab.github.io/agentdescent/install/) ·
+[Documentation](https://thinkflowlab.github.io/agentdescent/docs/)
 
-> **Gradient descent — but the parameters are agents.** A parallel, asynchronous
-> framework for self-evolving agents (skills, prompts, harnesses) where **diffs
-> are the gradients** and **the aggregator is the optimizer**.
+> **Gradient descent — but the parameters are agents.** AgentDescent evolves
+> prompts, skills, agent directories, agent code and host plugins against your
+> own examples. *N* workers propose edits **in parallel**, one aggregator merges
+> them into a version-controlled artifact, and a held-out gate decides what is
+> kept. Use it from Python with one `evolve()` call, from the CLI, or from inside
+> Claude Code, Codex, OpenCode, DeepSeek Harness or Grok Bot — and swap in any of
+> the named algorithms or twenty-three published-method ports on the same engine.
 
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22348027.svg)](https://doi.org/10.5281/zenodo.22348027)
 [![PyPI](https://img.shields.io/pypi/v/agentdescent)](https://pypi.org/project/agentdescent/)
-[![tests](https://github.com/Birfy/agentdescent/actions/workflows/tests.yml/badge.svg)](https://github.com/Birfy/agentdescent/actions/workflows/tests.yml)
-[![docs](https://img.shields.io/badge/docs-mkdocs--material-1f6feb)](https://birfy.github.io/agentdescent/)
+[![tests](https://github.com/ThinkFlowLab/agentdescent/actions/workflows/tests.yml/badge.svg)](https://github.com/ThinkFlowLab/agentdescent/actions/workflows/tests.yml)
+[![docs](https://img.shields.io/badge/docs-mkdocs--material-1f6feb)](https://thinkflowlab.github.io/agentdescent/)
 [![python](https://img.shields.io/badge/python-%E2%89%A53.9-1f6feb)](https://www.python.org/)
-[![license](https://img.shields.io/badge/license-MIT-3fb950)](https://github.com/Birfy/agentdescent/blob/main/LICENSE)
+[![license](https://img.shields.io/badge/license-MIT-3fb950)](https://github.com/ThinkFlowLab/agentdescent/blob/main/LICENSE)
 
-*N* workers propose edits to a shared artifact **in parallel**; a barrier-free
-aggregator merges them into one version-controlled library. Serial
-self-improvement is bounded at one accepted change per iteration, and merging
-concurrent edits is the attempt to lift that bound.
-
-The place the analogy has to break is the whole design: **gradients add, diffs do
-not.** So aggregation is not averaging but conflict resolution, fusion,
-statistical acceptance and a transactional commit.
-
-## What it measures
-
-Every row names the setting that produced it, and
-[the full results page](https://birfy.github.io/agentdescent/results/) also
-reports the runs where there was nothing left to learn.
-
-| | measured | setting |
-|---|---|---|
-| An artifact held in **one key**, where a keyed union can never fuse | keyed union fuses **0 of 48** merges · reflective merge **42 of 48** | BBH `dyck_languages`, `GLM-5.2`, *N*=4, 4 seeds |
-| What that costs, at a pinned rollout budget | **40% fewer model calls** (95% CI 27–54%, same direction on every seed) | the same runs |
-| Wall-clock against a *faithful* serial control | median **6.8×** (three seeds, 3.1–9.5×) | GEPA on HotpotQA, *N*=4, 16 rollouts pinned |
-| The one-call path, end to end | held-out exact match **0.167 → 0.583** | 40 HotpotQA items, 12 held out |
-
-Quality is claimed only where the design can support it. The
-[paper](https://doi.org/10.5281/zenodo.22348027) reports intervals rather than
-*p*-values where a comparison cannot reach significance, and says so.
-
-## How it works
-
-![AgentDescent architecture: N workers roll out against ledger snapshots and emit
-diffs with evidence cards into a buffer; a single aggregator thread runs the
-five-stage merge pipeline and commits to a git-backed ledger; four pluggable
-seams sit under the components they select; the L0 governance layer gates the
-audit step.](https://raw.githubusercontent.com/Birfy/agentdescent/main/docs/assets/architecture.png)
-
-**Solid, top:** the fixed data path. *N* workers roll out tasks against ledger
-snapshots and emit diffs with evidence cards; one aggregator thread runs the
-five-stage merge and commits winners; the green edge is the only feedback path,
-bounded by the lag budget.
-
-**Dashed, bottom:** the seams, each selected by one keyword argument of
-`evolve()`. **Red:** the governance layer, deliberately *not* a seam — a
-self-modifying system must not be able to replace its own evaluator.
-
-Stages 1–5 are one optimizer step over a discrete space. Whether that step has
-anything to do at all is decided upstream, by the **key space** your strategy
-writes — edits on disjoint keys fuse, edits on the same key conflict. That is
-why the table above starts with a one-key artifact.
-
-The figure is the paper's, rendered from its TikZ source by
-[`tools/gen_architecture_figure.py`](tools/gen_architecture_figure.py) so it
-cannot drift from what the paper shows.
-
-## Install and run the offline demo
-
-Install **0.8.0** from PyPI:
+## Install
 
 ```bash
-pip install "agentdescent>=0.8.0"
-agentdescent demo
+pip install "agentdescent[mcp]>=0.10.0"
+agentdescent demo                         # a complete evolution, offline, no API key, ~10 s
+agentdescent doctor                       # which agent CLIs and provider keys this machine has
 ```
 
-Or, when developing from source, install your checkout:
+Host / MCP default loop is **Path A** (`doctor` → `plan` → `start` → `apply`); advanced MCP tools need `agentdescent mcp --advanced` — see [docs/mcp-path-a.md](docs/mcp-path-a.md).
+
+`[mcp]` adds the agent-facing MCP server and needs Python ≥ 3.10; the library
+itself supports 3.9, where you drop `[mcp]` and drive it with the CLI. Research examples are outside the wheel: to run
+`python -m examples.run_demo` or any algorithm port, clone the repo and follow
+[install and first run](docs/install.md#source-examples):
 
 ```bash
-git clone https://github.com/Birfy/agentdescent && cd agentdescent
-pip install -e .
-agentdescent demo
+git clone https://github.com/ThinkFlowLab/agentdescent && cd agentdescent
+pip install -e ".[dev,mcp]"
 ```
 
-The library supports Python ≥ 3.9 and installs NumPy for its
-prediction-powered audit estimator. The packaged demo runs the offline
-evolution loop without a model API key and ends with output like:
+`agentdescent demo` builds a skill whose rules name the wrong CSV column, twelve
+cases with known totals and a local program as the agent, then runs the real
+loop — only the model is replaced — and ends with:
 
 ```
 held-out reward: 1.000 outcomes: {'committed': 1}
 what it learned: rules.md -> 'COLUMN: amount'
 ```
 
-Research examples are outside the wheel. To run the
-`python -m examples.run_demo` comparison, clone the repo and follow
-[install and first run](docs/install.md).
-The library includes [`evolve()`](docs/evolution.md),
-[`DirectoryStrategy`](docs/directory-evolution.md), and its algorithm ports.
+## 60-second quickstart
 
-## Quickstart — a dataset to an evolved skill
-
-One entry point, `evolve()`, and three building blocks that turn a dataset into
-its arguments. The decisions that are actually yours — your data, how to score
-it, which model — are the ones you still make.
-
-**Set your key first.** Credentials are read from the environment at call time —
-never from code, arguments, or a file the repo owns — and the base URL is what
-picks the provider:
-
-```bash
-export OPENAI_BASE_URL=https://api.deepseek.com   # or GLM, a local vLLM, OpenAI itself
-export OPENAI_API_KEY=sk-...                      # your key for *that* endpoint
-```
-
-`agentdescent doctor` reports what a machine has; the demo above and `pytest -q`
-need none of it.
-[Every provider, with its base URL →](https://birfy.github.io/agentdescent/agents/#configuring-your-provider-and-key)
-
-```python
-from agentdescent import SingleSlot, evolve, openai_compatible, reflector, scorer, tasks_from
-from agentdescent.dataloader import hf_rows
-
-rows = hf_rows("hotpotqa/hotpot_qa", "validation", config="distractor", limit=40)
-model = openai_compatible(model="deepseek-v4-flash")
-
-tasks = tasks_from(rows, prompt="question", gold="answer")     # rows -> Task objects
-run = lambda skill, task: model(f"{skill}\n\n{task.prompt}")   # the skill meets the question
-
-result = evolve(tasks, scorer("exact"), run=run, propose=reflector(model),
-                strategy=SingleSlot(initial_value="You are a helpful assistant."),
-                rounds=8, n_workers=8, max_concurrency=8, held_out_frac=0.3,
-                patience=3, target_reward=0.98)
-
-print(result.rendered)        # the skill it learned
-print(result.final_reward)    # held-out reward
-print(result.outcomes())      # why it went that way
-```
-
-That run is the last row of the table above. It learned *"Respond with only the
-requested answer, omitting any extra explanation or restatement."*
-
-<details>
-<summary>The same thing without a dataset. Runnable as-is — no API key, no dependencies.</summary>
+Runnable as-is — no API key, no dependencies. Three functions are the whole
+contract: how to run a task, how to score it, and what to propose on a failure.
 
 ```python
 from agentdescent import Task, evolve
@@ -163,156 +71,205 @@ result = evolve(tasks, reward, run=run, propose=propose,
 print(result.rendered, result.final_reward, result.error)
 ```
 
-Swap in a real model or agent by passing `agent=` instead of `run`/`propose`:
+### With a real model and a real dataset
 
-```python
-from agentdescent import LLMAgent, claude, openai_compatible, claude_code
-
-evolve(tasks, reward, agent=LLMAgent(claude(model="claude-haiku-4-5")))
-evolve(tasks, reward, agent=LLMAgent(openai_compatible(model="deepseek-v4-flash")))
-evolve(tasks, reward, agent=LLMAgent(claude_code()))     # Claude Code CLI
-# ...or run barrier-free: evolve(..., asynchronous=True, async_ratio=3)
-```
-
-</details>
-
-## Use it from your agent — Claude Code, Codex, OpenCode, DeepSeek Harness, Grok Bot
-
-The same engine as a **plugin**. A shared skill teaches the host when to reach
-for it, an MCP server exposes `doctor / plan / start / status / show / apply /
-cancel / resume`, and the CLI mirrors them, so a run started from an agent can
-be inspected from a shell.
-
-From the current `main` checkout:
+Credentials are read from the environment at call time — never from code — and
+the base URL picks the provider
+([every provider →](https://thinkflowlab.github.io/agentdescent/agents/#configuring-your-provider-and-key)):
 
 ```bash
-bash scripts/setup-hosts.sh   # installs it and wires up whichever agent CLIs you have
-agentdescent demo             # a complete evolution, offline, no key, ~10s
-agentdescent doctor           # which CLIs and keys this machine has
+export OPENAI_BASE_URL=https://api.deepseek.com   # or GLM, Ark, a local vLLM, OpenAI itself
+export OPENAI_API_KEY=sk-...                      # your key for *that* endpoint
 ```
 
-Grok Bot is a **scaffold**, not a one-click wire-up: `agentdescent install grok-bot`
-writes `SKILL.md` / `HOST.md` under `~/.agentdescent/plugins/grok-bot/`, and the
-MCP server is reached via `agentdescent mcp --transport streamable-http` behind an
-HTTPS tunnel. See [Use it from your agent](https://birfy.github.io/agentdescent/plugins/).
+```python
+from agentdescent import SingleSlot, evolve, openai_compatible, reflector, scorer, tasks_from
+from agentdescent.dataloader import hf_rows
 
-Say *"improve this prompt against these examples"* inside the agent. It runs
-`doctor`, writes a spec, **quotes the call count before starting**, waits for
-your yes, runs detached, and asks again before it writes anything back.
+rows = hf_rows("hotpotqa/hotpot_qa", "validation", config="distractor", limit=40)
+model = openai_compatible(model="deepseek-v4-flash")
 
-**No cases yet is not a blocker.** Drafting them is step one of the procedure,
-not a prerequisite: point it at the file and it writes 8–20 for you to check
-first.
+tasks = tasks_from(rows, prompt="question", gold="answer")     # rows -> Task objects
+run = lambda instruction, task: model(f"{instruction}\n\n{task.prompt}")
 
-`kind` is `text`, `skill_dir`, `agent_dir`, `agent_code` — or **`plugin`**: the
-host plugins themselves are evolvable, each rollout loaded into an isolated copy
-of the host, hooks and permission config frozen, with a recursion guard so a
-plugin evolving itself cannot start a nested run.
+result = evolve(tasks, scorer("exact"), run=run, propose=reflector(model),
+                strategy=SingleSlot(initial_value="You are a helpful assistant."),
+                rounds=8, n_workers=8, max_concurrency=8, held_out_frac=0.3,
+                patience=3, target_reward=0.98)
 
-[The plugin in three commands →](https://birfy.github.io/agentdescent/plugin-quickstart/)
-· [set it up and test it →](https://birfy.github.io/agentdescent/testing-guide/)
+print(result.rendered)        # the instruction it learned
+print(result.final_reward)    # held-out reward
+print(result.outcomes())      # why it went that way
+```
 
-## What you can replace
+On 40 HotpotQA items (12 held out) this took held-out exact match from **0.167
+to 0.583**, learning *"Respond with only the requested answer, omitting any extra
+explanation or restatement."* That evolves an **instruction** (`SingleSlot`), not
+an Agent Skill folder — for a library run `agentdescent demo --kind skill_library`.
+Pass `agent=LLMAgent(claude_code())` (or any
+[agent or LLM](https://thinkflowlab.github.io/agentdescent/agents/)) instead of
+`run`/`propose` to evolve against a tool-using CLI agent.
+[Quickstart — dataset to skill →](https://thinkflowlab.github.io/agentdescent/quickstart-skill/)
 
-Two seams carry the algorithm, and both are `typing.Protocol`s — nothing to
-inherit from, and the contracts are re-derived from the engine's own call sites
-by a test, so the published interface cannot drift from what runs.
+### From the CLI, on a file or directory
 
-**The strategy — what evolves.** Three methods over a flat `{key: value}` state.
-Its key space is what decides whether concurrent proposals can fuse at all.
+```bash
+agentdescent init ./my-skill --data cases.jsonl --out spec.json   # cases: {"prompt": ..., "gold": ...} per line
+agentdescent plan spec.json            # validates and prices it; runs nothing
+agentdescent evolve spec.json --detach
+agentdescent status                    # then: show <run_id>, apply <run_id> --dry-run, apply <run_id>
+```
 
-| strategy | the artifact is | concurrent proposals |
+Nothing is written back until `apply`, which backs up first.
+
+## Call any algorithm
+
+Every named algorithm is a set of defaults over the same engine, selectable by
+name from the CLI, a spec, MCP, or the host plugins:
+
+```bash
+agentdescent algorithms list                   # ace, archive_selection, dgm, evoskill, gepa, rrsi, skillopt, …
+agentdescent algorithms show gepa              # what it changes, its parameters
+agentdescent algorithms run gepa ./prompt.txt cases.jsonl --rounds 1 --workers 1   # writes a spec and plans it
+agentdescent demo --algorithm archive_selection   # watch one run offline
+```
+
+In a spec it is one field — `"algorithm": "gepa"` or
+`{"name": "gepa", "params": {...}}` — and every explicit field still wins.
+[The catalog →](https://thinkflowlab.github.io/agentdescent/algorithms/)
+
+**Cards vs ports:** Path A names **cards** (wheel mechanism slices). The
+**twenty-three research ports** are source-only under `examples/` — same slug is
+not the same fidelity; never read a card run as paper numbers
+([decision tree](https://thinkflowlab.github.io/agentdescent/algorithm-decision-tree/), #384).
+Ports run from a checkout, each with a `--dry-run` that needs no API key:
+
+* **Benchmark-faithful (8):** ACE · GEPA · EvoSkill · SkillOpt · ADAS · DGM ·
+  OpenEvolve · ERA
+* **Microports and analogues (15):** PromptBreeder · AFlow · Self-Refine ·
+  Reflexion · SICA · Gödel Agent · Voyager · SkillWeaver · Absolute Zero ·
+  R-Zero · Agent0 · gskill · TextGrad · Dynamic Cheatsheet · Genesis
+
+```bash
+python -m examples.gepa.gepa_prompt_evolution --dry-run
+python -m examples.ace.ace_context_evolution --model claude-haiku-4-5 --async   # barrier-free
+```
+
+Fidelity is declared per port and follows each project's *released code*;
+analogues are not benchmark reproductions.
+[All twenty-three, with measured results →](https://thinkflowlab.github.io/agentdescent/self-evolution-examples/)
+
+## Add an algorithm
+
+* **A named card, in one PR** — a `build(ctx, params) -> Overrides` that fills
+  [policy slots](https://thinkflowlab.github.io/agentdescent/policy-guide/) and
+  `evolve()` knobs. Copy `agentdescent/algorithms/_TEMPLATE.py`, register it, and
+  regenerate the catalog with `python -m tools.gen_algorithms_docs`.
+  [Register a named Algorithm card →](https://thinkflowlab.github.io/agentdescent/algorithm-authoring/)
+* **From your own package** — no fork needed; expose it as an entry point and
+  `agentdescent algorithms list` picks it up:
+
+  ```toml
+  [project.entry-points."agentdescent.algorithms"]
+  my_method = "my_pkg:ALGORITHM"
+  ```
+* **A full research port** — [porting checklist](docs/porting-checklist.md)
+  (benchmark-faithful) or [MethodPolicy checklist](docs/porting-methodpolicy.md)
+  (microports).
+
+## Use it from your agent
+
+The same engine as a **plugin**: a shared skill teaches the host when to reach
+for it, an MCP server exposes `doctor / plan / start / status / show / apply /
+cancel / resume` (and the algorithm, audit and archive tools), and the CLI
+mirrors them, so a run started from an agent can be inspected from a shell.
+
+| host | install | then |
 |---|---|---|
-| `AppendRules` | a deduped list of lessons, keyed by content | almost always **fuse** |
-| `KeyedRules(categories)` | one entry per named category | contradict within, fuse across |
-| `FileTree(files)` | a directory, one key per path | contradict per file |
-| `SingleSlot` | one value — a prompt, an instruction | always contradict |
+| Claude Code | `agentdescent install claude-code` | `claude --plugin-dir ~/.agentdescent/plugins/claude-code` |
+| Codex | `codex plugin marketplace add ThinkFlowLab/agentdescent && codex plugin add agentdescent@agentdescent` | `codex mcp list` |
+| OpenCode | `agentdescent install opencode` | `opencode mcp list` |
+| DeepSeek Harness | `agentdescent install dsh` | `dsh --profile web --dump-config \| grep agentdescent` |
+| Grok Bot | `agentdescent install grok-bot` (a scaffold, not one-click) | read `HOST.md`; MCP via `agentdescent mcp --transport streamable-http --http-token-env AGENTDESCENT_MCP_TOKEN` behind an HTTPS tunnel, with that bearer token as the connector's header |
 
-**Eight policy slots — the rules of evolution.** Each is one field of a
-`Policies` bundle, each defaults to the shipped rule, and filling one leaves the
-other seven alone. A driver *refuses* a field it cannot honour rather than
-ignoring it — a policy that installs but never runs is the one failure a caller
-cannot detect from a completed run.
+From a checkout, `bash scripts/setup-hosts.sh` installs AgentDescent and wires
+every agent CLI it finds. Then say *"improve this prompt against these
+examples"* inside the agent: it runs `doctor`, writes a spec, **quotes the call
+count before starting**, waits for your yes, runs detached, and asks again
+before it writes anything back. No cases yet is not a blocker — it drafts 8–20
+for you to check first.
 
-| | | | |
-|---|---|---|---|
-| `selection` | `task_sampler` | `proposal` | `staleness` |
-| `conflict` | `fusion` | `acceptance` | `promotion` |
+`kind` is `text`, `skill_dir`, `skill_library` (multi-file `*/SKILL.md` tree),
+`agent_dir`, `agent_code`, `policy_slot` — or **`plugin`**: the host plugins
+themselves are evolvable, each rollout in an isolated copy of the host with
+hooks and permissions frozen and a recursion guard. Flagship library demo:
+`agentdescent demo --kind skill_library`.
+[The plugin, step by step →](https://thinkflowlab.github.io/agentdescent/plugin-quickstart/)
+· [set it up and test it →](https://thinkflowlab.github.io/agentdescent/testing-guide/)
 
-Mechanisms that need state the pipeline does not keep — an archive, per-instance
-score rows, an island pool — take the `aggregator_factory` exit instead.
-[How to fill a slot →](https://birfy.github.io/agentdescent/policy-guide/)
+## How it works
 
-## Twenty-three algorithm ports
+![AgentDescent architecture: N workers roll out against ledger snapshots and emit
+diffs with evidence cards into a buffer; a single aggregator thread runs the
+five-stage merge pipeline and commits to a git-backed ledger; four pluggable
+seams sit under the components they select; the L0 governance layer gates the
+audit step.](https://raw.githubusercontent.com/ThinkFlowLab/agentdescent/main/docs/assets/architecture.png)
 
-Published self-evolution algorithms run as plug-ins rather than forks, under
-serial, synchronous or barrier-free scheduling without touching the engine —
-which is what makes the scheduler a controlled variable instead of a property of
-each paper's own loop.
+Serial self-improvement is bounded at one accepted change per iteration;
+merging concurrent edits is the attempt to lift that bound. The analogy breaks
+exactly where the design lives: **gradients add, diffs do not**, so aggregation
+is conflict resolution, fusion, statistical acceptance and a transactional
+commit rather than averaging. The governance layer (red) is deliberately *not* a
+seam — a self-modifying system must not be able to replace its own evaluator.
+The figure is regenerated from TikZ by
+[`tools/gen_architecture_figure.py`](tools/gen_architecture_figure.py).
 
-**Benchmark-faithful (8):** ACE · GEPA · EvoSkill · SkillOpt · ADAS · DGM ·
-OpenEvolve · ERA
-**Microports and analogues (15):** PromptBreeder · AFlow · Self-Refine ·
-Reflexion · SICA · Gödel Agent · Voyager · SkillWeaver · Absolute Zero · R-Zero ·
-Agent0 · gskill · TextGrad · Dynamic Cheatsheet · **Genesis**
+**What you can replace.** Two `typing.Protocol` seams carry the algorithm:
 
-Genesis is the one whose whole algorithm — a recursion over `(version, path)`
-worlds, a three-way merge and a parent's verdict — installs through
-`Policies(proposal=, acceptance=, conflict=)` and a `Strategy`, with **no engine
-change at all**.
+* **the strategy — what evolves.** `AppendRules` (lessons; proposals almost
+  always fuse), `KeyedRules` (one entry per category), `FileTree` (a directory,
+  one key per path), `SingleSlot` (one value; proposals always contradict), or
+  your own three-method class. Its key space decides whether concurrent edits
+  can fuse at all.
+* **eight policy slots — the rules of evolution:** `selection`,
+  `task_sampler`, `proposal`, `staleness`, `conflict`, `fusion`, `acceptance`,
+  `promotion`. Each defaults to the shipped rule; a driver *refuses* a field it
+  cannot honour rather than ignoring it. Mechanisms that need state the
+  pipeline does not keep take the `aggregator_factory` exit.
+  [How to fill a slot →](https://thinkflowlab.github.io/agentdescent/policy-guide/)
 
-Fidelity is declared per port, follows each project's *released code* where it
-diverges from its paper, and analogues are not to be cited as benchmark
-reproductions. Every port has a `--dry-run` mode that needs no API key.
-[All twenty-three, with their measured results →](https://birfy.github.io/agentdescent/self-evolution-examples/)
+## What it measures
+
+Every row names the setting that produced it; [the results
+page](https://thinkflowlab.github.io/agentdescent/results/) also reports the
+runs where there was nothing left to learn.
+
+| | measured | setting |
+|---|---|---|
+| An artifact held in **one key**, where a keyed union can never fuse | keyed union fuses **0 of 48** merges · reflective merge **42 of 48** | BBH `dyck_languages`, `GLM-5.2`, *N*=4, 4 seeds |
+| What that costs, at a pinned rollout budget | **40% fewer model calls** (95% CI 27–54%, same direction on every seed) | the same runs |
+| Wall-clock against a *faithful* serial control | median **6.8×** (three seeds, 3.1–9.5×) | GEPA on HotpotQA, *N*=4, 16 rollouts pinned |
+| The one-call path, end to end | held-out exact match **0.167 → 0.583** | 40 HotpotQA items, 12 held out |
+
+Quality is claimed only where the design can support it: intervals rather than
+*p*-values where a comparison cannot reach significance, and it says so.
 
 ## Documentation
 
-Full docs render at **[birfy.github.io/agentdescent](https://birfy.github.io/agentdescent/)**.
+Full docs: **[thinkflowlab.github.io/agentdescent](https://thinkflowlab.github.io/agentdescent/)**.
 
-| Start here | |
+| | |
 |---|---|
-| [Quickstart — dataset to skill](https://birfy.github.io/agentdescent/quickstart-skill/) | One call: your data, how to score it, which model |
-| [Measured results](https://birfy.github.io/agentdescent/results/) | Every empirical claim with the setup that produced it |
-| [Architecture](https://birfy.github.io/agentdescent/architecture/) | Components, data flow, the two runtimes |
-| [Concepts](https://birfy.github.io/agentdescent/concepts/) | The training↔RSI analogy, staleness, governance |
+| **Start** | [Install](https://thinkflowlab.github.io/agentdescent/install/) · [The plugin, step by step](https://thinkflowlab.github.io/agentdescent/plugin-quickstart/) · [Quickstart — dataset to skill](https://thinkflowlab.github.io/agentdescent/quickstart-skill/) · [Evolve a directory](https://thinkflowlab.github.io/agentdescent/quickstart-directory/) · [Evolve agent code](https://thinkflowlab.github.io/agentdescent/quickstart-agent-code/) |
+| **Agents** | [Use it from your agent](https://thinkflowlab.github.io/agentdescent/plugins/) · [Set it up and test it](https://thinkflowlab.github.io/agentdescent/testing-guide/) · [Agents & LLMs](https://thinkflowlab.github.io/agentdescent/agents/) |
+| **Algorithms** | [Named algorithms](https://thinkflowlab.github.io/agentdescent/algorithms/) · [Register a card](https://thinkflowlab.github.io/agentdescent/algorithm-authoring/) · [Twenty-three ports](https://thinkflowlab.github.io/agentdescent/self-evolution-examples/) · [Port fidelity](https://thinkflowlab.github.io/agentdescent/port-fidelity/) |
+| **Engine** | [The `evolve()` method](https://thinkflowlab.github.io/agentdescent/evolution/) · [Strategies](https://thinkflowlab.github.io/agentdescent/strategies/) · [Policies](https://thinkflowlab.github.io/agentdescent/policies/) · [Architecture](https://thinkflowlab.github.io/agentdescent/architecture/) · [Concepts](https://thinkflowlab.github.io/agentdescent/concepts/) · [API reference](https://thinkflowlab.github.io/agentdescent/api/) |
+| **Results** | [Measured results](https://thinkflowlab.github.io/agentdescent/results/) · [Efficiency](https://thinkflowlab.github.io/agentdescent/efficiency/) · [Runtime matrix](https://thinkflowlab.github.io/agentdescent/matrix-overview/) |
 
-| Going further | |
-|---|---|
-| [Evolving anything](https://birfy.github.io/agentdescent/evolution/) · [Strategies](https://birfy.github.io/agentdescent/strategies/) | Evolve any artifact by writing its `Strategy` |
-| [Choosing policies](https://birfy.github.io/agentdescent/policies/) · [Using the slots](https://birfy.github.io/agentdescent/policy-guide/) | The decision plane, and how to write for it |
-| [Agents & LLMs](https://birfy.github.io/agentdescent/agents/) · [Datasets](https://birfy.github.io/agentdescent/dataloader/) | The provider layer and the data layer |
-| [Parallelism](https://birfy.github.io/agentdescent/parallelism/) · [Execution](https://birfy.github.io/agentdescent/execution/) · [Sandboxes](https://birfy.github.io/agentdescent/sandboxes/) | Where rollouts run, and how they are isolated |
-| [Use it from your agent](https://birfy.github.io/agentdescent/plugins/) · [Testing it](https://birfy.github.io/agentdescent/testing-guide/) | The plugin surface, and how to verify each host |
-| [Efficiency](https://birfy.github.io/agentdescent/efficiency/) · [Runtime matrix](https://birfy.github.io/agentdescent/matrix-overview/) | Measured scaling and the scheduler comparison |
-| [Molecule search — porous crystals](https://birfy.github.io/agentdescent/porous-molecules/) | A domain application: flat-PUCT tree search over molecules, with a validity gate and a real `P(s,a)` |
+## Citing, scope and contributing
 
-## Citing
-
-The paper — *AgentDescent: Asynchronous Parallel Self-Evolution of LLM Agents by
-Merging Conflicting Edits* — gives the design, a closed-form condition for when
-merging can fire at all, and a live-model evaluation with every generating script
-named.
-
-```bibtex
-@article{chen2026agentdescent,
-  title  = {{AgentDescent}: Asynchronous Parallel Self-Evolution of {LLM} Agents
-            by Merging Conflicting Edits},
-  author = {Chen, Danyang},
-  year   = {2026},
-  doi    = {10.5281/zenodo.22348027}
-}
-```
-
-LaTeX source and the built PDF live on the
-[`paper`](https://github.com/Birfy/agentdescent/tree/paper/paper) branch, not
-here: the write-up and the code change on different clocks. Per-result raw data
-is in [`bench/results/`](bench/results/) for most results; the
-merge-versus-selection sweeps are re-measurable from the command the paper names
-rather than recomputable, because their per-run data was not retained — the paper
-says so too.
-
-## Scope
+Use GitHub's **Cite this repository** button ([`CITATION.cff`](CITATION.cff));
+per-result raw data is in [`bench/results/`](bench/results/).
 
 A **research reference implementation**, not a production system. The novelty is
 a narrow engineering synthesis — concurrent, staleness-bounded,

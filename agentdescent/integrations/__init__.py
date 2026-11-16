@@ -24,8 +24,8 @@ import sys
 import sysconfig
 from typing import Callable, Dict, List, Optional, Tuple
 
-__all__ = ["HOSTS", "host_status", "install", "uninstall", "render_claude_plugin", "render_dsh_plugin",
-           "skill_text", "hooks_text"]
+__all__ = ["HOSTS", "host_status", "host_skills_dir", "install", "uninstall",
+           "render_claude_plugin", "render_dsh_plugin", "skill_text", "hooks_text"]
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -132,6 +132,23 @@ def _host_root(var: str, default: str, honour_env: bool = True) -> str:
     ``DSH_HOME`` / ``XDG_CONFIG_HOME`` must not send the write to the user's real
     configuration instead (#410)."""
     return (os.environ.get(var) if honour_env else None) or default
+
+
+def _dsh_root(home: str, honour_env: bool) -> str:
+    return _host_root("DSH_HOME", os.path.join(home, ".dsh"), honour_env)
+
+
+def _codex_root(home: str, honour_env: bool) -> str:
+    return _host_root("CODEX_HOME", os.path.join(home, ".codex"), honour_env)
+
+
+def _opencode_root(home: str, honour_env: bool) -> str:
+    config_home = _host_root("XDG_CONFIG_HOME", os.path.join(home, ".config"), honour_env)
+    return os.path.join(config_home, "opencode")
+
+
+def _claude_root(home: str, honour_env: bool) -> str:
+    return _host_root("CLAUDE_CONFIG_DIR", os.path.join(home, ".claude"), honour_env)
 
 
 # ---------------------------------------------------------------------------
@@ -326,7 +343,7 @@ def dsh_patch_block(launcher: Optional[List[str]] = None) -> str:
 
 
 def install_dsh(home: str, w: _Writer) -> None:
-    dsh_home = _host_root("DSH_HOME", os.path.join(home, ".dsh"), w.honour_env)
+    dsh_home = _dsh_root(home, w.honour_env)
     skill_dir = os.path.join(dsh_home, "skills", "agentdescent")
     w.write(os.path.join(skill_dir, "SKILL.md"), skill_text())
     w.write(os.path.join(skill_dir, "hooks.json"), hooks_text(w.launcher))
@@ -350,7 +367,7 @@ def plugin_manifest() -> Dict[str, object]:
                        "with a parallel, merge-based optimiser.",
         "version": _version(),
         "author": {"name": "AgentDescent"},
-        "homepage": "https://github.com/Birfy/agentdescent",
+        "homepage": "https://github.com/ThinkFlowLab/agentdescent",
         "keywords": ["evolution", "skills", "optimisation", "self-improvement"],
     }
 
@@ -394,7 +411,7 @@ if I did not, use the kind's default recipe.
 """
 
 ALGORITHMS_COMMAND = """---
-description: List, show, or run a named AgentDescent algorithm (same cards as algorithms list/show)
+description: List, show, or run a named AgentDescent Algorithm card (same as algorithms list/show)
 argument-hint: "[list [--kind K] | show <name> | run <name> <path> [cases.jsonl] [--param k=v...]]"
 ---
 
@@ -402,23 +419,32 @@ Use the agentdescent skill / MCP tools. `$ARGUMENTS` chooses the verb; the data
 is the same as `agentdescent algorithms list` / `show` and the MCP tools
 `list_algorithms` / `describe_algorithm`. Never invent a name.
 
+These are Algorithm **cards** (wheel mechanism slices, `surface=card`). A
+same-name `examples/<algo>/` research port is a separate source-only script and
+may use a different propose/strategy path — never claim paper/benchmark
+fidelity for a card. Prefer `list --kind <artifact kind>` so ineligible cards
+are not offered.
+
 Parse `$ARGUMENTS` (trim; empty means `list`):
 
-- **`list`** [optional `--kind K`]: call `list_algorithms` (or
-  `agentdescent algorithms list [--kind K] [--json]`). Show each name, one-line
-  summary, kinds, and fidelity. If the user named a kind, filter to it.
+- **`list`** [optional `--kind K`]: call `list_algorithms` with the artifact's
+  kind when known (or `agentdescent algorithms list [--kind K] [--json]`). Show
+  each name, summary, kinds, fidelity, and `surface=card`. Filter by kind so
+  hosts are not offered cards that cannot run on that artifact.
 - **`show <name>`**: call `describe_algorithm` (or
   `agentdescent algorithms show <name>`). Show the full card (params, defaults,
-  extra cost, what it changes). Stop here unless they ask to run it.
+  extra cost, `research_port` / `fidelity_note` when a same-name examples/ port
+  exists). Stop here unless they ask to run it.
 - **`run <name> <path>`** [optional `cases.jsonl`] [optional `--param k=v`]:
   call `algorithm_spec` with the name, the absolute path, the absolute cases
   file and only the params they gave (validate with `describe_algorithm` /
   `show` first); it writes and plans the spec and returns `spec`. Run `doctor`
-  first, show the resolved algorithm card and estimate, and wait for my yes
-  before `start` with that `spec`. Same apply/cancel/resume rules as `/evolve`.
-  Without MCP: `agentdescent algorithms run <name> <path> [cases.jsonl]
-  [--param k=v...] [--rounds N] [--workers N]` (init + plan in one step; then
-  `evolve` after yes). For a quick, cheap trial pass `--rounds 1 --workers 1`.
+  first, show the resolved algorithm card (including fidelity / surface) and
+  estimate, and wait for my yes before `start` with that `spec`. Same
+  apply/cancel/resume rules as `/evolve`. Without MCP: `agentdescent algorithms
+  run <name> <path> [cases.jsonl] [--param k=v...] [--rounds N] [--workers N]`
+  (init + plan; then `evolve` after yes). For a quick trial pass
+  `--rounds 1 --workers 1`.
 
 If they only named a method with no path, `show` it and ask whether to `run`.
 """
@@ -466,7 +492,7 @@ def install_claude_code(home: str, w: _Writer) -> None:
     w.note(f"load it:   claude --plugin-dir {dest}")
     w.note("slash: /agentdescent:evolve <path> [cases.jsonl]")
     w.note("slash: /agentdescent:algorithms list|show|run …")
-    w.note("or, from the repository's marketplace: /plugin marketplace add Birfy/agentdescent "
+    w.note("or, from the repository's marketplace: /plugin marketplace add ThinkFlowLab/agentdescent "
            "&& /plugin install agentdescent@agentdescent")
 
 
@@ -573,7 +599,7 @@ def _add_env_vars_in_place(path: str, w: "_Writer") -> bool:
 
 
 def install_codex(home: str, w: _Writer) -> None:
-    codex_home = _host_root("CODEX_HOME", os.path.join(home, ".codex"), w.honour_env)
+    codex_home = _codex_root(home, w.honour_env)
     w.write(os.path.join(codex_home, "skills", "agentdescent", "SKILL.md"), skill_text())
     # Same body as Claude's ``/agentdescent:evolve``; Codex loads it as
     # ``/prompts:evolve`` from ``~/.codex/prompts/`` (custom prompts are the
@@ -599,7 +625,7 @@ def install_codex(home: str, w: _Writer) -> None:
     # plugin brings the MCP server with it -- one command instead of the two
     # edits above. Verified against codex-cli 0.153.4.
     w.note("or, in one command instead of the two edits above: "
-           "codex plugin marketplace add Birfy/agentdescent && "
+           "codex plugin marketplace add ThinkFlowLab/agentdescent && "
            "codex plugin add agentdescent@agentdescent")
 
 
@@ -665,8 +691,7 @@ def _strip_jsonc_comments(raw: str) -> str:
 
 
 def install_opencode(home: str, w: _Writer) -> None:
-    config_home = _host_root("XDG_CONFIG_HOME", os.path.join(home, ".config"), w.honour_env)
-    root = os.path.join(config_home, "opencode")
+    root = _opencode_root(home, w.honour_env)
     # `{skill,skills}/**/SKILL.md` -- both spellings are accepted; `skill` is
     # what the sibling `agent` / `command` directories are named.
     w.write(os.path.join(root, "skill", "agentdescent", "SKILL.md"), skill_text())
@@ -940,7 +965,7 @@ def dsh_plugin_package() -> Dict[str, object]:
         "peerDependencies": {"@deepseek-ai/dsh-skill": "*"},
         "repository": {
             "type": "git",
-            "url": "git+https://github.com/Birfy/agentdescent.git",
+            "url": "git+https://github.com/ThinkFlowLab/agentdescent.git",
             "directory": "integrations/dsh-agentdescent",
         },
     }
@@ -985,7 +1010,7 @@ DSH_PLUGIN_README = """# dsh-agentdescent
 
 Evolve skills, agent definitions, prompts, code and host plugins from inside
 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness), using
-[AgentDescent](https://github.com/Birfy/agentdescent).
+[AgentDescent](https://github.com/ThinkFlowLab/agentdescent).
 
 ```bash
 pip install "agentdescent[mcp]"            # the tools this plugin exposes
@@ -1088,11 +1113,13 @@ launcher will not reach the Bot from Cursor's backend.
    `describe_algorithm` when the HTTP MCP below is wired. The skill
    falls back to those verbs when MCP tools are absent.
 3. **MCP (optional, not auto-wired).** Serve the tools over HTTP on loopback
-   and expose them through any HTTPS tunnel, then ask the Bot to add the
-   tunnel URL (ending in `/mcp`) as a custom MCP server:
+   with a bearer token and expose them through any HTTPS tunnel, then ask the
+   Bot to add the tunnel URL (ending in `/mcp`) as a custom MCP server whose
+   request header is `Authorization: Bearer <token>`:
 
    ```bash
-   agentdescent mcp --transport streamable-http --port 8000
+   export AGENTDESCENT_MCP_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+   agentdescent mcp --transport streamable-http --port 8000 --http-token-env AGENTDESCENT_MCP_TOKEN
    # in another shell -- the Host header must stay 127.0.0.1:8000, because the
    # server rejects unknown Host headers (DNS-rebinding protection):
    cloudflared tunnel --url http://127.0.0.1:8000 --http-host-header 127.0.0.1:8000
@@ -1102,10 +1129,13 @@ launcher will not reach the Bot from Cursor's backend.
    If port 8000 is taken, the server exits 4 with one line saying so before
    printing any URL; pick another `--port` and use it in the tunnel too.
 
-   The server has **no authentication**: anyone holding the tunnel URL can
-   start runs and `apply` files, so keep the URL private and stop the tunnel
-   when done. A non-loopback `--host` is refused unless you pass
-   `--allow-remote`. Do **not** expect `mcp.example.json` to be picked up
+   Every request without the header is answered 401 **before** an MCP session
+   is created, so anyone holding the tunnel URL alone can reach no tool. The
+   token is read from the named environment variable only: never pass its value
+   as a flag, put it in the URL, or expect it in a log. Without
+   `--http-token-env` a loopback server behaves as before; a non-loopback
+   `--host` is refused unless you pass `--allow-remote` **and** name a token
+   variable. Do **not** expect `mcp.example.json` to be picked up
    automatically — it is documentation.
 4. **Bot template.** To share a Bot that already knows the procedure, use
    Grok Bot's template export (skills + getting-started), not this installer.
@@ -1126,7 +1156,7 @@ launcher will not reach the Bot from Cursor's backend.
   to check — not that a server is running.
 - `agentdescent uninstall grok-bot` removes only the files this install wrote.
 
-See also [docs/plugins.md](https://birfy.github.io/agentdescent/docs/plugins/).
+See also [docs/plugins.md](https://thinkflowlab.github.io/agentdescent/docs/plugins/).
 """
 
 
@@ -1269,6 +1299,30 @@ def canonical_host(name: str) -> str:
     return HOST_ALIASES.get(key, key)
 
 
+def host_skills_dir(host: str, *, home: Optional[str] = None) -> Optional[str]:
+    """Writable user-skills root for ``host``, or ``None`` for ``grok-bot``.
+
+    Uses the same home and environment resolution (``DSH_HOME``, ``CODEX_HOME``,
+    ``XDG_CONFIG_HOME``, ``CLAUDE_CONFIG_DIR``) as ``install`` and
+    ``host_status``. An explicit ``home`` overrides those variables.
+    Returns ``None`` for ``grok-bot`` because ``$AGENTDESCENT_GROK_BOT_SKILLS``
+    is read-only and skills must be saved by Grok Bot as user skills (#935).
+    """
+    canonical = canonical_host(host)
+    if canonical not in HOSTS:
+        raise ValueError(f"unknown host {host!r}; choose from {sorted(HOSTS)}")
+    resolved_home, honour_env = _resolve_home(home)
+    if canonical == "dsh":
+        return os.path.join(_dsh_root(resolved_home, honour_env), "skills")
+    if canonical == "codex":
+        return os.path.join(_codex_root(resolved_home, honour_env), "skills")
+    if canonical == "opencode":
+        return os.path.join(_opencode_root(resolved_home, honour_env), "skill")
+    if canonical == "claude-code":
+        return os.path.join(_claude_root(resolved_home, honour_env), "skills")
+    return None
+
+
 def _read(path: str) -> Optional[str]:
     try:
         with open(path, encoding="utf-8") as fh:
@@ -1288,7 +1342,79 @@ def _skill_state(path: str) -> str:
     return "ok" if have == skill_text() else "stale"
 
 
-def _opencode_mcp_state(root: str) -> str:
+def _abs_dead_executable(command: object) -> Optional[str]:
+    """An absolute launcher path that is not an existing executable file.
+
+    Relative and bare names (``python3``, ``agentdescent``) are left alone:
+    they resolve against PATH when the host starts the server. ``None`` means
+    this is not a ``broken`` launcher.
+    """
+    if not isinstance(command, str) or not command:
+        return None
+    if not (os.path.isabs(command) or ntpath.isabs(command)):
+        return None
+    if os.path.isfile(command) and os.access(command, os.X_OK):
+        return None
+    return command
+
+
+def _mcp_from_command(present: bool, command: object) -> Tuple[str, Optional[str]]:
+    """``(mcp state, dead absolute path or None)`` for a present MCP entry."""
+    if not present:
+        return "missing", None
+    dead = _abs_dead_executable(command)
+    if dead is not None:
+        return "broken", dead
+    return "ok", None
+
+
+def _entry_command(entry: object) -> object:
+    """The executable an MCP entry will spawn: ``command[0]`` or ``command``."""
+    if not isinstance(entry, dict):
+        return None
+    command = entry.get("command")
+    if isinstance(command, list) and command:
+        return command[0]
+    return command
+
+
+def _quoted_scalar(raw: str) -> Optional[str]:
+    """A TOML/YAML ``command = "..."`` / ``command: "..."`` value, or ``None``."""
+    raw = raw.strip()
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ("'", '"'):
+            return raw[1:-1]
+        return raw
+    return value if isinstance(value, str) else None
+
+
+def _codex_mcp_command(cfg: str) -> Optional[str]:
+    """The ``command`` under a live ``[mcp_servers.agentdescent]`` table."""
+    match = re.search(
+        r"^\s*\[mcp_servers\.agentdescent\]\s*$([\s\S]*?)(?=^\s*\[|\Z)",
+        cfg, re.M)
+    if not match:
+        return None
+    line = re.search(r"^\s*command\s*=\s*(.*)$", match.group(1), re.M)
+    return _quoted_scalar(line.group(1)) if line else None
+
+
+def _dsh_mcp_command(patch: str) -> Optional[str]:
+    """The mcp-client ``command:`` inside our marked ``cordis.patch.yml`` block."""
+    if DSH_BLOCK_START not in patch:
+        return None
+    start = patch.index(DSH_BLOCK_START)
+    end = patch.find(DSH_BLOCK_END, start)
+    block = patch[start:end if end != -1 else None]
+    line = re.search(r"^\s*command:\s*(.*)$", block, re.M)
+    return _quoted_scalar(line.group(1)) if line else None
+
+
+def _opencode_mcp_inspect(root: str) -> Tuple[str, Optional[str]]:
     """The MCP entry in OpenCode's config: ``opencode.jsonc`` (what ``install``
     writes) or ``opencode.json`` (what a user may keep by hand).
 
@@ -1296,7 +1422,9 @@ def _opencode_mcp_state(root: str) -> str:
     (JSONC allows comments, which ``json`` cannot read) names ``agentdescent`` --
     the entry might be there and guessing either way would be wrong. A commented
     file that never names it is ``missing`` (#516): ``install`` puts the entry in
-    ``opencode.json`` beside it, and ``doctor`` must not call that host ``ok``."""
+    ``opencode.json`` beside it, and ``doctor`` must not call that host ``ok``.
+    ``broken`` when the entry's first command element is an absolute path that
+    is not an existing executable file (#918)."""
     unreadable = False
     for name in ("opencode.jsonc", "opencode.json"):
         raw = _read(os.path.join(root, name))
@@ -1308,21 +1436,32 @@ def _opencode_mcp_state(root: str) -> str:
             # (JSONC keys are quoted strings), so only one that does is a maybe.
             unreadable = unreadable or '"agentdescent"' in _strip_jsonc_comments(raw)
             continue
-        if (data.get("mcp") or {}).get("agentdescent"):
-            return "ok"
-    return "unknown" if unreadable else "missing"
+        entry = (data.get("mcp") or {}).get("agentdescent")
+        if entry:
+            return _mcp_from_command(True, _entry_command(entry))
+    return ("unknown" if unreadable else "missing"), None
 
 
-def _claude_mcp_state(path: str) -> str:
+def _opencode_mcp_state(root: str) -> str:
+    return _opencode_mcp_inspect(root)[0]
+
+
+def _claude_mcp_inspect(path: str) -> Tuple[str, Optional[str]]:
     raw = _read(path)
     if raw is None:
-        return "missing"
+        return "missing", None
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        return "missing"          # a manifest the host cannot read starts no server
+        return "missing", None          # a manifest the host cannot read starts no server
     servers = data.get("mcpServers") if isinstance(data, dict) else None
-    return "ok" if isinstance(servers, dict) and servers.get("agentdescent") else "missing"
+    if not (isinstance(servers, dict) and servers.get("agentdescent")):
+        return "missing", None
+    return _mcp_from_command(True, _entry_command(servers.get("agentdescent")))
+
+
+def _claude_mcp_state(path: str) -> str:
+    return _claude_mcp_inspect(path)[0]
 
 
 def _resolve_home(home: Optional[str]) -> Tuple[str, bool]:
@@ -1351,14 +1490,16 @@ def host_status(host: str, *, home: Optional[str] = None) -> Dict[str, str]:
     is what it holds still what this package would write?
 
     ``skill`` is ``ok`` / ``stale`` / ``missing``; ``mcp`` is ``ok`` /
-    ``missing`` / ``unknown`` / ``n/a`` (``n/a`` is Grok Bot: no host-native MCP
-    config file exists; an OpenCode config with comments cannot be read safely;
-    ``unknown`` is also what ``doctor`` reports if reading a host's files raises).
-    Two limits: a launcher pinned to an interpreter that has since been deleted
-    still reads ``ok`` (only presence is checked), and an install made through a
+    ``missing`` / ``unknown`` / ``n/a`` / ``broken`` (``n/a`` is Grok Bot: no
+    host-native MCP config file exists; an OpenCode config with comments cannot
+    be read safely; ``unknown`` is also what ``doctor`` reports if reading a
+    host's files raises; ``broken`` is a launcher whose first argument is an
+    absolute path that is not an existing executable file, and then
+    ``mcp_launcher`` names that path). One limit: an install made through a
     host's own marketplace (``/plugin install``, ``codex plugin add``) leaves no
     files here, so it reads ``missing``. ``state`` summarises them: ``ok``, ``stale`` (the skill is
-    behind the package), ``partial`` (one half is there) or ``missing``. Paths
+    behind the package), ``partial`` (one half is there, or the MCP launcher is
+    ``broken``) or ``missing``. Paths
     follow ``install`` exactly, including ``DSH_HOME`` / ``CODEX_HOME`` /
     ``XDG_CONFIG_HOME``. Codex can also be wired through ``codex plugin``, which
     leaves nothing here, so its ``missing`` says where else to look.
@@ -1366,26 +1507,28 @@ def host_status(host: str, *, home: Optional[str] = None) -> Dict[str, str]:
     if host not in HOSTS:
         raise ValueError(f"unknown host {host!r}; choose from {sorted(HOSTS)}")
     home, honour_env = _resolve_home(home)   # explicit home is the whole world (#410)
+    dead: Optional[str] = None
     if host == "dsh":
-        root = _host_root("DSH_HOME", os.path.join(home, ".dsh"), honour_env)
+        root = _dsh_root(home, honour_env)
         skill = os.path.join(root, "skills", "agentdescent", "SKILL.md")
         patch = _read(os.path.join(root, "cordis.patch.yml")) or ""
         # Both markers: an interrupted write can leave only the start.
-        mcp = "ok" if DSH_BLOCK_START in patch and DSH_BLOCK_END in patch else "missing"
+        present = DSH_BLOCK_START in patch and DSH_BLOCK_END in patch
+        mcp, dead = _mcp_from_command(present, _dsh_mcp_command(patch) if present else None)
         # Our block from before #415 forwards four names, so dsh scrubs
         # `ARK_API_KEY`. Re-running `install` rewrites the block.
         stale_env = mcp == "ok" and _dsh_block_env_is_stale(patch)
     elif host == "claude-code":
         root = os.path.join(home, ".agentdescent", "plugins", "claude-code")
         skill = os.path.join(root, "skills", "agentdescent", "SKILL.md")
-        mcp = _claude_mcp_state(os.path.join(root, ".mcp.json"))
+        mcp, dead = _claude_mcp_inspect(os.path.join(root, ".mcp.json"))
     elif host == "codex":
-        root = _host_root("CODEX_HOME", os.path.join(home, ".codex"), honour_env)
+        root = _codex_root(home, honour_env)
         skill = os.path.join(root, "skills", "agentdescent", "SKILL.md")
         cfg = _read(os.path.join(root, "config.toml")) or ""
         # A live table header, not a substring: a commented-out one is not wired.
-        mcp = ("ok" if re.search(r"^\s*\[mcp_servers\.agentdescent\]", cfg, re.M)
-               else "missing")
+        present = bool(re.search(r"^\s*\[mcp_servers\.agentdescent\]", cfg, re.M))
+        mcp, dead = _mcp_from_command(present, _codex_mcp_command(cfg) if present else None)
         # Our own block from before #404 has no `env_vars`: Codex starts that
         # server without the provider keys. Re-running `install` repairs it.
         legacy_block = mcp == "ok" and _is_legacy_codex_block(cfg)
@@ -1398,10 +1541,9 @@ def host_status(host: str, *, home: Optional[str] = None) -> Dict[str, str]:
         user_skill, user_skill_path = _grok_bot_user_skill(
             grok_bot_user_skills_dir(home, honour_env))
     else:
-        root = os.path.join(_host_root("XDG_CONFIG_HOME", os.path.join(home, ".config"),
-                                       honour_env), "opencode")
+        root = _opencode_root(home, honour_env)
         skill = os.path.join(root, "skill", "agentdescent", "SKILL.md")
-        mcp = _opencode_mcp_state(root)
+        mcp, dead = _opencode_mcp_inspect(root)
     skill_state = _skill_state(skill)
     if skill_state == "missing" and mcp in ("missing", "unknown"):
         # Nothing of ours is there. `unknown` only says a config this user wrote
@@ -1414,6 +1556,9 @@ def host_status(host: str, *, home: Optional[str] = None) -> Dict[str, str]:
         state = "ok"
     else:
         state = "partial"
+    info = {"state": state, "skill": skill_state, "mcp": mcp, "path": skill}
+    if dead:
+        info["mcp_launcher"] = dead
     if host == "grok-bot":
         # The skill Grok Bot actually loads is the saved user skill, not the
         # scaffold (#675): a stale one is stale whatever the scaffold says, and
@@ -1422,9 +1567,11 @@ def host_status(host: str, *, home: Optional[str] = None) -> Dict[str, str]:
             state = "stale"
         elif user_skill == "ok" and state == "missing":
             state = "ok"
-        return {"state": state, "skill": skill_state, "mcp": mcp, "path": skill,
-                "user_skill": user_skill, "user_skill_path": user_skill_path}
-    return {"state": state, "skill": skill_state, "mcp": mcp, "path": skill}
+        info["state"] = state
+        info["user_skill"] = user_skill
+        info["user_skill_path"] = user_skill_path
+        return info
+    return info
 
 
 def _dsh_block_env_is_stale(patch: str) -> bool:
@@ -1616,7 +1763,7 @@ class _Eraser:
 
 
 def _uninstall_dsh(home: str, e: _Eraser) -> None:
-    root = _host_root("DSH_HOME", os.path.join(home, ".dsh"), e.honour_env)
+    root = _dsh_root(home, e.honour_env)
     skill_dir = os.path.join(root, "skills", "agentdescent")
     for name in ("SKILL.md", "hooks.json"):
         e.remove_file(os.path.join(skill_dir, name))
@@ -1716,7 +1863,7 @@ def _is_legacy_codex_block(current: str) -> bool:
 
 
 def _uninstall_codex(home: str, e: _Eraser) -> None:
-    root = _host_root("CODEX_HOME", os.path.join(home, ".codex"), e.honour_env)
+    root = _codex_root(home, e.honour_env)
     skill_dir = os.path.join(root, "skills", "agentdescent")
     e.remove_file(os.path.join(skill_dir, "SKILL.md"))
     e.prune_dirs(skill_dir, root)
@@ -1741,8 +1888,7 @@ def _uninstall_codex(home: str, e: _Eraser) -> None:
 
 
 def _uninstall_opencode(home: str, e: _Eraser) -> None:
-    config_home = _host_root("XDG_CONFIG_HOME", os.path.join(home, ".config"), e.honour_env)
-    root = os.path.join(config_home, "opencode")
+    root = _opencode_root(home, e.honour_env)
     skill_dir = os.path.join(root, "skill", "agentdescent")
     e.remove_file(os.path.join(skill_dir, "SKILL.md"))
     e.prune_dirs(skill_dir, root)
@@ -1801,6 +1947,21 @@ _UNINSTALL: Dict[str, Callable[[str, _Eraser], None]] = {
 }
 
 
+def _empty_uninstall_note(host: str) -> str:
+    """Line printed when uninstall finds none of this package's files.
+
+    Claude Code and Codex can also be wired through the host's own
+    marketplace (``/plugin install``, ``codex plugin add``), which leaves
+    nothing here. Grok Bot, dsh and OpenCode are only installed by
+    ``agentdescent install`` (#890).
+    """
+    msg = f"nothing to remove: agentdescent is not installed for {host}"
+    if host in ("claude-code", "codex"):
+        msg += (" (files from the host's own marketplace are removed "
+                "with its plugin command)")
+    return msg
+
+
 def uninstall(host: str, *, dry_run: bool = False, home: Optional[str] = None) -> List[str]:
     """Undo ``install(host)``. Returns the lines to print: what was removed or kept.
 
@@ -1808,9 +1969,11 @@ def uninstall(host: str, *, dry_run: bool = False, home: Optional[str] = None) -
     host's config. A config entry that is no longer exactly what ``install``
     writes -- you edited the launcher, or wrote it yourself -- is kept and
     reported, and a config file with comments (OpenCode's ``opencode.jsonc``) is
-    never rewritten. The run store under ``~/.agentdescent`` is untouched. An
-    install made through the host's own marketplace is removed with that host's
-    plugin command. ``dry_run`` reports without changing anything.
+    never rewritten. The run store under ``~/.agentdescent`` is untouched.
+    Claude Code and Codex can also be wired through the host's own marketplace,
+    which leaves no files here; those hosts' empty-state note points at the
+    host's plugin command. Grok Bot, dsh and OpenCode are only installed by
+    ``agentdescent install``. ``dry_run`` reports without changing anything.
     """
     host = canonical_host(host)
     if host not in HOSTS:
@@ -1819,6 +1982,5 @@ def uninstall(host: str, *, dry_run: bool = False, home: Optional[str] = None) -
     e = _Eraser(dry_run, honour_env=honour_env)
     _UNINSTALL[host](home, e)
     if not e.lines:
-        e.note(f"nothing to remove: agentdescent is not installed for {host} "
-               "(files from the host's own marketplace are removed with its plugin command)")
+        e.note(_empty_uninstall_note(host))
     return e.lines

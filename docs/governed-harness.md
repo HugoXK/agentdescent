@@ -47,7 +47,19 @@ reject or rollback exits 1.
   "contaminated": false,
   "risk": 0.05,
   "rollback_current": {"harness/f.py": "new"},
-  "rollback_previous": {"harness/f.py": "old"}
+  "rollback_previous": {"harness/f.py": "old"},
+  "integrity": {
+    "before": {"guardrails": {"policy": 10, "tool_mediation": 20},
+               "permissions": {"plugin:demo": ["tool:run"]},
+               "actions": ["tool:run"],
+               "decision_records": {"policy->tool_mediation": "record-1",
+                                    "permission:plugin:demo": "record-2"}},
+    "after": {"guardrails": {"policy": 10, "tool_mediation": 20},
+              "permissions": {"plugin:demo": ["tool:run"]},
+              "actions": ["tool:run"],
+              "decision_records": {"policy->tool_mediation": "record-1",
+                                   "permission:plugin:demo": "record-2"}}
+  }
 }
 ```
 
@@ -63,15 +75,54 @@ reject or rollback exits 1.
 - `before`/`after` are task -> score objects or JSON paths.
 - `rollback_current`/`rollback_previous` are mappings or JSON paths; the report
   carries the non-destructive `rollback_plan`.
+- `integrity` is the composition pair — `before`/`after` `HarnessSnapshot`
+  objects, plus optional `declared` action changes and `required_order`. The
+  caller supplies it because the package holds no live guardrail or permission
+  object to introspect; when present the pair reaches `govern_harness_change`,
+  so a reordered guardrail path or a dropped allow rule rejects before proof
+  and promotion. Omit it and the check is skipped, which `plan` shows as
+  `"integrity": null`. Every enforced relationship needs an entry in
+  `decision_records` — one per ordered guardrail pair (`policy->tool_mediation`)
+  and one per permission (`permission:<plugin>`) — because a missing record is
+  itself a violation; the example above is the minimum that passes.
 
 ## Fail-closed semantics
 
 - A denied capability/syntax check rejects before proof or approval.
+- A broken composition (`integrity` supplied) rejects before proof: a dropped
+  enforcement point, a reordered guardrail path, a dropped allow rule, a
+  missing decision record or an undeclared action-set change is named in the
+  report's `detail` and `integrity.violations`.
 - A failed proof rejects and never reaches promotion.
 - A pending or rejected human approval never reaches promotion.
 - A canary rollback wins over a failed eval and is reported as rollback.
 - Optional conformal/sequential *non-decisions* are ignored unless the rules
   require them; a conformal/sequential **reject is never dropped**.
+
+## Approval queue
+
+A pending approval used to stop the workflow with no product entry point to
+inspect or decide it. The queue is now a first-class verb:
+
+```bash
+agentdescent governed-harness approvals --store approvals.jsonl \
+  [--status pending|approved|rejected|all] [--json]
+agentdescent governed-harness approve --store approvals.jsonl --key KEY \
+  [--note "..."] [--json]
+agentdescent governed-harness reject  --store approvals.jsonl --key KEY \
+  [--note "..."] [--json]
+```
+
+`approvals` lists the requests and returns `counts` per status; a missing store
+is an empty queue, not an error. `approve`/`reject` require an existing
+**pending** key and write one append-only decision event; the next `run` of the
+same spec reads it. An unknown key or an already-decided request is an input
+error (exit 2), so a typo or a re-run from shell history cannot silently flip a
+rejection into an approval.
+
+The decide verbs are **CLI-only**, with no MCP counterpart: a host model must
+not be able to approve the change it proposed for itself. Listing is also
+CLI-only so the approval queue does not become a tool the model can poll.
 
 ## MCP
 

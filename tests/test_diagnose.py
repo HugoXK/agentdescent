@@ -102,8 +102,8 @@ def test_missing_gold_and_missing_reward_are_not_failures(monkeypatch):
 
 
 def test_named_algorithm_outcomes_count_as_adopted(monkeypatch):
-    """GEPA/SkillOpt/DGM record adopt under their own category, not committed."""
-    for category in ("gepa-select", "skillopt-accept", "dgm-select"):
+    """GEPA/SkillOpt/DGM/EvoSkill record adopt under their own category, not committed."""
+    for category in ("gepa-select", "skillopt-accept", "dgm-select", "evoskill-select"):
         _patch(monkeypatch, {
             "final_reward": 0.75, "outcomes": {category: 3},
             "samples": [{"output": "297", "gold": "999", "reward": 0.0}]})
@@ -134,3 +134,92 @@ def test_adopted_count_helper_prefers_history():
     assert adopted_count(outcomes={"gepa-select": 2, "below-threshold": 5}) == 2
     assert adopted_count(outcomes={"below-threshold": 5}) == 0
     assert adopted_count(history=[], outcomes={"skillopt-accept": 1}) == 1
+    assert adopted_count(outcomes={"evoskill-select": 2}) == 2
+
+
+def test_commits_that_never_moved_held_out_reward_are_not_partial(monkeypatch):
+    """dgm-select commits every round; 0.000 -> 0.000 learned nothing (#756)."""
+    _patch(monkeypatch, {
+        "initial_reward": 0.0, "final_reward": 0.0,
+        "outcomes": {"dgm-select": 3},
+        "history": [{"round": r, "committed": 1} for r in range(3)],
+        "samples": [{"output": "1998-10-28", "gold": "28.10.1998", "reward": 0.0},
+                    {"output": "1994-05-04", "gold": "04.05.1994", "reward": 0.0}]})
+    report = diagnose_payload("r")
+    assert report.verdict != "partial-improvement"
+    assert report.verdict == "agent-failures"
+
+
+def test_a_committed_run_that_stayed_at_the_seed_score_says_so(monkeypatch):
+    _patch(monkeypatch, {
+        "initial_reward": 0.6, "final_reward": 0.6,
+        "outcomes": {"gepa-select": 2},
+        "samples": [{"output": "x", "gold": None, "reward": None}]})
+    report = diagnose_payload("r")
+    assert report.verdict == "no-improvement"
+    assert "no candidate was adopted" not in report.summary
+    assert "0.600" in report.summary and "2 committed" in report.summary
+
+
+def test_a_regression_is_not_partial_improvement(monkeypatch):
+    _patch(monkeypatch, {
+        "initial_reward": 0.5, "final_reward": 0.25,
+        "outcomes": {"committed": 1},
+        "samples": [{"output": "297", "gold": "999", "reward": 0.0}]})
+    assert diagnose_payload("r").verdict != "partial-improvement"
+
+
+def test_a_real_gain_names_both_rewards(monkeypatch):
+    _patch(monkeypatch, {
+        "initial_reward": 0.25, "final_reward": 0.75,
+        "outcomes": {"committed": 1},
+        "samples": [{"output": "297", "gold": "999", "reward": 0.0}]})
+    report = diagnose_payload("r")
+    assert report.verdict == "partial-improvement"
+    assert "0.250 -> 0.750" in report.summary
+    assert report.evidence["initial_reward"] == 0.25
+
+
+@pytest.mark.parametrize("payload,verdict,commands", [
+    ({"run_id": "20260101-000000-abc123", "final_reward": 1.0,
+      "outcomes": {"committed": 1}},
+     "solved", ["agentdescent show 20260101-000000-abc123",
+                "agentdescent apply 20260101-000000-abc123 --dry-run"]),
+    ({"run_id": "20260101-000000-abc123", "state": "cancelled"},
+     "cancelled", ["agentdescent resume 20260101-000000-abc123"]),
+    ({"run_id": "20260101-000000-abc123", "state": "running"},
+     "running", ["agentdescent watch 20260101-000000-abc123",
+                 "agentdescent diagnose 20260101-000000-abc123"]),
+    ({"run_id": "20260101-000000-abc123", "final_reward": 0.5,
+      "initial_reward": 0.0, "outcomes": {"committed": 1}},
+     "partial-improvement",
+     ["agentdescent show 20260101-000000-abc123 --json"]),
+])
+def test_next_steps_name_the_resolved_run_id(monkeypatch, payload, verdict,
+                                             commands):
+    # Asked as `latest`; the next step must carry the id show resolved (#898).
+    _patch(monkeypatch, payload)
+    report = diagnose_payload("latest")
+    assert report.verdict == verdict
+    text = " ".join(report.recommendations)
+    for command in commands:
+        assert command in text
+    assert "latest" not in text
+
+
+def test_noise_floor_is_surfaced_and_a_gain_inside_it_stays_noise(monkeypatch):
+    def flat(value):
+        return {f"t{i}": value for i in range(8)}
+
+    _patch(monkeypatch, {
+        "final_reward": 0.55, "initial_reward": 0.5,
+        "outcomes": {"committed": 1},
+        "baseline_runs": [flat(0.3), flat(0.5), flat(0.7)],
+        "candidate_runs": [flat(0.55)],
+        "samples": [{"output": "x", "gold": "y", "reward": 0.0}]})
+    report = diagnose_payload("r")
+    noise = report.evidence["noise"]
+    assert noise["distinguishable"] is False
+    assert noise["verdict"] == "not distinguishable from noise"
+    assert noise["noise_floor"][0] < noise["noise_floor"][1]
+    assert "variance" in noise and "gain_over_noise" in noise

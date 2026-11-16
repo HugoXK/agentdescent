@@ -5,12 +5,12 @@ description: Review an AgentDescent PR (or local change) at a tip SHA and write 
 
 # AgentDescent review-pr
 
-Produces a Verifier report for `Birfy/agentdescent`. The report is evidence,
+Produces a Verifier report for `ThinkFlowLab/agentdescent`. The report is evidence,
 not merge authority: what may happen after a PASS is AGENTS.md › Merge policy.
 
 ## Establish the tip
 
-1. Work in a **fresh clone** (`git clone https://github.com/Birfy/agentdescent`),
+1. Work in a **fresh clone** (`git clone https://github.com/ThinkFlowLab/agentdescent`),
    check out the PR head (`gh pr checkout <n>`), record `git rev-parse HEAD`. If
    the head moves during the review, start over.
 2. Read the rules from `origin/main`, not a stale copy: AGENTS.md,
@@ -57,8 +57,17 @@ mkdocs build --strict                   # when docs/ or mkdocs.yml changed (need
 
 Post it as one PR comment from the `Birfy` login (self-review counts). Keep the
 block intact; the **last** `Tip SHA:` block in the comment is the one read, the
-newest report at a tip wins, and a PASS without a `Ran:` entry or without a
-`Not run:` line does not count.
+newest report at a tip wins, and the tip may be written above the verdict or
+inline in it (`Verdict: PASS (tip b0a30224)`). A newer comment or review at that
+same tip with no `Verdict:` line (a withdrawal, an added requirement, an open
+question) also supersedes an earlier PASS there, so the tip reads unreviewed
+until a new PASS is posted. A comment or review body carries no thread id, so a
+verdict-less report attaches to the tip its author most recently named - if that
+is the tip being judged it supersedes, even when the prose is about an earlier
+tip. Anything written at that tip after a PASS therefore voids it: a fresh PASS
+must be the last report written there. A PASS without a `Ran:` entry or without
+a `Not run:` line still counts, but the gate marks it `weak: no Ran:/Not run:`
+so it never passes unseen.
 
 ```text
 Self-review (Birfy)
@@ -76,3 +85,28 @@ Verdict: PASS
 ```
 
 Then check it counts: `python3 .github/scripts/review_gate.py --pr <n>`.
+
+## Merge lane by tier
+
+The tier is the diff's (`risk_gate.py`), never the PR text. Once the PASS counts,
+run this from the PR clone and do exactly what it prints:
+
+```sh
+python3 .github/scripts/merge_lane.py --pr <n> --repo ThinkFlowLab/agentdescent \
+  --tip <the PASS's Tip SHA>
+```
+
+The lane reads its two trust inputs — `.github/agent/review-policy.json` and
+`.github/agent/risk-rules.json` — from the PR's **base** commit
+(`git show <base>:<path>`), never from the clone it runs in, so a branch that
+edits either file cannot lend itself a PASS or a lower tier. If the clone cannot
+serve a file from base the lane prints `no lane` and exits 1 without a command:
+`git fetch origin` and run it again; never substitute the branch's copy.
+Independently of the rules file, a diff touching `.github/**` or
+`.claude/skills/**` is T3.
+
+`auto-merge` (T0/T1 with a compliant PASS) is the pinned
+`gh pr merge … --auto --squash --match-head-commit <tip>` — the only sanctioned
+auto-merge. `awaiting-approval` (T2/T3, including a T3 that only the size cap
+produced) adds the label, leaves auto-merge unset and stops for Danyang's click.
+`wait` means no compliant PASS names the tip: post one or re-review, never merge.

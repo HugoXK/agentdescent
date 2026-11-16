@@ -10,6 +10,35 @@ command with the same verbs. A run is an evolution: N workers propose edits in
 parallel, a merger keeps the ones that improve held-out reward, and nothing is
 written back until the user says so.
 
+**Path A only by default.** The MCP server exposes `demo` (zero-key smoke) →
+doctor → plan → start → status/show → apply (plus cancel/resume, diagnose,
+list/describe/algorithm_spec).
+Do not reach for audit_*, release, platform, experience, or other satellites
+unless the user asked and the server was started with `--advanced` /
+`AGENTDESCENT_MCP_ADVANCED=1`. See docs/mcp-path-a.md.
+
+## Zero-key try first
+
+When the user wants to see AgentDescent work, has no cases yet, has no
+provider key, or just wants to know whether a named algorithm card can run,
+do this **before** The procedure below (`doctor` → `plan` → `start` need a
+real model and a key):
+
+- **With MCP:** call `demo` (optional `algorithm` such as `gepa`, `ace`,
+  `dgm`, `skillopt`, `rrsi`, `archive_selection`, or `evoskill`; optional
+  `kind` of `text`, `skill_dir`, or `skill_library`). It needs no key, does
+  not write the user's files, and returns `initial_reward`, `final_reward`,
+  `learned`, and `next`. Report the reward change and what it learned.
+  `evoskill` defaults to the `skill_library` fixture.
+- **Without MCP:** run `agentdescent demo [--algorithm NAME] --json` and
+  report the same fields.
+
+Then continue with The procedure for a real run on the user's files. If
+`demo` refuses a card (unknown name, or a kind with no offline fixture),
+surface that error — the same words the CLI prints — and offer
+`algorithm_spec` (or `agentdescent algorithms run NAME <path> <cases.jsonl>`)
+after `doctor`. Do not invent a keyless path for those cards.
+
 ## The procedure
 
 1. **`doctor` first.** Report what is missing (worker agent CLI, provider key,
@@ -22,10 +51,12 @@ written back until the user says so.
    Write every path **absolute**. A relative one is resolved against whatever
    directory read the spec -- the host started its MCP server somewhere you
    cannot see -- so the same spec finds the file from one host and not another.
-   - `kind`: `text` (a prompt or instruction), `skill_dir` (a SKILL.md folder),
-     `agent_dir` (subagent definitions), `agent_code` (a tree that runs behind
-     tests), `plugin` (a host plugin; needs `host`), `policy_slot` (a decision
-     rule of the optimiser itself -- see below; almost never what a user means).
+   - `kind`: `text` (a prompt or instruction), `skill_dir` (one SKILL.md folder),
+     `skill_library` (a directory of `*/SKILL.md` skills; see
+     `examples.skill_library_evolution`), `agent_dir` (subagent definitions),
+     `agent_code` (a tree that runs behind tests), `plugin` (a host plugin;
+     needs `host`), `policy_slot` (a decision rule of the optimiser itself --
+     see below; almost never what a user means).
    - **`policy_slot` is not for improving the user's files.** Its artifact is one
      slot of AgentDescent's own search (`selection`, `task_sampler`, ...), and
      one rollout is a *whole inner search*, so a round costs minutes to hours
@@ -37,8 +68,12 @@ written back until the user says so.
      run asked for 8 rounds and completed 2 in 90 minutes. Read `plan`'s notes
      aloud: they say how many held-out tasks the gate actually gets, and with
      too few it has both committed a worse rule and committed nothing at all.
-   - `algorithm` (optional): a named method. Call `list_algorithms` (or
-     `describe_algorithm` for one) before naming one; the same data is in
+   - `algorithm` (optional): a named **Algorithm card** (`surface=card`). Call
+     `list_algorithms` with the artifact's `kind` (or `describe_algorithm` for
+     one) before naming one; filter by kind so ineligible cards are not offered.
+     Same-name `examples/<algo>/` research ports are source-only and may differ
+     in fidelity — `plan` echoes `fidelity` / `research_port` / `fidelity_note`;
+     never claim the paper port ran when only the card did. **Hard contract (#384):** Path A names **cards only**; MethodPolicy / full ports stay `python -m examples…` until a scoped card issue lands. The same data is in
      `agentdescent algorithms list` / `show`. To build the spec for one,
      call `algorithm_spec` (name, absolute `path`, absolute `cases`, optional
      `params` object, `rounds`/`workers` 1/1 for a quick trial): it writes the
@@ -77,7 +112,7 @@ written back until the user says so.
        agent here**: `claude_code` / `codex` / `dsh` / `opencode` are
        file-editing agents, and pointing one at a prompt costs a whole agent
        session per case to answer a question a model answers in one call.
-     - `skill_dir` / `agent_dir` / `agent_code` / `plugin` -- the agent has to
+     - `skill_dir` / `skill_library` / `agent_dir` / `agent_code` / `plugin` -- the agent has to
        read and edit files, so it must be a CLI agent, and `reflect` is where a
        cheap model goes.
    - **Never invent a model name.** `openai_compatible` needs one and there is
@@ -296,8 +331,16 @@ does not exist on the CLI/MCP path.
   promotion writes the signed manifest and lineage. The signing secret is the
   server's `AGENTDESCENT_RELEASE_KEY`, never a tool argument. Relay the verdict
   and the reasons/missing list; do not present a deferral as a release.
+- **`release_verify`** — read-only: verify a receipt that `release` wrote.
+  Recomputes the signature over the embedded manifest, so an edited hash or
+  evidence fails. `valid: false` is a normal result with `reason`; report it
+  and do not retry as if the tool failed.
 - **`audit_trace`** — "where did this adopted rule's evidence come from?" for
   one `run_id`. A ring with no store passed in is missing evidence, not a pass.
+- **`traces_digest`** — read-only: turn raw trajectory JSONL into a layered
+  digest (run/task counts, normalised failure signatures, bounded prompt text)
+  and drill back into the source events by signature id. Use it before asking a
+  reflector to diagnose a long run; do not paste the raw trace.
 
 ## When the user wants a governed campaign
 
@@ -328,6 +371,10 @@ writes are confined to `AGENTDESCENT_SURFACE_WRITE_DIRS`.
   returns per-cycle loop/promotion/foundry/experience reports. Offer
   `agentdescent platform init --demo --out platform.json` for an offline first
   run, then `platform plan` and `platform run`.
+- **`platform_status`** — read-only: list a campaign's recent runs or one run's
+  full report from its SQLite database after the process finished. Use it when
+  the user asks what a campaign actually ran; a missing database or run id is an
+  error, not an empty result.
 - **`capability`** — plan or run the failure-to-capability loop (traces ->
   task pipeline -> tool synthesis -> foundry -> QD archive). `dry_run` resolves
   refs and loads traces without calling the builders. Offer
@@ -360,6 +407,7 @@ to the user rather than looking for a tool.
 ## Without MCP
 
 ```
+agentdescent demo [--algorithm NAME] --json   # zero-key smoke; try this first
 agentdescent doctor
 agentdescent plan   spec.json
 agentdescent evolve spec.json --detach

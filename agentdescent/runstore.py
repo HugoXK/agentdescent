@@ -51,6 +51,7 @@ from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, Iterator, List, Optional, Sequence
 
 from .evolution import EvolutionResult, RoundInfo
+from .surface_common import scrub_host_env
 
 __all__ = [
     "STATES",
@@ -141,6 +142,11 @@ class RunStatus:
     #: Held-out reward of the seed before round 0 (#708). ``None`` until the
     #: run finishes scoring it, or when seed scoring failed / predates the field.
     initial_reward: Optional[float] = None
+    #: Reward on the test split the run carved out with ``test_frac`` (#843).
+    #: ``None`` for a run with no split, or one whose test scoring failed -- so
+    #: ``show`` can say "select set only" instead of inventing a number. Never
+    #: read by a merge decision.
+    test_reward: Optional[float] = None
     committed: int = 0
     #: ``propose`` calls that raised, summed over the rounds so far (#395), and
     #: the first such exception as ``Type: message``. Non-zero with
@@ -209,7 +215,18 @@ def _write_json(path: str, payload: Any) -> None:
     bytes to a unique sibling and ``os.replace``; always remove the sibling
     in ``finally`` so a dump/replace error (or a raised ``default=str``)
     cannot leave an orphan for a host that globs the run directory.
+
+    A link planted at ``path`` is refused before anything is created (#1030):
+    ``os.replace`` does not follow the final symlink, so the write would land
+    in a fresh regular file and destroy the operator's link while the outside
+    target kept its bytes. ``filetree.leaf_problem`` tests the leaf alone, so a
+    symlinked run directory above it stays legal.
     """
+    from .filetree import leaf_problem
+
+    problem = leaf_problem(path)
+    if problem is not None:
+        raise RunStoreError(f"cannot write {os.path.abspath(path)}: {problem}")
     # Encode before touching the filesystem — same contract as checkpoint /
     # FileCache / Ledger writes. ``default=str`` keeps Path/UUID notes
     # round-trippable; ``OSError`` from the write still propagates.
@@ -542,12 +559,24 @@ def create(spec_dict: Dict[str, Any], *, run_id: Optional[str] = None,
            store: Optional[str] = None) -> RunDir:
     """Make a run directory and write the spec and an initial status. Runs nothing."""
     base = store_path(store)
-    os.makedirs(base, exist_ok=True)
+    if os.path.exists(base) and not os.path.isdir(base):
+        raise RunStoreError(f"cannot create run store {base}: not a directory")
+    try:
+        os.makedirs(base, exist_ok=True)
+    except OSError as e:
+        # A read-only HOME, a container without a writable home, or a mistyped
+        # --store used to escape as a raw traceback (#907).
+        raise RunStoreError(
+            f"cannot create run store {base}: {e.strerror or e}") from e
     rid = run_id or _new_id()
     rd = RunDir(os.path.join(base, rid))
     if os.path.exists(rd.path):
         raise RunStoreError(f"run {rid!r} already exists")
-    os.makedirs(rd.path)
+    try:
+        os.makedirs(rd.path)
+    except OSError as e:
+        raise RunStoreError(
+            f"cannot create run directory {rd.path}: {e.strerror or e}") from e
     _write_json(rd.spec_path, spec_dict)
     rd.update_status(state="created", kind=spec_dict.get("kind"),
                      target=spec_dict.get("target"),
@@ -650,7 +679,12 @@ def launch(rd: RunDir, *, budget_usd: Optional[float] = None,
         argv += ["--budget", str(budget_usd)]
     if usd_per_call is not None:
         argv += ["--usd-per-call", str(usd_per_call)]
-    child_env = {**os.environ, "PYTHONPATH": _child_pythonpath(), **(env or {})}
+    # Scrub the merged dict, not just the ambient one: a caller-supplied
+    # ``env`` is spread last and could otherwise put ``MCP_*``/``DSH_*`` back
+    # into the run after the scrub (#1082). ``PYTHONPATH`` carries no marker
+    # prefix, so it survives either way.
+    child_env = scrub_host_env({**os.environ, "PYTHONPATH": _child_pythonpath(),
+                                **(env or {})})
     boot = subprocess.run([_python(), "-c", _BOOTSTRAP, rd.log_path, *argv],
                           capture_output=True, text=True, cwd=rd.path, env=child_env)
     if boot.returncode != 0 or not boot.stdout.strip().isdigit():
@@ -885,6 +919,7 @@ def execute(rd: RunDir, *, budget_usd: Optional[float] = None,
         stop_reason=result.stop_reason, error=result.error,
         best_reward=max(best) if best else final,
         last_reward=final, initial_reward=initial,
+        test_reward=_finite_or_none(getattr(result, "test_reward", None)),
         calls=usage.calls, pending_calls=0, phase=None,
         usd=None if usd_per_call is None else round(usage.calls * usd_per_call, 4))
     return result
@@ -900,6 +935,31 @@ def execute(rd: RunDir, *, budget_usd: Optional[float] = None,
 #: cancel and apply stay on the CLI and the MCP server, where the user is.
 DEFAULT_HTTP_HOST = "127.0.0.1"
 DEFAULT_HTTP_PORT = 8787
+
+#: How often ``GET /api/runs/<id>/events`` checks ``rounds.jsonl`` for a new
+#: line. The stream is a local read model, not a message bus: polling a small
+#: append-only file is cheaper than wiring a thread-safe pub/sub just for this
+#: endpoint, and it keeps the server read-only. Tests pass a smaller value.
+EVENT_POLL_SECONDS = 0.5
+
+#: How long an idle stream waits before writing a ``: keep-alive`` comment.
+#: A module constant rather than a literal so a test can exercise the branch;
+#: proxies and browsers otherwise drop a connection that says nothing for a
+#: while, and the client would silently stop following a run with long rounds.
+EVENT_KEEPALIVE_SECONDS = 15.0
+
+
+def _run_id_in(rest: str) -> Optional[str]:
+    """The run id in the path after ``/api/runs/``, or ``None`` if it is not one.
+
+    A run id indexes a directory under the store, so a separator or a dot entry
+    is a traversal attempt. Both endpoints that take an id use this one check so
+    the SSE route and the JSON route cannot drift apart.
+    """
+    if not rest or "/" in rest or rest in (".", ".."):
+        return None
+    return rest
+
 
 _PANEL_HTML = """<!doctype html>
 <meta charset="utf-8"><title>AgentDescent runs</title>
@@ -965,7 +1025,7 @@ def _is_loopback_origin(origin: str) -> bool:
     return (parsed.hostname or "").lower() in ("127.0.0.1", "::1", "localhost")
 
 
-def _http_handler(store: Optional[str]):
+def _http_handler(store: Optional[str], event_poll: float):
     from http.server import BaseHTTPRequestHandler
 
     class Handler(BaseHTTPRequestHandler):
@@ -996,6 +1056,86 @@ def _http_handler(store: Optional[str]):
                               allow_nan=False).encode()
             self._send(code, body, "application/json")
 
+        def _events(self, run_id: str) -> None:
+            """Stream this run's status and new rounds as Server-Sent Events.
+
+            The JSON endpoint answers "what is the state now"; a panel or a
+            platform needs "tell me when the next round lands" without polling.
+            The stream is read-only and poll-based: ``rounds.jsonl`` is appended
+            by the run's own process, so no in-process event bus is needed and
+            the server keeps its single read-only boundary.
+
+            Event ids are the 0-based append ordinal in ``rounds.jsonl``, so a
+            reconnecting client can send ``Last-Event-ID`` and resume after the
+            last event it saw.
+            """
+            try:
+                rd = get(run_id, store=store)
+            except RunStoreError as e:
+                return self._json(404, {"error": str(e)})
+
+            last_id = -1
+            raw_id = self.headers.get("Last-Event-ID")
+            if raw_id:
+                try:
+                    last_id = max(-1, int(raw_id))
+                except ValueError:
+                    last_id = -1
+
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "close")
+            self.close_connection = True
+            # A reverse proxy that buffers would hold every event until the
+            # response ends, which for a live run is never.
+            self.send_header("X-Accel-Buffering", "no")
+            origin = self.headers.get("Origin")
+            if origin and _is_loopback_origin(origin):
+                self.send_header("Access-Control-Allow-Origin", origin)
+                self.send_header("Vary", "Origin")
+            self.end_headers()
+
+            def emit(event: str, payload: Any,
+                     event_id: Optional[int] = None) -> None:
+                if event_id is not None:
+                    self.wfile.write(f"id: {event_id}\n".encode())
+                self.wfile.write(f"event: {event}\n".encode())
+                body = json.dumps(_sanitize_jsonable(payload), default=str,
+                                  allow_nan=False)
+                self.wfile.write(("data: " + body + "\n\n").encode())
+                self.wfile.flush()
+
+            try:
+                # The client should reconnect after a dropped stream; the
+                # event ids make that resume rather than replay.
+                self.wfile.write(b"retry: 1000\n\n")
+                self.wfile.flush()
+                state = rd.status()
+                emit("status", state.to_dict())
+                last_state = state.state
+                last_keepalive = time.monotonic()
+                while True:
+                    state = rd.status()
+                    if state.state != last_state:
+                        emit("status", state.to_dict())
+                        last_state = state.state
+                    for seq, row in enumerate(rd.rounds()):
+                        if seq > last_id:
+                            emit("round", row, seq)
+                            last_id = seq
+                    if state.state in ("done", "failed", "cancelled"):
+                        self.close_connection = True
+                        return
+                    if time.monotonic() - last_keepalive >= EVENT_KEEPALIVE_SECONDS:
+                        self.wfile.write(b": keep-alive\n\n")
+                        self.wfile.flush()
+                        last_keepalive = time.monotonic()
+                    time.sleep(event_poll)
+            except (BrokenPipeError, ConnectionResetError):
+                # The panel closed the tab; that is a normal end for a stream.
+                return
+
         def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's spelling
             path = self.path.split("?", 1)[0].rstrip("/") or "/"
             if path in ("/", "/index.html"):
@@ -1003,10 +1143,14 @@ def _http_handler(store: Optional[str]):
             if path == "/api/runs":
                 return self._json(200, [s.to_dict() for s in list_runs(store=store)])
             if path.startswith("/api/runs/"):
-                run_id = path[len("/api/runs/"):]
-                # The id indexes a directory, so anything with a separator in it
-                # is a traversal attempt rather than a run.
-                if not run_id or "/" in run_id or run_id in (".", ".."):
+                rest = path[len("/api/runs/"):]
+                if rest.endswith("/events"):
+                    run_id = _run_id_in(rest[:-len("/events")])
+                    if run_id is None:
+                        return self._json(400, {"error": "bad run id"})
+                    return self._events(run_id)
+                run_id = _run_id_in(rest)
+                if run_id is None:
                     return self._json(400, {"error": "bad run id"})
                 try:
                     rd = get(run_id, store=store)
@@ -1022,16 +1166,24 @@ def _http_handler(store: Optional[str]):
 
 
 def serve_http(*, host: str = DEFAULT_HTTP_HOST, port: int = DEFAULT_HTTP_PORT,
-               store: Optional[str] = None, serve_forever: bool = True):
+               store: Optional[str] = None, serve_forever: bool = True,
+               event_poll: float = EVENT_POLL_SECONDS):
     """Serve the run store read-only on loopback, for a host UI to embed.
 
-    ``GET /`` is a small self-refreshing page, ``GET /api/runs`` the list and
-    ``GET /api/runs/<id>`` one run with its rounds. Returns the server so a
-    caller (a test) can drive it; with ``serve_forever`` it blocks.
+    ``GET /`` is a small self-refreshing page, ``GET /api/runs`` the list,
+    ``GET /api/runs/<id>`` one run with its rounds, and
+    ``GET /api/runs/<id>/events`` a Server-Sent Events stream of status changes
+    and new rounds. Returns the server so a caller (a test) can drive it; with
+    ``serve_forever`` it blocks.
+
+    ``event_poll`` is how often the stream checks ``rounds.jsonl``; it is a
+    wall-clock knob for a local read model, not a result knob.
     """
     from http.server import ThreadingHTTPServer
 
-    httpd = ThreadingHTTPServer((host, port), _http_handler(store))
+    if event_poll <= 0:
+        raise ValueError("event_poll must be positive")
+    httpd = ThreadingHTTPServer((host, port), _http_handler(store, event_poll))
     if serve_forever:
         try:
             httpd.serve_forever()

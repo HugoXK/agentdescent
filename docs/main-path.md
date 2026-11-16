@@ -45,8 +45,10 @@ paired scores -> TrustEvidence -> PromotionDecision -> signed ReleaseRecord
 | admission (optional) | `policy_release` (signed manifest + admission, not a second decision engine) |
 
 `agentdescent release` and the MCP `release` tool are the product surface.
-Do not hand-wire the three steps in application code; use `release_pipeline` or
-the CLI.
+`agentdescent release verify` (and MCP `release_verify`) checks the signed
+receipt independently: it recomputes the signature over the embedded manifest
+and can pin the expected key id and lineage node. Do not hand-wire the three
+steps in application code; use `release_pipeline` or the CLI.
 
 ## Path C — continuous platform
 
@@ -68,18 +70,64 @@ LoopKernel (durable) -> RSIPlatform (five layers) -> PlatformCampaign (multi-cyc
 when you need a single session with acceptance/decision logging; use
 `RSIPlatform` when the five layers must hand off to each other.
 
+`agentdescent platform status` (and MCP `platform_status`) reads a finished
+campaign's run database without the compute, foundry or experience callbacks;
+it only inspects the durable run store.
+
+## The embedding facade
+
+The package exports the research surface too, and that surface changes. An
+integrator that embeds the engine should pin `agentdescent.facade` instead:
+
+```python
+from agentdescent.facade import API_VERSION, EvolutionResult, evolve
+
+result = evolve(tasks, reward, agent, SingleSlot(initial_value=""))
+```
+
+`facade` re-exports one curated list covering Path A and the durable
+`LoopKernel` path: the artifact strategies, the policies, the verifier, the
+ledger, the run store, `evolve`/`async_evolve` and the loop kernel. The promise,
+tied to `API_VERSION`:
+
+- a new symbol is **additive** and does not change the version;
+- a name is not removed or renamed without a version bump;
+- everything outside `facade.__all__` -- including everything
+  `agentdescent/__init__.py` exports -- is not covered by this promise.
+
+`tests/test_facade.py` pins the list and the version, so widening or narrowing
+the surface is a deliberate test edit. Extending the package still means
+importing from the canonical module; `facade` defines nothing of its own.
+
 ## Advanced layers (supported, narrower)
 
 | layer | canonical modules | surface |
 |---|---|---|
 | capability growth | `task_pipeline`, `capability_scout`, `capability_foundry`, `capability_archive`, `capability_loop` | `agentdescent capability` |
-| tenancy | `workspaces`, `tenant_platform` | `agentdescent tenant` |
-| operations | `ops_fabric` (write), `ops_console` (read), `rsi_metrics`, `rsi_telemetry`, `campaign_ops` | `agentdescent ops` |
+| tenancy | `workspaces`, `tenant_platform`, `workspace_store` | `agentdescent tenant` (`plan`, `run`, `report`) |
+| operations | `ops_fabric` (write), `ops_console` (read), `rsi_metrics`, `rsi_telemetry`, `campaign_ops` | `agentdescent ops` (`plan`, `publish`, `history`) |
 | meta-learning | `meta` (including `continuous_meta_run`), `meta_curriculum`, `meta_population`, `meta_campaign`, `meta_audit`, `meta_exam`, `verified_seed` | `agentdescent meta-campaign`, `exam`, `audit` |
-| governed harness | `safe_selfmod`, `proofs`, `approval`, `safety_controller`, `governed_harness` | `agentdescent governed-harness` |
+| governed harness | `safe_selfmod`, `proofs`, `approval`, `safety_controller`, `governed_harness` | `agentdescent governed-harness` (`plan`, `run`, `approvals`, `approve`, `reject`) |
 
 These are not “extra algorithms”; they are the control, evidence and memory
 layers around the three paths.
+
+## Product surfaces at a glance
+
+| surface | verbs | guide |
+|---|---|---|
+| release | `release`, `release verify` | [release.md](release.md) |
+| traces | `traces digest/show` | [traces.md](traces.md) |
+| governed harness | `governed-harness plan/run/approvals/approve/reject` | [governed-harness.md](governed-harness.md) |
+| tenant | `tenant plan/run/report` | [tenant.md](tenant.md) |
+| operations | `ops plan/publish/history` | [ops.md](ops.md) |
+| platform | `platform init/plan/run/status` | [platform.md](platform.md) |
+| capability growth | `capability init/plan/run` | [capability-loop.md](capability-loop.md) |
+
+Every surface is a wrapper over the same `evolve()` engine or a durable run
+store; none is a second optimiser. `release verify`, `platform status`,
+`ops history`, `tenant report` and the harness approval verbs are read-only or
+append-only where their guides say so.
 
 ## One concept, one owner
 
@@ -111,15 +159,14 @@ exist, so new code should follow the canonical column.
    `{"ok": false, "error": ...}` under `--json`, and confines MCP refs/writes
    with `AGENTDESCENT_SURFACE_ALLOW` / `AGENTDESCENT_SURFACE_WRITE_DIRS`.
 4. If it is research, do not export it from `agentdescent/__init__`; describe it
-   as experimental in `modules.md`. The `agentdescent/experimental/` namespace is
-   the next step for it once that move lands.
+   as experimental in `modules.md` and keep it in `agentdescent/experimental/`.
 5. If it duplicates an existing concept, extend the canonical module or add a
    documented alias; do not ship a second engine.
 
 ## Related pages
 
 - [Module audit](module-audit.md) — the current static reachability report.
-- The experimental status page (once it lands) — research and recently
+- [Experimental status](experimental.md) — research prototypes and recently
   productized modules.
 - [Architecture](architecture.md) — the five layers and their data flow.
 - [Module map](modules.md) — the catalog.

@@ -27,6 +27,7 @@ pipeline, synthesis, admission and archive stay in their tested modules.
 from __future__ import annotations
 
 import os
+import tempfile
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 from .artifact_graph import ArtifactGraph
@@ -189,13 +190,42 @@ def capability_run(path: Any, *, out: Optional[str] = None,
     return payload
 
 
-def capability_init(out: Any, *, demo: bool = False) -> Dict[str, Any]:
-    target = os.path.abspath(os.path.expanduser(require_text(out, "out")))
-    directory = os.path.dirname(target)
-    os.makedirs(directory, exist_ok=True)
-    traces_path = os.path.join(directory, "capability-traces.jsonl")
-    if demo:
-        with open(traces_path, "w", encoding="utf-8") as handle:
+def _refuse_linked_leaves(directory: str, *paths: str) -> None:
+    """Refuse a link planted at a fixture leaf, before the first byte (#1043).
+
+    ``demo.py`` follows the same rule (#1017/#1021): the leaf's own link is
+    checked with ``filetree.dest_problem``, so a symlinked *directory* above it
+    stays legal and only the destination is refused. Every leaf is checked
+    because a partial fixture is worse than no fixture.
+    """
+    from .filetree import dest_problem
+
+    for path in paths:
+        problem = dest_problem(directory, path)
+        if problem is not None:
+            raise SurfaceError(
+                f"cannot write {os.path.abspath(path)}: {problem}")
+
+
+def _refuse_non_file(path: str) -> None:
+    """Refuse a directory where a fixture leaf is expected, before the first byte."""
+    if os.path.exists(path) and not os.path.isfile(path):
+        raise SurfaceError(
+            f"cannot write {os.path.abspath(path)}: not a file")
+
+
+def _write_traces(traces_path: str, directory: str) -> None:
+    """Stage the demo traces, then rename them in.
+
+    ``open(..., "w")`` follows a hardlink and truncates the inode it shares with
+    a file outside the fixture (#1043); a rename never writes through the
+    destination, and it also closes the window between the leaf guard and the
+    first byte.
+    """
+    descriptor, staged = tempfile.mkstemp(
+        prefix=".staging-", suffix=".jsonl", dir=directory, text=True)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             for index in range(4):
                 handle.write(json_line({
                     "trace_id": f"demo-trace-{index}",
@@ -203,6 +233,32 @@ def capability_init(out: Any, *, demo: bool = False) -> Dict[str, Any]:
                     "output": "unknown",
                     "reward": 0.0,
                 }))
+            # The rename is the commit point, so the bytes must be on disk
+            # before it, the same order ``atomic_write_text`` uses (#1046).
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(staged, traces_path)
+    except BaseException:
+        # A ``KeyboardInterrupt`` is not an ``Exception``; the staging file is
+        # ours either way and must not outlive the call (#1046).
+        try:
+            os.unlink(staged)
+        except OSError:
+            pass
+        raise
+
+
+def capability_init(out: Any, *, demo: bool = False) -> Dict[str, Any]:
+    """Write the spec, and with ``--demo`` its traces, after refusing a linked leaf."""
+    target = os.path.abspath(os.path.expanduser(require_text(out, "out")))
+    directory = os.path.dirname(target)
+    traces_path = os.path.join(directory, "capability-traces.jsonl")
+    _refuse_linked_leaves(directory,
+                          *((target, traces_path) if demo else (target,)))
+    if demo:
+        _refuse_non_file(traces_path)
+    os.makedirs(directory, exist_ok=True)
+    if demo:
         spec = {
             "schema_version": SURFACE_SCHEMA_VERSION,
             "traces": traces_path,
@@ -228,7 +284,13 @@ def capability_init(out: Any, *, demo: bool = False) -> Dict[str, Any]:
             "kind": "tool",
             "tags": [],
         }
+    # The spec goes first: when ``--out`` names an existing directory the write
+    # refuses before the traces exist, so no half fixture is left in the parent
+    # (#1046). It also keeps a spec that points at missing traces out of reach,
+    # because a failure here means the command did nothing.
     atomic_write_json(target, spec)
+    if demo:
+        _write_traces(traces_path, directory)
     return {
         "schema_version": SURFACE_SCHEMA_VERSION,
         "ok": True,

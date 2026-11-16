@@ -40,8 +40,13 @@ def _card(algorithm: algorithms.Algorithm) -> List[str]:
         "",
         f"- **Kinds:** {', '.join(f'`{k}`' for k in card['kinds'])}",
         f"- **Fidelity:** `{card['fidelity']}`",
+        f"- **Surface:** `{card.get('surface', 'card')}` (Algorithm card)",
         f"- **Cost:** {card['extra_calls']}",
     ]
+    if card.get("research_port"):
+        lines.append(
+            f"- **Research port:** `{card['research_port']}` — separate "
+            f"source-only path; {card.get('fidelity_note', 'see port-fidelity.md')}")
     if card.get("source"):
         lines.append(f"- **Source:** {card['source']}")
     if card.get("doc"):
@@ -74,17 +79,32 @@ def render() -> str:
         "agentdescent algorithms [--kind K] [--json]      # same as `algorithms list`",
         "agentdescent algorithms list [--kind K] [--json]",
         "agentdescent algorithms show NAME",
-        "agentdescent algorithms run NAME PATH [cases.jsonl] [--param k=v...] [--rounds N] [--workers N]",
+        "agentdescent algorithms run NAME PATH [cases.jsonl] [--param k=v...] [--rounds N] [--workers N] [--probe]",
         "agentdescent init PATH --algorithm NAME --param KEY=VALUE [--rounds N] [--workers N]",
         "```",
         "",
         "`--rounds 1 --workers 1` turns the kind's default plan (for a text prompt,",
         "8 rounds x 8 workers) into a quick trial without editing the spec.",
         "",
+        "`--probe` (also on `plan`) sends one minimal model call per agent and",
+        "reflector before the run it recommends, so a key, endpoint, model or",
+        "subscription that cannot work is refused there instead of inside",
+        "`evolve` -- with the same `SubscriptionInactive` / `QuotaExhausted` /",
+        "`ProviderConfigError` answer and no run store entry. A refused probe",
+        "ends with `next:` naming the repair (not `evolve`), and `--json`",
+        "sets `ready: false` while `ok` stays about the plan itself (#1093).",
+        "It is off by default: plain `plan` still runs and spends nothing.",
+        "",
         "Include cases the seed gets wrong: if the seed already scores",
         "the target on held-out, the run stops at once with",
         "`held-out reward: 1.000 -> 1.000`, nothing is learned, and",
         "`diagnose` reports `seed-already-solved`.",
+        "",
+        "These rows are Algorithm **cards** (`surface=card`) shipped in the",
+        "wheel — Path A's catalog (**cards-only contract**, #384). MethodPolicy / full ports are not listed here. A same-name [`examples/<algo>/`](https://github.com/ThinkFlowLab/agentdescent/tree/main/examples)",
+        "research port is a separate, source-only script and may use a different",
+        "propose/strategy path — see [port fidelity](port-fidelity.md). Filter with",
+        "`--kind` so hosts are not offered cards that cannot run on that artifact.",
         "",
         "To **register one named card in a single PR**, follow",
         "[Register a named Algorithm card](algorithm-authoring.md).",

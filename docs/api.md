@@ -13,7 +13,7 @@ means the parameter has none.
 Each section links to the page that explains *why* the module is shaped the
 way it is; this page is the *what*.
 
-598 public names across 120 modules.
+631 public names across 125 modules.
 
 ---
 
@@ -35,6 +35,9 @@ EvolutionResult(
     history: List[RoundInfo],
     ledger_log: List[str],
     initial_reward: Optional[float] = None,
+    test_reward: Optional[float] = None,
+    test_tasks: int = 0,
+    select_tasks: int = 0,
     error: Optional[str] = None,
     stop_reason: str = 'rounds',
     forced_refreshes: int = 0,
@@ -78,7 +81,8 @@ EvolutionResult(
     sandboxes_reused: int = 0,
     sandbox_failures: int = 0,
     fusion_trials: List['FusionTrial'] = <factory>,
-    budget: Optional[Dict[str, Any]] = None
+    budget: Optional[Dict[str, Any]] = None,
+    policy_digest: str = ''
 ) -> None
 ```
 
@@ -247,6 +251,7 @@ evolve(
     call_budget: Optional['CallBudget'] = None,
     self_verify: bool = True,
     held_out_frac: float = 0.4,
+    test_frac: float = 0.0,
     repo_path: Optional[str] = None,
     checkpointing: bool = False,
     agg_config: Optional[AggregatorConfig] = None,
@@ -269,7 +274,10 @@ evolve(
     trajectory_store: Optional['TrajectoryStore'] = None,
     contract: Optional[Contract] = None,
     extra_artifacts: Optional[Dict[str, 'EvolvingArtifact']] = None,
-    population_islands: int = 0
+    population_islands: int = 0,
+    budget: Optional['BudgetSettings'] = None,
+    runtime: Optional['RuntimeSettings'] = None,
+    observability: Optional['ObservabilitySettings'] = None
 ) -> EvolutionResult
 ```
 
@@ -286,7 +294,7 @@ evolve(
 | `initial_state` | `Optional[Dict[str, str]]` | `None` | Seed the artifact instead of starting from `strategy.initial()`. Ignored when resuming an existing `repo_path`. |
 | `blast_radius` | `float` | `0.2` | Governance layer, in `[0, 1]` (see above). |
 | `artifact_id` | `str` | `'artifact'` | Name of the evolving artifact; becomes a filename, so it must match `[A-Za-z0-9_.-]+`. |
-| `rounds` | `int` | `15` | Number of round barriers to run. Under `asynchronous=True` this becomes a worker-rollout budget of `rounds * n_workers` instead. |
+| `rounds` | `int` | `15` | Number of round barriers to run. Sync-only. `evolve(asynchronous=True)` no longer reinterprets this as a rollout budget (#809) — pass `max_rollouts=` or call `async_evolve`. |
 | `n_workers` | `int` | `4` | Workers per round (`>= 1`). |
 | `max_concurrency` | `int` | `1` | How many of them actually run at once (see above). |
 | `refresh_interval` | `int` | `1` | How many rounds a worker keeps its ledger snapshot before taking the round's fresh one. `1` (default) is what this loop always did: every worker proposes against the current head, so a diff's staleness `eta` is **0 by construction** -- and that made `staleness_policy=` a knob with nothing to decide on this path (measured over an 8-round run: all 15 staleness decisions saw `eta=0` and returned ACCEPT, so Full, Guarded and Reflective were indistinguishable). Above `1`, workers hold a spread of versions -- the refresh is staggered by worker id -- so their diffs arrive with a spread of `eta` and the staleness policy, the `alpha` tolerances in `agg_config` and the `all-stale` outcome all become reachable synchronously. Costs no extra ledger read: a worker either adopts the snapshot the round already took, or keeps the older one it has. Ignored under `asynchronous=True`, where the lag budget is `async_ratio`. |
@@ -295,7 +303,7 @@ evolve(
 | `patience` | `Optional[int]` | `None` | Stop after this many consecutive rounds with no improvement in held-out reward. `None` disables it. Cheap insurance for a run that plateaus below `target_reward`. |
 | `max_worker_errors` | `int` | `3` | How much total failure to tolerate before giving up -- and only while *no* worker has ever completed a rollout, which reads as a misconfiguration (wrong key, dead endpoint). Once any worker has succeeded the backend demonstrably works, so failures are treated as transient and the run continues on whatever evidence it did gather. Counts consecutive failed rollouts per worker on the async path (see `result.retired_workers`) and consecutive rounds in which *every* worker failed on the sync path. |
 | `eval_concurrency` | `int` | `8` | How many held-out tasks to score at once. Every gate goes through this -- each round's measurement and, far more often, the aggregator's per-candidate comparisons -- so it is the merge half of the run's parallelism, independent of `n_workers`. `1` restores the old sequential behaviour. |
-| `asynchronous` | `bool` | `False` | Delegate to `async_evolve` -- no round barrier, with `async_ratio` as the staleness lag budget. |
+| `asynchronous` | `bool` | `False` | **Deprecated bridge** to `async_evolve` (#809). Sync and async are two contracts, not a mode flag: prefer calling `async_evolve` directly. When `asynchronous=True`, both `max_seconds` and `max_rollouts` are required (no silent reinterpretation of `rounds`, no invented 20-second budget). `async_ratio` is the async lag budget. |
 | `async_ratio` | `int` | `3` | As `asynchronous`. |
 | `resync_on_commit` | `bool` | `True` | Asynchronous path only. Refresh every worker's snapshot as soon as a sweep commits, so no one *starts* a rollout against a superseded artifact. See `async_evolve`, which documents what it does and does not fix -- a commit landing mid-rollout still produces a stale card. |
 | `pipelined_gate` | `bool` | `False` | Under `asynchronous=True`, run a merge's **measurement** phase on its own threads instead of on the merger, so the merger goes back to draining while the gate runs. Off by default; documented in full on `async_evolve`, which implements it. Warns and does nothing on the synchronous path, where the round barrier idles every worker for the whole merge regardless. |
@@ -309,6 +317,7 @@ evolve(
 | `call_budget` | `Optional['CallBudget']` | `None` | An adaptive per-call thinking budget (o1-style test-time scaling). Pass a `CallBudget` whose `base` matches the adapter's configured `max_tokens`, and the engine adjusts the per-call ceiling based on each parent's score and the remaining budget — promising parents get more thinking, dead-end ones get less, and the allocation tightens as the token budget is spent. The adapter must be wrapped with `budgeted_completion` for this to reach it. `None` (default) means the per-call ceiling is the adapter's own and never changes. |
 | `self_verify` | `bool` | `True` | Re-run the trajectory with the diff applied to record a local before/after delta. Doubles the rollouts spent per proposal; ports that score candidates only on held-out should pass `False`. |
 | `held_out_frac` | `float` | `0.4` | Fraction of `tasks` reserved for held-out scoring, in `(0, 1)`. |
+| `test_frac` | `float` | `0.0` | Carve a **test** partition out of the held-out tail (#843). Selection and every gate keep reading the select partition; the test split is scored once, after the loop, and returned as `test_reward` (with `test_tasks` / `select_tasks` for the sizes). `0.0` (the default) is the old single-split run exactly -- the CLI then says the printed reward is select-set rather than an unseen test. Synchronous only: the async path warns that it does not split yet. |
 | `repo_path` | `Optional[str]` | `None` | Where the git-backed ledger lives. Omit for a throwaway repo that is removed when this call returns (not held until interpreter exit, so a sweep does not accumulate one git repo per run); **passing the same path again resumes** that ledger, and a caller-supplied path is never deleted. Git runs with an isolated config, so a personal `~/.gitconfig` (`commit.gpgsign`, `core.hooksPath`) cannot fail the ledger's own bookkeeping commits. |
 | `checkpointing` | `bool` | `False` | Save the aggregator's in-memory **search** state to `<repo_path>/checkpoints/` after every round, so a later run on the same `repo_path` resumes the search instead of re-deriving it from the ledger head. `repo_path` alone already resumes the *artifact*; what it cannot carry is what the search learned on the way there -- Beta posteriors, a population archive and its `selected` counts, the early-stop patience counter. Off by default, because a run that never resumes (a scratch repo, a tempdir) would pay the serialise-and-write for nothing, and because an aggregator opts in by implementing `checkpoint()` / `restore()` at all -- one without them is unaffected either way. A checkpoint that cannot be written or read (state that does not serialise, a lock another process holds, a full disk) is skipped, never raised: the cost of a missing checkpoint is a resume that starts the search fresh, which is what `False` does. |
 | `agg_config` | `Optional[AggregatorConfig]` | `None` | Tuning for the reference aggregator (batching, acceptance risk, trust region, staleness tolerance). |
@@ -325,13 +334,16 @@ evolve(
 | `stop_when` | `Optional[Callable[['RoundInfo'], bool]]` | `None` | Called after `on_round` with the same `RoundInfo`; return `True` to end the run with `stop_reason="stop_when"`. This is the seam for a budget the engine does not know how to count -- dollars from a shared `Usage`, an external deadline, a kill file. It is asked where `max_seconds` / `max_calls` are, so it stops between rounds and never mid-merge, and the run keeps what it has committed. An exception raised here is reported, not fatal. |
 | `verbose` | `bool` | `False` | Print a line per round. Independent of the `RuntimeWarning` emitted when a run ends early -- that always fires. |
 | `usage` | `Optional[Usage]` | `None` | Share one `Usage` with your model adapters (`claude(usage=u)`, `openai_compatible(usage=u)`) and the result's token counts become real. Without it the run still reports calls, seconds and failures -- `run` is `(rendered, task) -> str`, so an opaque actor has no way to surface tokens, and inventing a number would be worse than reporting zero. |
-| `policies` | `Optional['Policies']` | `None` | Bundle of replaceable pieces (`Policies`). Every field defaults to `None` meaning "current behaviour", so `Policies()` and passing nothing are the same run. The individual keyword arguments -- `task_sampler`, `staleness_policy`, `aggregator_factory` -- are shortcuts onto its fields and keep working; an explicit argument wins over a bundle default rather than being silently ignored. Fields whose implementations have not landed yet raise rather than being accepted and ignored: a caller who passes a custom acceptance rule and sees a finished run would reasonably conclude it ran. New capabilities go here rather than adding another parameter to a function that already has thirty-five. |
+| `policies` | `Optional['Policies']` | `None` | Bundle of replaceable pieces (`Policies`). Every field defaults to `None` meaning "current behaviour", so `Policies()` and passing nothing are the same run. The individual keyword arguments -- `task_sampler`, `staleness_policy`, `aggregator_factory` -- are shortcuts onto its fields and keep working; an explicit argument wins over a bundle default rather than being silently ignored. Fields whose implementations have not landed yet raise rather than being accepted and ignored: a caller who passes a custom acceptance rule and sees a finished run would reasonably conclude it ran. New capabilities go here rather than adding another parameter to a function whose flat surface is already large — prefer a Policies field or a BudgetSettings / RuntimeSettings / ObservabilitySettings bag (#804). |
 | `allocator` | `Optional[Any]` | `None` | Value-directed budget allocation (see `allocator`). `None` (the default) is the old behaviour exactly: optional spend (fusion tournaments, the self-verify rollout) degrades against the global `soft_floor` / `hard_floor` thresholds as the token budget runs out, every candidate treated alike. Pass a `ValueBudgetAllocator` (or any object with `decide(ctx) -> AllocateDecision` and `observe(ctx, committed)`) and, once the budget is tight, the self-verify rollout is spent only on candidates the allocator's value model expects to commit; the merge path reports every outcome back so the model learns. Requires `max_tokens` to be set (the allocator decides how the budget is spent; `max_tokens` is what exists to spend). Counterfactual exploration re-measures candidates the model judged unworthy, so a biased value model is corrected rather than reinforced. |
 | `record_trajectories` | `bool` | `False` | Persist every rollout and gate evaluation as a `Trajectory` under `<repo_path>/trajectories/` -- what the run provider saw, what it returned, what that earned, against which artifact version and environment. Off by default: a throwaway repo's records die with it, so the write cost is pure overhead there, and recording is a deliberate choice about keeping a run's evidence. The store is the durable base every learning-type increment reads -- process-supervised reflection, offline re-weighting, audit replay -- and it is what an `EvidenceCard.trace_ids` entry points at. Pass `trajectory_store=` with a store you built to control where records land instead. |
 | `trajectory_store` | `Optional['TrajectoryStore']` | `None` | An explicit `TrajectoryStore` to record into. Pass one to control where records land (a shared store, a custom root, a custom privacy configuration) without going through the `<repo_path>/trajectories/` default. The explicit store wins over `record_trajectories`; `None` + `record_trajectories` builds the default store. |
 | `contract` | `Optional[Contract]` | `None` | The artifact's contract -- the externally-visible interface, and where governance invariants are declared. Pass `Contract(invariants=(Invariant("mutable_keys", ("a", "b")),))` and the aggregator enforces each rule **before** a candidate is measured (see `invariants`); a diff that breaks one reports a `violates-invariant` outcome and never buys a held-out sweep. `None` (the default) is the reference skill contract, which declares nothing and enforces nothing -- the untouched path exactly. |
 | `extra_artifacts` | `Optional[Dict[str, 'EvolvingArtifact']]` | `None` | Additional artifacts to register alongside the primary (`artifact_id`), as `{aid: EvolvingArtifact}`. The primary is the one the worker loop rolls out and proposes on; each extra is registered in the ledger and the worker proposes against it too, so a proposal can name one of them as a diff target and the aggregator merges it there (the evidence buffer already buckets by `diff.target`). `depends_on` on an extra's `Contract` declares which artifacts it relies on: a contract-breaking change to one re-measures its dependents (their cached scores were taken under the superseded contract) and lands atomically via `Ledger.commit_atomic`. Empty (the default) is the old single-artifact behaviour exactly. |
 | `population_islands` | `int` | `0` | How many **persistent head-islands** the population explores in parallel, on top of `dev` (see `PopulationAggregator`). Requires a declared selection policy (`Policies(selection=...)`). `0` (the default) keeps the old behaviour exactly: per-step forks that reset a policy's lineage. Above zero, `island_count` forks survive across steps and each keeps its own lineage, so tree-shaped policies (`CladeThompson`, `FlatPuct`) score *clades* -- the metaproductivity signal HGM's population search is built on. Islands checkpoint and resume like the rest of the population archive. |
+| `budget` | `Optional['BudgetSettings']` | `None` | Typed spend/stop bag (`BudgetSettings`). Prefer this for new budget knobs; flat `max_seconds` / `max_rollouts` / `max_calls` / `max_tokens` / … remain shortcuts onto its fields. See #804 and `EVOLVE_STABLE_SUBSET`. |
+| `runtime` | `Optional['RuntimeSettings']` | `None` | Typed runtime bag (`RuntimeSettings`). Workers, gates, data split, search extras. Flat kwargs remain shortcuts. |
+| `observability` | `Optional['ObservabilitySettings']` | `None` | Typed observability bag (`ObservabilitySettings`). Hooks, meters, trajectory recording. Flat kwargs remain shortcuts. |
 
 ### `reflector(...)`
 
@@ -847,6 +859,10 @@ The provider refused the request for a reason no retry can change (#635).
 
 The account's quota or billing limit is used up until a human acts (#653).
 
+### `SubscriptionInactive`
+
+The account has no active subscription or credit for this endpoint (#1006).
+
 ### `Usage(...)`
 
 What a run cost: calls, tokens, and wall-clock spent in the model.
@@ -1334,7 +1350,8 @@ Aggregator(
     fusion: Optional['FusionPolicy'] = None,
     acceptance: Optional['AcceptancePolicy'] = None,
     promotion: Optional['PromotionPolicy'] = None,
-    screen: Optional['ScreenPolicy'] = None
+    screen: Optional['ScreenPolicy'] = None,
+    policy_digest: str = ''
 ) -> None
 ```
 
@@ -1414,6 +1431,10 @@ The vocabulary of `category`.
 | `APPROVAL_REJECTED` | `'approval-rejected'` |
 | `NOISE_FLOOR` | `'noise-floor'` |
 | `COST_RULE` | `'cost-rule'` |
+| `PROBES_UNAVAILABLE` | `'probes-unavailable'` |
+| `NO_TARGET_TRANSFER` | `'no-target-transfer'` |
+| `ARCHIVED_REGRESSION` | `'archived-regression'` |
+| `FALSIFICATION_MOVED` | `'falsification-moved'` |
 
 ### `MergeReport(...)`
 
@@ -2989,9 +3010,54 @@ DifficultyWeighted(
 |---|---|
 | `stats() -> Dict[str, Tuple[float, float]]` | Copy of the per-task (passes, trials) counters -- for inspection/tests. |
 
+### `FailureStratifiedSampler(...)`
+
+Sample across base-failure strata, not from whichever mode is largest.
+
+```python
+FailureStratifiedSampler(
+    signature: Optional[Any] = None,
+    *,
+    tasks: Optional[Sequence[str]] = None,
+    min_per_stratum: int = 1,
+    search_frac: float = 0.5,
+    select_frac: float = 0.25,
+    final_frac: float = 0.25,
+    dominant_share: float = 0.6,
+    transfer_tolerance: float = 0.0,
+    seed: int = 0
+) -> None
+```
+
+| method | what it does |
+|---|---|
+| `pick(keys: Sequence[str], round_index: int) -> str` | Return a `search` task from `keys`, rotating across strata. |
+| `record(task_id: str, score: float) -> None` | Report a rollout score; select/final scores feed the transfer report. |
+| `report() -> SamplingReport` | Coverage, overlap, warnings and transfer status at this point. |
+| `split(keys: Optional[Sequence[str]] = None) -> TaskSplit` | The fixed split, assigning `keys` first when given. |
+| `stratum_of(task_id: str) -> str` | The base failure signature this task belongs to. |
+
 ### `RoundRobin()`
 
 Cycle through the shard in order -- the deterministic default.
+
+### `SamplingReport(...)`
+
+Stratum coverage, split overlap and transfer status for one sampler.
+
+```python
+SamplingReport(
+    split: TaskSplit,
+    coverage: Mapping[str, StratumCoverage],
+    overlap: Mapping[str, Tuple[str, ...]],
+    starved: Tuple[str, ...],
+    ignored: Tuple[str, ...],
+    dominant: Tuple[str, ...],
+    warnings: Tuple[str, ...],
+    transfer: TransferStatus,
+    picks: int
+) -> None
+```
 
 ### `TaskSampler`
 
@@ -3001,6 +3067,22 @@ Chooses the next task id for a worker, and learns from the outcome.
 |---|---|
 | `pick(keys: Sequence[str], round_index: int) -> str` | Return one task id from `keys` (never mutate `keys`). |
 | `record(task_id: str, score: float) -> None` | Report the reward a rollout of `task_id` achieved (0..1). |
+
+### `TaskSplit(...)`
+
+The three disjoint task sets a stratified sampler works from.
+
+```python
+TaskSplit(
+    search: Tuple[str, ...] = (),
+    select: Tuple[str, ...] = (),
+    final: Tuple[str, ...] = ()
+) -> None
+```
+
+| method | what it does |
+|---|---|
+| `overlap() -> Dict[str, Tuple[str, ...]]` | Task id -> the split names it appears in, only for leaked ids. |
 
 ---
 
@@ -3024,6 +3106,25 @@ Archive(
 ### `Beam(k: int = 1) -> None`
 
 Keep the `k` best-scoring candidates and spread the workers over them.
+
+### `Candidate(...)`
+
+One starting point the next batch could be launched from.
+
+```python
+Candidate(
+    artifact_id: str,
+    version: int,
+    state: Mapping[str, str] = <factory>,
+    score: Optional[float] = None,
+    per_task: Mapping[str, float] = <factory>,
+    selected: int = 0,
+    parent: Optional[int] = None,
+    branch: Optional[str] = None,
+    prior: Optional[float] = None,
+    cost: Optional[float] = None
+) -> None
+```
 
 ### `CladeThompson(...)`
 
@@ -3414,6 +3515,8 @@ PromotionRequest(
     metamorphic: Optional[MetamorphicReport] = None,
     verifier: Optional[EnsembleReport] = None,
     calibration: Optional[CalibrationReport] = None,
+    review_cost: Optional[ReviewCost] = None,
+    cost: Optional[Cost] = None,
     metadata: Mapping[str, Any] = <factory>
 ) -> None
 ```
@@ -3436,11 +3539,15 @@ PromotionRules(
     require_goodhart: bool = False,
     require_metamorphic: bool = False,
     require_verifier: bool = False,
+    require_verifier_admission: bool = False,
     require_calibration: bool = False,
     allow_contaminated: bool = False,
     min_effect: float = 0.0,
     min_tasks: int = 2,
-    max_risk: float = 1.0
+    max_risk: float = 1.0,
+    max_review_cost: float = 0.0,
+    max_review_minutes: float = 0.0,
+    require_cost: bool = False
 ) -> None
 ```
 
@@ -3448,9 +3555,129 @@ PromotionRules(
 
 A proof certificate plus the verification that actually checked it.
 
+### `ReviewCost(...)`
+
+What reviewing one proposed diff costs a human (#950).
+
+```python
+ReviewCost(
+    files_changed: int,
+    lines_changed: int,
+    blast_radius: float = 0.2,
+    risk: Optional[float] = None,
+    evidence_items: int = 0
+) -> None
+```
+
+| method | what it does |
+|---|---|
+| `estimate(...)` | Build a cost from the diff's measured shape. |
+
 ### `promote(request: PromotionRequest, policy: Optional[PromotionRules] = None) -> PromotionDecision`
 
 Assemble and judge one promotion; missing or failed evidence never passes.
+
+---
+
+## Cost per accepted diff
+
+What a diff cost, what it bought, and the acceptance option that prices it. &nbsp;·&nbsp; `agentdescent.cost` &nbsp;·&nbsp; [guide](cost.md)
+
+### `Cost(...)`
+
+What one diff cost, with `None` for every number not measured.
+
+```python
+Cost(
+    calls: Optional[int] = None,
+    prompt_tokens: Optional[int] = None,
+    completion_tokens: Optional[int] = None,
+    tokens: Optional[int] = None,
+    wallclock: Optional[float] = None,
+    usd: Optional[float] = None
+) -> None
+```
+
+| method | what it does |
+|---|---|
+| `from_cards(cards: Iterable[Any]) -> 'Cost'` | The cost the contributing evidence cards recorded for this diff. |
+| `from_usage(usage: Any, *, usd: Optional[float] = None) -> 'Cost'` | The real counts a provider recorded (`agents.Usage`), plus an estimate. |
+
+### `CostPolicy(...)`
+
+Acceptance wrapper that prices the candidate before committing it.
+
+```python
+CostPolicy(
+    inner: Optional[Any] = None,
+    *,
+    reference_quality_per_cost: Optional[float] = None,
+    min_gain_per_1k_tokens: Optional[float] = None,
+    tolerance: float = 0.05,
+    require_cost: bool = False,
+    unit: str = '1k_tokens'
+) -> None
+```
+
+| method | what it does |
+|---|---|
+| `configure(config: Any) -> None` | Fill an unset inner gate from the run's config; forward when present. |
+
+### `CostReport(...)`
+
+Cost per accepted diff and per point of gain, from decision records.
+
+```python
+CostReport(
+    decisions: int = 0,
+    accepted: int = 0,
+    calls: Optional[int] = None,
+    prompt_tokens: Optional[int] = None,
+    completion_tokens: Optional[int] = None,
+    tokens: Optional[int] = None,
+    wallclock: Optional[float] = None,
+    usd: Optional[float] = None,
+    calls_per_accepted: Optional[float] = None,
+    tokens_per_accepted: Optional[float] = None,
+    usd_per_accepted: Optional[float] = None,
+    tokens_per_point: Optional[float] = None,
+    usd_per_point: Optional[float] = None,
+    cost_status: str = 'unknown',
+    missing_cost: int = 0,
+    reference_tokens_per_point: Optional[float] = None
+) -> None
+```
+
+### `cost_efficiency(gain: float, cost: Cost, *, unit: str = '1k_tokens') -> Optional[float]`
+
+`quality_per_cost`: held-out delta per 1k tokens or per USD.
+
+### `cost_report(...)`
+
+Aggregate per-decision records into the report the issue asks for.
+
+```python
+cost_report(
+    records: Iterable[Any],
+    *,
+    reference_tokens_per_point: Optional[float] = None,
+    tolerance: float = 0.05
+) -> CostReport
+```
+
+### `cost_status(...)`
+
+Classify `value` against `reference`: improved/neutral/regressed/unknown.
+
+```python
+cost_status(
+    value: Optional[float],
+    reference: Optional[float],
+    *,
+    tolerance: float = 0.05,
+    lower_is_better: bool = False
+) -> str
+```
 
 ---
 
@@ -3564,6 +3791,10 @@ OptionReport(
 
 Build the evaluation, canary, statistical, Goodhart, metamorphic, verifier and calibration reports from one paired run. &nbsp;·&nbsp; `agentdescent.trust_evidence` &nbsp;·&nbsp; [guide](trust-evidence.md)
 
+### `RunHealth(attempted: int, failed_tasks: Tuple[str, ...] = (), threshold: float = 0.2) -> None`
+
+How much of a run produced a real answer (#993).
+
 ### `TrustEvidence(...)`
 
 The reports one paired evaluation produced, ready for `promote()`.
@@ -3581,6 +3812,8 @@ TrustEvidence(
     contaminated: Optional[bool] = None,
     risk: Optional[float] = None,
     approved: Optional[bool] = None,
+    artifact_changed: Optional[bool] = None,
+    run_health: Optional[RunHealth] = None,
     metadata: Mapping[str, Any] = <factory>
 ) -> None
 ```
@@ -3614,9 +3847,13 @@ build_trust_evidence(
     contaminated: Optional[bool] = None,
     risk: Optional[float] = None,
     approved: Optional[bool] = None,
+    artifact_changed: Optional[bool] = None,
     alpha: float = 0.05,
     seed: int = 0,
-    min_effect: float = 0.0
+    min_effect: float = 0.0,
+    baseline_runs: Optional[Sequence[Mapping[str, float]]] = None,
+    candidate_runs: Optional[Sequence[Mapping[str, float]]] = None,
+    noise_repeats: int = 3
 ) -> TrustEvidence
 ```
 
@@ -3833,7 +4070,8 @@ ExperienceEngine(
     store: ExperienceStore,
     *,
     require_anchors: bool = True,
-    anchor_tolerance: float = 0.0
+    anchor_tolerance: float = 0.0,
+    telemetry: Optional[RSITelemetry] = None
 ) -> None
 ```
 
@@ -3869,7 +4107,8 @@ ExperienceReport(
     rows: int,
     learner: ContinualReport,
     skipped: int = 0,
-    detail: str = ''
+    detail: str = '',
+    memory: Optional[MemoryAudit] = None
 ) -> None
 ```
 
@@ -4206,14 +4445,15 @@ ReflectiveFusion(
     verifier: Any = None,
     max_chars: int = 8000,
     max_proposals: int = 6,
-    validate: Optional[Callable[[Any], Any]] = None
+    validate: Optional[Callable[[Any], Any]] = None,
+    trust_union: bool = False
 ) -> None
 ```
 
 | method | what it does |
 |---|---|
 | `bind(verifier: Any) -> None` | Receive the engine's verifier, if the caller did not supply one. |
-| `select(artifact: Evolvable, diffs: List[Diff]) -> Tuple[Diff, Evolvable, bool]` | Build the union and hand it straight to the acceptance gate. |
+| `select(artifact: Evolvable, diffs: List[Diff]) -> Tuple[Diff, Evolvable, bool]` | Build the union, rank it against parents (unless `trust_union`). |
 
 ### `reflective_merge(complete, **kwargs) -> Dict[str, Any]`
 
@@ -4245,6 +4485,7 @@ AdaptiveTrustRegion(
 | method | what it does |
 |---|---|
 | `observe(outcome: str) -> TrustRegion` | Record one merge outcome and return the region for the next merge. |
+| `policy_fingerprint() -> dict` | This policy's configuration, for `policies.policy_digest` (#943). |
 
 ### `AdvantageAcceptance(inner = None, strength: float = 1.0) -> None`
 
@@ -4266,6 +4507,10 @@ Standardise a rollout's reward against the group it belongs to.
 ### `StableDistanceAcceptance(inner = None, strength: float = 0.1) -> None`
 
 Penalise candidates that drift far from the confirmed branch.
+
+| method | what it does |
+|---|---|
+| `policy_fingerprint() -> dict` | `strength` is a decision knob kept on the instance (#943). |
 
 ### `TrustRegion(ops: int, chars: int) -> None`
 
@@ -4532,7 +4777,10 @@ async_evolve(
     trajectory_store: Optional[Any] = None,
     contract: Optional[Contract] = None,
     population_islands: int = 0,
-    extra_artifacts: Optional[Dict[str, 'EvolvingArtifact']] = None
+    extra_artifacts: Optional[Dict[str, 'EvolvingArtifact']] = None,
+    budget: Optional['BudgetSettings'] = None,
+    runtime: Optional['RuntimeSettings'] = None,
+    observability: Optional['ObservabilitySettings'] = None
 ) -> EvolutionResult
 ```
 
@@ -4587,13 +4835,90 @@ async_evolve(
 | `stop_when` | `Optional[Callable[[RoundInfo], bool]]` | `None` | Asked after `on_round` with the same `RoundInfo`; `True` ends the run with `stop_reason="stop_when"` -- the caller's own budget (dollars, a deadline, a kill file), checked between merger sweeps like the built-in bounds. Same thread and the same rules as `on_round`. |
 | `verbose` | `bool` | `False` | Print one line per merger sweep. |
 | `usage` | `Optional[Usage]` | `None` | Share one `Usage` with your model adapters (`claude(usage=u)`, `openai_compatible(usage=u)`) and the result's token counts become real. Without it the run still reports calls, seconds and failures -- `run` is `(rendered, task) -> str`, so an opaque actor has no way to surface tokens, and inventing a number would be worse than reporting zero. |
-| `policies` | `Optional['Policies']` | `None` | Bundle of replaceable pieces (`Policies`). Every field defaults to `None` meaning "current behaviour", so `Policies()` and passing nothing are the same run. The individual keyword arguments -- `task_sampler`, `staleness_policy`, `aggregator_factory` -- are shortcuts onto its fields and keep working; an explicit argument wins over a bundle default rather than being silently ignored. Fields whose implementations have not landed yet raise rather than being accepted and ignored: a caller who passes a custom acceptance rule and sees a finished run would reasonably conclude it ran. New capabilities go here rather than adding another parameter to a function that already has thirty-five. |
+| `policies` | `Optional['Policies']` | `None` | Bundle of replaceable pieces (`Policies`). Every field defaults to `None` meaning "current behaviour", so `Policies()` and passing nothing are the same run. The individual keyword arguments -- `task_sampler`, `staleness_policy`, `aggregator_factory` -- are shortcuts onto its fields and keep working; an explicit argument wins over a bundle default rather than being silently ignored. Fields whose implementations have not landed yet raise rather than being accepted and ignored: a caller who passes a custom acceptance rule and sees a finished run would reasonably conclude it ran. New capabilities go here rather than adding another parameter to a function whose flat surface is already large — prefer a Policies field or a BudgetSettings / RuntimeSettings / ObservabilitySettings bag (#804). |
 | `allocator` | `Optional[Any]` | `None` | Exactly as in `evolve`: value-directed budget allocation (see `allocator`). `None` (the default) is the old behaviour exactly. Pass a value allocator and, once the token budget is tight, the self-verify rollout is spent only on candidates the allocator expects to commit; the merger reports every outcome back so it learns. Requires `max_tokens`. Counterfactual exploration corrects a biased value model rather than reinforcing it. |
 | `record_trajectories` | `bool` | `False` | Exactly as in `evolve`: persist every rollout and gate evaluation as a `Trajectory` under `<repo_path>/trajectories/`. Off by default; pass `trajectory_store=` to control where records land. |
 | `trajectory_store` | `Optional[Any]` | `None` | An explicit `TrajectoryStore` to record into. `None` + `record_trajectories` builds the default store at `<repo_path>/trajectories`. |
 | `contract` | `Optional[Contract]` | `None` | Exactly as in `evolve`: the artifact's contract, where governance invariants are declared. `None` (the default) is the reference skill contract, which declares nothing and enforces nothing. |
 | `population_islands` | `int` | `0` | Persistent head-islands for a population run. Exactly as in `evolve`; `0` (the default) keeps the per-step-fork behaviour. |
 | `extra_artifacts` | `Optional[Dict[str, 'EvolvingArtifact']]` | `None` | Exactly as in `evolve`: additional artifacts to register alongside the primary, as `{aid: EvolvingArtifact}`. The barrier-free worker proposes against each of them too (no parallel strategy, so it is the primary plus every extra), and the aggregator merges their diffs by target. Empty (the default) is the old single-artifact behaviour exactly. |
+| `budget` | `Optional['BudgetSettings']` | `None` | Typed spend/stop bag (`BudgetSettings`). Flat `max_seconds` / `max_iters` / `max_calls` / `max_tokens` / … remain shortcuts; the bag field `max_rollouts` is this function's `max_iters`. |
+| `runtime` | `Optional['RuntimeSettings']` | `None` | Typed runtime bag (`RuntimeSettings`). |
+| `observability` | `Optional['ObservabilitySettings']` | `None` | Typed observability bag (`ObservabilitySettings`). |
+
+---
+
+## Evolve settings bags
+
+Budget / runtime / observability bags that freeze the flat evolve() surface. &nbsp;·&nbsp; `agentdescent.evolve_settings` &nbsp;·&nbsp; [guide](evolution.md)
+
+### `BudgetSettings(...)`
+
+Spend and stop bounds shared by the sync and async drivers.
+
+```python
+BudgetSettings(
+    max_seconds: Optional[float] = None,
+    max_rollouts: Optional[int] = None,
+    max_calls: Optional[int] = None,
+    max_tokens: Optional[int] = None,
+    stop_on_diminishing_returns: bool = False,
+    efficiency_floor: float = 0.25,
+    call_budget: Optional['CallBudget'] = None,
+    target_reward: Optional[float] = None,
+    patience: Optional[int] = None,
+    oracle_budget: int = 200
+) -> None
+```
+
+| method | what it does |
+|---|---|
+| `merged_with(**kwargs: Any) -> 'BudgetSettings'` | This bag with any explicit keyword taking precedence. |
+
+### `ObservabilitySettings(...)`
+
+Hooks, meters, and durable trajectory recording.
+
+```python
+ObservabilitySettings(
+    on_round: Optional[Callable[['RoundInfo'], None]] = None,
+    on_reports: Optional[Callable[[Sequence[Any]], None]] = None,
+    stop_when: Optional[Callable[['RoundInfo'], bool]] = None,
+    verbose: bool = False,
+    usage: Optional['Usage'] = None,
+    record_trajectories: bool = False,
+    trajectory_store: Optional['TrajectoryStore'] = None
+) -> None
+```
+
+### `RuntimeSettings(...)`
+
+How the loop runs: workers, gates, data split, search extras.
+
+```python
+RuntimeSettings(
+    rounds: int = 15,
+    n_workers: int = 4,
+    max_concurrency: int = 1,
+    refresh_interval: int = 1,
+    round_timeout: Optional[float] = None,
+    eval_concurrency: int = 8,
+    max_worker_errors: int = 3,
+    async_ratio: int = 3,
+    resync_on_commit: bool = True,
+    pipelined_gate: bool = False,
+    gate_workers: int = 2,
+    self_verify: bool = True,
+    held_out_frac: float = 0.4,
+    checkpointing: bool = False,
+    cheap_eval_tasks: Optional[int] = None,
+    fusion_tournament: Optional[bool] = None,
+    solved_threshold: float = 0.999,
+    shuffle: bool = False,
+    seed: int = 0,
+    population_islands: int = 0
+) -> None
+```
 
 ---
 
@@ -4721,6 +5046,44 @@ run_fork_baseline(
 
 ---
 
+## The sparse audit package
+
+Pair a cheap verifier against ground truth, and correct for the gap. &nbsp;·&nbsp; `agentdescent.audit` &nbsp;·&nbsp; [guide](audit.md)
+
+### `CALIBRATION_CEILING`
+
+Where a calibration share sits when the improvement pool is still finding new error modes, and where it goes once the pool has stopped. Both are policy choices, not measurements: what a label is worth in each pool depends on whether you are trying to *fix* the verifier or to *correct for* it.
+
+### `CALIBRATION_FLOOR`
+
+Where a calibration share sits when the improvement pool is still finding new error modes, and where it goes once the pool has stopped. Both are policy choices, not measurements: what a label is worth in each pool depends on whether you are trying to *fix* the verifier or to *correct for* it.
+
+### `FLIP_ALARM`
+
+Flip rate above which a rescan is called out rather than reported. The plan's number. It is a policy choice and not a measurement -- there is no rate at which silently re-scoring a run's history becomes fine.
+
+### `MAX_COMBINATIONS`
+
+Combinations the search will build before it complains. Not a performance limit -- each one is a pass over the labelled set, which is a few hundred rows -- but a statistical one: every combination scored is another chance for one to look good by luck, and a search over a thousand of them on two hundred labels is fitting the noise.
+
+### `MIN_N_DOMINANT`
+
+Labels the heaviest stratum needs before the reported interval means what it says. Below it, measured coverage is about 0.92 against a nominal 0.95 -- see pitfall 3 in the module docstring, and `test_known_limitation_small_dominant_stratum`.
+
+### `MIN_UNSEEN`
+
+Below this estimated probability of a new mode, more improvement labels are buying the flat part of the rarefaction curve. Not a law -- the point at which a one-in-twenty chance of learning something stops being worth an oracle call is a budget question -- but it is where the Phase 0 curve had flattened.
+
+### `SCHEMA_VERSION`
+
+Bumped when the on-disk shape of a record changes incompatibly. A reader that meets a record it does not understand must say so rather than guess -- see `load`. Version 2 adds optional `scorer_version`; this build still migrates version-1 lines. Stamp the new marker whenever the persisted shape is one an older v1-only reader cannot decode, so that reader hits its explicit unsupported-version path instead of treating a valid line as corrupt and silently skipping pending work (#315).
+
+### `STALE_INFLATION`
+
+Variance multiplier the acceptance gate applies while a rectification is stale. Not a correction -- a stale rectifier has no number to correct *with* -- but a widening, so a gate that cannot be told how biased its verifier is commits less rather than the same amount with more confidence.
+
+---
+
 ## Document backends
 
 A tool-using agent over a document that is too big for a prompt. &nbsp;·&nbsp; `agentdescent.backends` &nbsp;·&nbsp; [guide](backends.md)
@@ -4787,6 +5150,10 @@ The reward functions everyone writes, with the details right. &nbsp;·&nbsp; `ag
 ### `GraderError`
 
 A `command_scorer` command failed or printed something that is not a score.
+
+### `SCORERS`
+
+Named scorers accepted by `scorer`. Pass a callable for anything else.
 
 ### `command_scorer(...)`
 
@@ -4975,6 +5342,88 @@ A table whose caption cannot claim more than the numbers support.
 
 ---
 
+## Replay fidelity
+
+The RNG, environment and hidden-state inputs a manifest cannot see. &nbsp;·&nbsp; `agentdescent.replay_fidelity` &nbsp;·&nbsp; [guide](manifest.md)
+
+### `EnvironmentFingerprint(...)`
+
+The environment a run happened in, as far as it is safe to record it.
+
+```python
+EnvironmentFingerprint(
+    cwd: str,
+    python: str,
+    platform: str,
+    tools: Mapping[str, str] = <factory>,
+    env_names: Tuple[str, ...] = (),
+    missing_env: Tuple[str, ...] = ()
+) -> None
+```
+
+| method | what it does |
+|---|---|
+| `capture(...)` | Fingerprint this process (or the explicit values a caller supplies). |
+| `diff(other: 'EnvironmentFingerprint') -> Tuple[str, ...]` | Names of the environment inputs that differ (empty when identical). |
+
+### `REPLAY_ENV_ALLOWLIST`
+
+Environment variable names whose **presence** may affect a run, and which are therefore recorded as names. Chosen for determinism, not convenience: the hash seed changes dict/set iteration, `PYTHONPATH` decides which code is imported at all, the locale changes sorting and number formatting, `TZ` changes timestamps a prompt may contain, and the thread counts change floating-point reduction order in numeric workloads. Names only, never values -- not even hashed (Security review, #952). A four-entry dictionary recovered a `TZ` value offline from the old sha256 digests, and any candidate value confirms by `sha256()`, so a digest of a value is value material. `capture` also intersects the caller's list with this tuple, so no caller can widen it, and still drops credential-shaped names.
+
+### `ReplayCheck(...)`
+
+The result of comparing a captured run with its replay.
+
+```python
+ReplayCheck(
+    ok: bool,
+    changed: Tuple[str, ...] = (),
+    verdict_changed: bool = False,
+    notes: Tuple[str, ...] = ()
+) -> None
+```
+
+### `ReplayFidelity(...)`
+
+Everything a replay needs that the manifest's input hashes do not cover.
+
+```python
+ReplayFidelity(
+    environment: Optional[EnvironmentFingerprint] = None,
+    rng: Tuple[RngRecord, ...] = (),
+    hidden_state: Mapping[str, str] = <factory>,
+    uncaptured: Tuple[str, ...] = ()
+) -> None
+```
+
+| method | what it does |
+|---|---|
+| `capture(...)` | Assemble a record; hidden-state summaries are digested here. |
+| `diff(other: 'ReplayFidelity') -> Tuple[str, ...]` | Names of the recorded inputs that differ (empty for the same run). |
+| `notes() -> Tuple[str, ...]` | What would stop a replay claim, in words (empty when eligible). |
+
+### `ReplayNotEligible(notes: Iterable[str]) -> None`
+
+A counterfactual was asked for over a run that cannot be replayed.
+
+### `RngRecord(boundary: str, digest: str, seed: Optional[str] = None) -> None`
+
+One RNG seed/state digest at an interaction boundary.
+
+### `content_digest(value: Any) -> str`
+
+A sha256 digest of any JSON-able summary.
+
+### `replay_check(captured: Any, replayed: Any) -> ReplayCheck`
+
+Whether `replayed` reproduces `captured` -- or refuses to say.
+
+### `rng_digest(*, seed: Any = None, state: Any = None) -> str`
+
+A digest of an RNG seed and/or a state summary at one boundary.
+
+---
+
 ## Type aliases and constants
 
 Values rather than classes or functions.
@@ -5042,14 +5491,6 @@ A paired bootstrap of per-task gains.
 ### `BudgetGovernor`
 
 Tracks token spend against a cap and decides what to degrade.
-
-### `CALIBRATION_CEILING`
-
-Where a calibration share sits when the improvement pool is still finding new error modes, and where it goes once the pool has stopped. Both are policy choices, not measurements: what a label is worth in each pool depends on whether you are trying to *fix* the verifier or to *correct for* it.
-
-### `CALIBRATION_FLOOR`
-
-Where a calibration share sits when the improvement pool is still finding new error modes, and where it goes once the pool has stopped. Both are policy choices, not measurements: what a label is worth in each pool depends on whether you are trying to *fix* the verifier or to *correct for* it.
 
 ### `CacheProtocol`
 
@@ -5147,6 +5588,14 @@ One run's failure mode, the evidence, and what to try next.
 
 The multi-file proposal format a `FileTree` reflector is told to emit.
 
+### `EVOLVE_PARAM_ALLOWLIST`
+
+Frozen set of public ``evolve()`` parameter names (#804). A PR that adds a raw kwarg must update this on purpose; prefer Policies or a settings bag.
+
+### `EVOLVE_STABLE_SUBSET`
+
+Short stable ``evolve()`` contract to teach first; the long tail is advanced (Policies, bags, or a documented flat shortcut).
+
 ### `EloRating`
 
 A minimal Elo rating over pairwise matches (K-factor 32).
@@ -5174,10 +5623,6 @@ Runs rollouts somewhere. Threads here, processes and hosts later.
 ### `FAST_MAX`
 
 The L2/L1 blast-radius boundary (`0.30`).
-
-### `FLIP_ALARM`
-
-Flip rate above which a rescan is called out rather than reported. The plan's number. It is a policy choice and not a measurement -- there is no rate at which silently re-scoring a run's history becomes fine.
 
 ### `FROZEN_IDS`
 
@@ -5291,18 +5736,6 @@ Eight methods: four the aggregator calls, four more the engine calls.
 
 A throwaway directory on this machine -- what a rollout has always got.
 
-### `MAX_COMBINATIONS`
-
-Combinations the search will build before it complains. Not a performance limit -- each one is a pass over the labelled set, which is a few hundred rows -- but a statistical one: every combination scored is another chance for one to look good by luck, and a search over a thousand of them on two hundred labels is fitting the noise.
-
-### `MIN_N_DOMINANT`
-
-Labels the heaviest stratum needs before the reported interval means what it says. Below it, measured coverage is about 0.92 against a nominal 0.95 -- see pitfall 3 in the module docstring, and `test_known_limitation_small_dominant_stratum`.
-
-### `MIN_UNSEEN`
-
-Below this estimated probability of a new mode, more improvement labels are buying the flat part of the rarefaction curve. Not a law -- the point at which a one-in-twenty chance of learning something stops being worth an oracle call is a budget question -- but it is where the Phase 0 curve had flattened.
-
 ### `MarginalGainStop`
 
 Stop when reward gained per additional call falls below a bar.
@@ -5395,6 +5828,10 @@ What a `ProposalPolicy` is given for one rollout.
 
 How a rollout becomes candidate changes.
 
+### `REPLAY_ENV_ALLOWLIST`
+
+Environment variable names whose **presence** may affect a run, and which are therefore recorded as names. Chosen for determinism, not convenience: the hash seed changes dict/set iteration, `PYTHONPATH` decides which code is imported at all, the locale changes sorting and number formatting, `TZ` changes timestamps a prompt may contain, and the thread counts change floating-point reduction order in numeric workloads. Names only, never values -- not even hashed (Security review, #952). A four-entry dictionary recovered a `TZ` value offline from the old sha256 digests, and any candidate value confirms by `sha256()`, so a digest of a value is value material. `capture` also intersects the caller's list with this tuple, so no caller can widen it, and still drops credential-shaped names.
+
 ### `ROUTE_SEED`
 
 The shipped route rule: answer directly unless the task is hard and the budget allows a search. Deliberately conservative -- it refuses to search when the budget is low, which is exactly the decision an evolved rule can improve on (searching hard tasks pays more than the budget it costs).
@@ -5467,10 +5904,6 @@ One rollout, described completely enough to run somewhere else.
 
 The hashed inputs of one run and the resulting stable id.
 
-### `SCHEMA_VERSION`
-
-Bumped when the on-disk shape of a record changes incompatibly. A reader that meets a record it does not understand must say so rather than guess -- see `load`. Version 2 adds optional `scorer_version`; this build still migrates version-1 lines. Stamp the new marker whenever the persisted shape is one an older v1-only reader cannot decode, so that reader hits its explicit unsupported-version path instead of treating a valid line as corrupt and silently skipping pending work (#315).
-
 ### `SCORERS`
 
 Named scorers accepted by `scorer`. Pass a callable for anything else.
@@ -5486,10 +5919,6 @@ The contract each slot's value must satisfy -- the engine's own Protocols, all `
 ### `SOLVED`
 
 Reward at or above which a task counts as solved (`0.999`). Lower it for a graded scorer, or every rollout asks the reflector to fix an answer that was already good.
-
-### `STALE_INFLATION`
-
-Variance multiplier the acceptance gate applies while a rectification is stale. Not a correction -- a stale rectifier has no number to correct *with* -- but a widening, so a gate that cannot be told how biased its verifier is commits less rather than the same amount with more confidence.
 
 ### `SafetyCheck`
 
@@ -5515,9 +5944,17 @@ Where sandboxes come from and go back to.
 
 What environment one rollout needs. Must survive JSON: it crosses processes.
 
+### `SearchReport`
+
+What a `search_evolve` found: the best state, the budget spent, and the value estimates the search used (best seen vs the tree's choice).
+
 ### `SearchTree`
 
 A state tree over rendered artifact values, searched by UCB.
+
+### `SeededAppendRules`
+
+Keep `seed` verbatim; append content-addressed rules under `title`.
 
 ### `SelfImproveConfig`
 
@@ -5654,6 +6091,10 @@ Agentic backends -- a base agent that *navigates documents with tools*, not just
 ### `baselines`
 
 The control every efficiency number in this repository is missing.
+
+### `bootstrap_ci`
+
+Bootstrap the mean paired gain, `after - before`.
 
 ### `budgeted_completion`
 
@@ -5822,6 +6263,10 @@ Per-task `after - before` over the keys present in both sides.
 ### `patch_source`
 
 A unified diff between two sources -- the patch a human or a reviewer sees, and what an apply can reverse.
+
+### `policy_digest`
+
+The 64-hex version of a decision procedure: the bundle, the config, the verifier.
 
 ### `policy_improve`
 

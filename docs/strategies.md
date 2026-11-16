@@ -4,8 +4,8 @@ description: Strategies decide what evolves and how a proposal becomes a diff. T
 
 # Strategies — what evolves, and how a proposal becomes a diff
 
-*Modules:* [`agentdescent.strategies`](https://github.com/Birfy/agentdescent/blob/main/agentdescent/strategies.py)
-(text) · [`agentdescent.treestrategy`](https://github.com/Birfy/agentdescent/blob/main/agentdescent/treestrategy.py)
+*Modules:* [`agentdescent.strategies`](https://github.com/ThinkFlowLab/agentdescent/blob/main/agentdescent/strategies.py)
+(text) · [`agentdescent.treestrategy`](https://github.com/ThinkFlowLab/agentdescent/blob/main/agentdescent/treestrategy.py)
 (a directory) — one module per strategy family, none of them inside the engine
 · *API:* [`Strategy`, `SingleSlot`, `AppendRules`, `KeyedRules`](api.md#the-loop), [`FileTree`](api.md#the-file-tree-strategy)
 
@@ -36,6 +36,7 @@ evolve(tasks, reward, agent=agent, strategy=SingleSlot(initial_value="Answer con
 
 | strategy | the artifact is | competing proposals |
 |---|---|---|
+| **`SeededAppendRules`** | seed prompt + appended one-line rules (default `kind=text`) | rules append; seed stays (#837) |
 | **`SingleSlot`** | one value — a system prompt, an instruction, one document | always contradict; the best replaces the incumbent |
 | `AppendRules` | a deduped list of lessons, keyed by content hash | almost always **fuse**; identical ones collapse |
 | `KeyedRules(categories)` | one entry per named category | contradict *within* a category, fuse across |
@@ -186,8 +187,8 @@ Each is a real `Strategy` you can read and reuse:
 
 ## Examples-level strategies
 
-The eleven MethodPolicy ports ride four shared strategies in
-[`examples/_method_policy.py`](https://github.com/Birfy/agentdescent/blob/main/examples/_method_policy.py) —
+The first eleven MethodPolicy ports ride four shared strategies in
+[`examples/_method_policy.py`](https://github.com/ThinkFlowLab/agentdescent/blob/main/examples/_method_policy.py) —
 the same seam, packaged with validation (an unparseable proposal is counted and
 produces no diff):
 
@@ -196,4 +197,4 @@ produces no diff):
 | `ValidatedSlot` | `SingleSlot` + a `ValueError`-raising validator and an invalid-proposal counter | [Self-Refine](algo-self-refine.md), [Absolute Zero](algo-absolute-zero.md), [Agent0](algo-agent0.md), [SICA](algo-sica.md), [Gödel Agent](algo-godel-agent.md) |
 | `FieldSlots` | a genome of named plain-text fields, one ledger key each — disjoint edits union-merge, contested fields model-merge | [PromptBreeder](algo-promptbreeder.md), [AFlow](algo-aflow.md), [R-Zero](algo-r-zero.md) |
 | `WindowedMemory` | append-only entries rendered as the last Ω — appends never contradict | [Reflexion](algo-reflexion.md) |
-| `SkillLibrary` | one validated entry per goal key; different goals accumulate and union-merge | [Voyager](algo-voyager.md), [SkillWeaver](algo-skillweaver.md) |
+| `KeyedSkillBank` | one validated **prompt string** per goal key (not an Agent Skill folder); different goals accumulate and union-merge | [Voyager](algo-voyager.md), [SkillWeaver](algo-skillweaver.md) |

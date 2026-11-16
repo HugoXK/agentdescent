@@ -355,6 +355,11 @@ def test_cli_resume_with_a_relative_store(tmp_path, monkeypatch):
     code, out = _cli("--store", "./store", "--json", "evolve", path)
     assert code == 0, out
     rid = json.loads(out)["run_id"]
+    rd = runstore.get(rid, store="./store")
+    _wait(rd)
+    # The offline spec solves its task and CLI resume refuses a solved run
+    # (#900), so record a bound-stopped run to exercise the relaunch itself.
+    rd.update_status(stop_reason="max_iters")
     code, out = _cli("--store", "./store", "resume", rid)
     assert code == 0 and rid in out
     assert _wait(runstore.get(rid, store="./store")).state == "done"
@@ -779,7 +784,9 @@ def test_plan_rejects_missing_agent_cli(tmp_path, monkeypatch):
     assert payload["ok"] is False
     err = payload["error"]
     assert "claude_code" in err and "claude" in err and "on PATH" in err
-    assert "install" in err or "openai_compatible" in err
+    assert "install" in err
+    # skill_dir must not advertise openai_compatible (#791)
+    assert "openai_compatible" not in err
     # missing binary is a hard error, not a soft warning
     assert not any("needs `claude` on PATH" in w for w in payload["warnings"])
 

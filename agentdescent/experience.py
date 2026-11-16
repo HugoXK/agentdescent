@@ -34,11 +34,13 @@ from __future__ import annotations
 import json
 import math
 import os
+import stat
 import threading
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 from .continual_meta import ContinualMetaLearner, ContinualReport, MetaExample
+from .rsi_telemetry import MemoryAudit, RSITelemetry
 
 __all__ = [
     "ExperienceRecord",
@@ -48,6 +50,34 @@ __all__ = [
     "ExperienceStore",
     "ExperienceEngine",
 ]
+
+
+def _refuse_unappendable_leaf(path: str) -> None:
+    """Refuse a leaf this append cannot write through (#1064).
+
+    ``open(path, "a")`` follows a link at the leaf: a symlink grows the file
+    outside ``root``, a hardlink grows the shared inode, and a dangling symlink
+    creates the file at the link's target. The rule is ``filetree.leaf_problem``,
+    wrapped as the sibling writers wrap it, so a symlinked *directory* above the
+    store stays legal. A leaf that is not a regular file, or a regular file with
+    more than one link, is refused too: an append has no staged rename to fall
+    back on, so any of those would leave the store's bytes somewhere else.
+    """
+    from .filetree import leaf_problem
+
+    problem = leaf_problem(path)
+    if problem is None:
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            return
+        if not stat.S_ISREG(info.st_mode):
+            problem = "not a regular file"
+        elif info.st_nlink > 1:
+            problem = (f"the file has {info.st_nlink} links, so an append would "
+                       "write outside the store")
+    if problem is not None:
+        raise ValueError(f"cannot write {path}: {problem}")
 
 
 def _finite(value: Any, name: str) -> float:
@@ -170,6 +200,29 @@ class ExperienceReport:
     learner: ContinualReport
     skipped: int = 0
     detail: str = ""
+    #: Reads/writes/updates/forgets, missing provenance and regressions when the
+    #: engine was given an ``RSITelemetry`` (#947).
+    memory: Optional[MemoryAudit] = None
+
+
+def _lesson_fields(record: ExperienceRecord) -> Dict[str, Any]:
+    """The lesson sidecar a record carries in ``metadata`` (#947)."""
+    metadata = dict(record.metadata or {})
+    traces = metadata.get("source_trace_ids")
+    if traces is None:
+        traces = metadata.get("trace_ids") or ()
+    if isinstance(traces, str):
+        traces = (traces,)
+    return {
+        "lesson_id": str(metadata.get("lesson_id")
+                         or record.artifact_id or record.run_id),
+        "precondition": str(metadata.get("precondition", "")),
+        "evidence_hash": str(metadata.get("evidence_hash")
+                             or metadata.get("evidence_card_hash") or ""),
+        "source_trace_ids": tuple(str(trace) for trace in traces),
+        "verifier": str(metadata.get("verifier", "")),
+        "expected_effect": dict(metadata.get("expected_effect") or {}),
+    }
 
 
 class ExperienceStore:
@@ -206,6 +259,9 @@ class ExperienceStore:
             raise TypeError("add() expects ExperienceRecord")
         with self._lock:
             if self.path is not None:
+                # Before makedirs and before the first byte: a link here would
+                # grow bytes outside the store (#1064).
+                _refuse_unappendable_leaf(self.path)
                 directory = os.path.dirname(self.path)
                 if directory:
                     os.makedirs(directory, exist_ok=True)
@@ -250,13 +306,16 @@ class ExperienceEngine:
 
     def __init__(self, learner: ContinualMetaLearner, store: ExperienceStore, *,
                  require_anchors: bool = True,
-                 anchor_tolerance: float = 0.0) -> None:
+                 anchor_tolerance: float = 0.0,
+                 telemetry: Optional[RSITelemetry] = None) -> None:
         if not isinstance(learner, ContinualMetaLearner):
             raise TypeError("learner must be a ContinualMetaLearner")
         if not isinstance(store, ExperienceStore):
             raise TypeError("store must be an ExperienceStore")
         if not isinstance(require_anchors, bool):
             raise TypeError("require_anchors must be a bool")
+        if telemetry is not None and not isinstance(telemetry, RSITelemetry):
+            raise TypeError("telemetry must be an RSITelemetry or None")
         tolerance = _finite(anchor_tolerance, "anchor_tolerance")
         if tolerance < 0:
             raise ValueError("anchor_tolerance must be >= 0")
@@ -264,7 +323,16 @@ class ExperienceEngine:
         self.store = store
         self.require_anchors = require_anchors
         self.anchor_tolerance = tolerance
+        self.telemetry = telemetry
         self.replay_from_store()
+
+    def _record_memory(self, operation: str, record: ExperienceRecord,
+                       **fields: Any) -> None:
+        if self.telemetry is None:
+            return
+        values = _lesson_fields(record)
+        values.update(fields)
+        self.telemetry.memory_operation(operation, **values)
 
     def replay_from_store(self) -> int:
         """Warm the learner replay from the store without re-writing rows."""
@@ -279,10 +347,14 @@ class ExperienceEngine:
             raise TypeError("ingest() expects ExperienceRecord")
         self.store.add(record)
         self.learner.observe(record.to_meta_example())
+        self._record_memory("write", record)
         return record
 
     def recall(self, features: Sequence[float], *, k: int = 5) -> Tuple[ExperienceHit, ...]:
-        return self.store.recall(features, k=k)
+        hits = self.store.recall(features, k=k)
+        for hit in hits:
+            self._record_memory("read", hit.record)
+        return hits
 
     def update(self, *, validation: Sequence[ExperienceRecord],
                anchors: Sequence[ExperienceRecord]) -> ExperienceUpdate:
@@ -316,18 +388,38 @@ class ExperienceEngine:
                 reason = (f"forgetting guard: anchor candidate "
                           f"{anchor_after:.6g} < before {anchor_before:.6g} - "
                           f"tolerance {self.anchor_tolerance:.6g}")
-        return ExperienceUpdate(
+        update = ExperienceUpdate(
             version=self.learner.version, accepted=accepted,
             before=meta.before, after=meta.after, drift=meta.drift,
             anchor_before=anchor_before, anchor_after=anchor_after,
             rolled_back=rolled_back, reason=reason)
+        if self.telemetry is not None:
+            fields = _lesson_fields(validation_rows[0])
+            traces = sorted({
+                trace for row in list(validation_rows) + list(anchor_rows)
+                for trace in _lesson_fields(row)["source_trace_ids"]})
+            if traces:
+                fields["source_trace_ids"] = tuple(traces)
+            if not fields["verifier"]:
+                fields["verifier"] = "continual-meta:anchor-guard"
+            fields["expected_effect"] = {"before": meta.before,
+                                         "after": meta.after}
+            fields["reason"] = update.reason
+            fields["rolled_back"] = update.rolled_back
+            self.telemetry.memory_operation("update", **fields)
+            if update.rolled_back:
+                self.telemetry.memory_operation("forget", **fields)
+        return update
 
     def act(self, features: Sequence[float], *, epsilon: float = 0.0) -> str:
         return self.learner.act(features, epsilon=epsilon)
 
     def report(self) -> ExperienceReport:
         learned = self.learner.report()
+        memory = (self.telemetry.summary().memory
+                  if self.telemetry is not None else None)
         return ExperienceReport(
             rows=len(self.store), learner=learned, skipped=self.store.skipped,
             detail=(f"{len(self.store)} experience row(s), "
-                    f"{self.store.skipped} skipped, {learned.detail}"))
+                    f"{self.store.skipped} skipped, {learned.detail}"),
+            memory=memory)

@@ -151,7 +151,7 @@ def test_plan_still_accepts_the_documented_spelling(tmp_path, capsys, monkeypatc
         "default_base_url": "https://ark.example/api/v3"})
     path = tmp_path / "spec.json"
     path.write_text(json.dumps(spec))
-    assert cli.main(["plan", str(path)]) == 0
+    assert cli.main(["plan", str(path), "--json"]) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["ok"] is True and not [w for w in out["warnings"] if "openai_compatible" in w]
 
@@ -184,7 +184,7 @@ def test_it_reaches_plan_output(tmp_path, monkeypatch, capsys):
     path = tmp_path / "spec.json"
     path.write_text(json.dumps(_spec_dict(tmp_path, reflect={
         "ref": OPENAI, "model": "m", "api_key_env": "ARK_API_KEY"})))
-    assert cli.main(["plan", str(path)]) == 0
+    assert cli.main(["plan", str(path), "--json"]) == 0
     warnings = json.loads(capsys.readouterr().out)["warnings"]
     assert any("api.openai.com" in w and "ARK_API_KEY" in w for w in warnings), warnings
 

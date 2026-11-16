@@ -39,12 +39,16 @@ docs = ["mkdocs-material[imaging]>=9.5"]   # [imaging] builds the social cards
 # following versions" and installs *nothing*, not even the CLI. With it, 3.9
 # gets the CLI and an `agentdescent mcp` that says why it cannot serve.
 mcp = ["mcp>=1.2; python_version >= '3.10'"]
+# The opt-in OTLP bridge (`agentdescent.otel_export`) imports the OpenTelemetry
+# SDK only when a host constructs `OtlpExporter`; without this extra the package
+# imports and runs unchanged, and the bridge reports the install line it needs.
+otel = ["opentelemetry-sdk>=1.24", "opentelemetry-exporter-otlp-proto-http>=1.24"]
 
 [project.scripts]
 agentdescent = "agentdescent.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/Birfy/agentdescent"
+Homepage = "https://github.com/ThinkFlowLab/agentdescent"
 
 [tool.setuptools.dynamic]
 # Single-sourced: agentdescent/__init__.py is the only place the version

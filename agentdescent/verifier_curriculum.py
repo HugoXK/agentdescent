@@ -26,6 +26,7 @@ import random
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+from .admission import AdmissionReport, admission_report
 from .advantage import _ForwardsInstall
 from .policies import AcceptDecision, MergeContext
 
@@ -33,6 +34,18 @@ __all__ = ["CoevolutionReport", "CoevolutionRound", "ProbeRow",
            "VerifierAgreement", "VerifierCurriculum"]
 
 Scorer = Callable[[Any, Any], float]
+
+
+def _mean_of(scores: Sequence[float]) -> float:
+    return sum(scores) / len(scores) if scores else 0.0
+
+
+def _overlap_share(base_v: Sequence[float], cand_v: Sequence[float],
+                   base_o: Sequence[float], cand_o: Sequence[float]) -> float:
+    """Share of prompts on which the verifier claims a gain the oracle denies."""
+    wrong = sum(1 for bv, cv, bo, co in zip(base_v, cand_v, base_o, cand_o)
+                if cv > bv and co <= bo)
+    return wrong / len(base_v) if base_v else 0.0
 
 
 @dataclass(frozen=True)
@@ -161,13 +174,23 @@ class VerifierAgreement(_ForwardsInstall):
     ``configure`` hook -- the wrapper can only make acceptance stricter. On an
     audit, an oracle regression is refused whatever the verifier says, and a
     verifier-only gain is refused with category ``oracle-disagrees``.
+
+    ``rejected_sample_rate`` audits the rejected stratum by the same seeded
+    rule (``:rejected`` suffix, off by default: it costs oracle calls).
+
+    The report also carries the cross-prompt error overlap of the accepted
+    stratum: the share of prompts on which the verifier claims a gain the oracle
+    denies for the same commit. Errors that recur that way are one systemic
+    failure, so they block an admit the mean gains would allow (#940).
     """
 
     def __init__(self, audit_tasks: Sequence[Any], verifier: Scorer, oracle: Scorer,
                  *, inner: Optional[Any] = None, sample_rate: float = 0.2,
-                 seed: int = 0) -> None:
+                 rejected_sample_rate: float = 0.0, seed: int = 0) -> None:
         if not 0.0 <= sample_rate <= 1.0:
             raise ValueError("sample_rate must be in [0, 1]")
+        if not 0.0 <= rejected_sample_rate <= 1.0:
+            raise ValueError("rejected_sample_rate must be in [0, 1]")
         from .defaults import DefaultAcceptance
 
         self.audit_tasks = tuple(audit_tasks)
@@ -175,38 +198,76 @@ class VerifierAgreement(_ForwardsInstall):
         self.oracle = oracle
         self.inner = inner if inner is not None else DefaultAcceptance()
         self.sample_rate = float(sample_rate)
+        self.rejected_sample_rate = float(rejected_sample_rate)
         self.seed = int(seed)
+        self._n_accepted = 0
+        self._n_rejected = 0
+        self._accepted_confirmed: List[float] = []
+        self._accepted_error_overlap: List[float] = []
+        self._rejected_good: List[float] = []
+
+    def _scores(self, scorer: Scorer, artifact: Any) -> Tuple[float, ...]:
+        return tuple(float(scorer(artifact, task)) for task in self.audit_tasks)
 
     def _mean(self, scorer: Scorer, artifact: Any) -> float:
-        if not self.audit_tasks:
-            return 0.0
-        return sum(float(scorer(artifact, task)) for task in self.audit_tasks
-                   ) / len(self.audit_tasks)
+        return _mean_of(self._scores(scorer, artifact))
+
+    def admission_report(self) -> AdmissionReport:
+        """The audited decisions of both strata as one admission report."""
+        return admission_report(
+            n_accepted=self._n_accepted, n_rejected=self._n_rejected,
+            rejected_sample_rate=self.rejected_sample_rate, seed=self.seed,
+            accepted_confirmed=self._accepted_confirmed,
+            rejected_good=self._rejected_good,
+            accepted_error_overlap=self._accepted_error_overlap,
+            prompts=len(self.audit_tasks))
 
     def accept(self, ctx: MergeContext) -> AcceptDecision:
         decision = (self.inner.accept(ctx) if hasattr(self.inner, "accept")
                     else self.inner(ctx))
         if not decision.accept:
+            self._n_rejected += 1
+            diff = getattr(ctx, "diff", None)  # same draw, other stratum
+            key = f"{self.seed}:{getattr(diff, 'diff_id', '')}:rejected"
+            if (self.audit_tasks
+                    and random.Random(key).random() <= self.rejected_sample_rate):
+                base_o = self._mean(self.oracle, ctx.artifact)
+                cand_o = self._mean(self.oracle, ctx.candidate)
+                self._rejected_good.append(1.0 if cand_o > base_o else 0.0)
             return decision
+        # Counted before any audit override: the stratum is the verifier's own
+        # decision, and a commit it accepted stays in the accepted stratum even
+        # when the audit then refuses it -- otherwise the audit would launder the
+        # verifier's false positives out of its own precision.
+        self._n_accepted += 1
         diff = getattr(ctx, "diff", None)
         key = f"{self.seed}:{getattr(diff, 'diff_id', '')}"
         if random.Random(key).random() > self.sample_rate or not self.audit_tasks:
             return decision
-        base_v = self._mean(self.verifier, ctx.artifact)
-        cand_v = self._mean(self.verifier, ctx.candidate)
-        base_o = self._mean(self.oracle, ctx.artifact)
-        cand_o = self._mean(self.oracle, ctx.candidate)
-        verifier_gain = cand_v - base_v
-        oracle_gain = cand_o - base_o
+        base_v = self._scores(self.verifier, ctx.artifact)
+        cand_v = self._scores(self.verifier, ctx.candidate)
+        base_o = self._scores(self.oracle, ctx.artifact)
+        cand_o = self._scores(self.oracle, ctx.candidate)
+        verifier_gain = _mean_of(cand_v) - _mean_of(base_v)
+        oracle_gain = _mean_of(cand_o) - _mean_of(base_o)
+        # Recorded before the audit's own override below: the stratum is the
+        # verifier's decision, and one entry per audited accept keeps this share
+        # aligned with ``_accepted_confirmed`` (#940).
+        self._accepted_error_overlap.append(
+            _overlap_share(base_v, cand_v, base_o, cand_o))
         if oracle_gain < 0.0:
+            self._accepted_confirmed.append(0.0)   # accepted, the oracle denies
             return AcceptDecision(
                 False, "oracle-regression",
-                f"oracle {base_o:.3f} -> {cand_o:.3f} on the audit set",
+                f"oracle {_mean_of(base_o):.3f} -> {_mean_of(cand_o):.3f} "
+                f"on the audit set",
                 observed_delta=0.0)
         if verifier_gain > 0.0 and oracle_gain <= 0.0:
+            self._accepted_confirmed.append(0.0)
             return AcceptDecision(
                 False, "oracle-disagrees",
-                f"verifier {base_v:.3f} -> {cand_v:.3f} but oracle "
-                f"{base_o:.3f} -> {cand_o:.3f}",
+                f"verifier {_mean_of(base_v):.3f} -> {_mean_of(cand_v):.3f} but oracle "
+                f"{_mean_of(base_o):.3f} -> {_mean_of(cand_o):.3f}",
                 observed_delta=0.0)
+        self._accepted_confirmed.append(1.0 if oracle_gain > 0.0 else 0.0)
         return decision

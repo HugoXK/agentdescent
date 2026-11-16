@@ -179,3 +179,14 @@ def test_decision_log_marks_named_algorithm_adoptions_accepted(tmp_path, monkeyp
                           repo_path=str(tmp_path / "repo"))
     assert log.records and log.records[0].accepted is True
     assert guarded.result.outcomes() == {"gepa-select": 2}
+
+
+def test_the_recorded_decision_carries_the_runs_own_policy_digest(tmp_path):
+    """The product path must not stamp the shipped default (#975 review)."""
+    spec = _dir_spec(str(tmp_path))
+    log = _Log()
+    guarded = run_guarded(spec, acceptance=_Allow(), decision_log=log,
+                          repo_path=str(tmp_path / "repo"))
+    digest = guarded.result.policy_digest
+    assert len(digest) == 64
+    assert log.records[0].policy_digest == digest

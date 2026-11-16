@@ -1,19 +1,19 @@
-# Start here — install the plugin and see it work
+# Start here — the plugin, step by step
 
 The rest of these docs assume you already have a dataset, a provider key and an
 agent CLI. This page assumes none of that. It is the shortest path from *"I
 just heard about this"* to *an evolution that actually ran on your machine*, and
 then to the plugin living inside your agent.
 
-Three commands, in order. Nothing here costs money and nothing needs an API key
-until step 3.
+Four steps, in order. Nothing here costs money and nothing needs an API key
+until step 4.
 
 ## 1. Install
 
-Install **0.8.0** from PyPI with its MCP extra:
+Install **0.10.0** from PyPI with its MCP extra:
 
 ```bash
-pip install "agentdescent[mcp]>=0.8.0"
+pip install "agentdescent[mcp]>=0.10.0"
 ```
 
 Or, from a source checkout:
@@ -73,7 +73,7 @@ workers, the merge and the held-out gate are the same code a real run uses, so
 what you watch is the actual loop:
 
 ```text
-plan: 12 tasks, 4 rounds x 2 workers, up to 64 agent calls
+plan: 12 tasks, 4 rounds x 2 workers, up to 68 agent calls
 
 running (20260905-134121-1c695b)...
   round  0  reward=1.000  +1/-0
@@ -92,7 +92,7 @@ so:
 ```bash
 agentdescent show  <run_id>              # the diff
 agentdescent apply <run_id> --dry-run    # what it would write
-agentdescent apply <run_id>              # write it, keeping a .bak- backup
+agentdescent apply <run_id>              # write it; dir backup under ~/.agentdescent/backups/
 ```
 
 When a run learns little, `show` also lists the worst rollouts (`samples`:
@@ -101,7 +101,19 @@ short diff, rationale, outcome), so "the agent answered wrongly" is
 distinguishable from "the reflector proposed nothing useful". Both are
 diagnostics on disk; `record_rollouts: false` keeps neither.
 
-Pass `--dir ./somewhere` to keep the demo's files around and poke at them.
+A bare `agentdescent demo` writes to a temporary directory and removes it at
+exit, whether the run succeeded or failed -- so its footer cannot offer `show`
+or `apply` for that run: the artifacts are gone, `show` would render every file
+as new, and `apply` would rebuild the directory that was just deleted. The
+footer says so and names the command that keeps them:
+
+```bash
+agentdescent demo --dir ./demo           # keeps the files and prints show/apply
+```
+
+Pass `--dir ./somewhere` to keep the demo's files around and poke at them;
+`--json` also keeps the directory it reports in `dir`, so a host can read it
+after the command returns.
 
 Pass `--algorithm archive_selection` to watch a named algorithm (from
 `agentdescent algorithms list`) run the same offline example end to end. Only
@@ -125,15 +137,21 @@ with its state and the command to run. Common aliases work too: `claude`,
 `~/.agentdescent/plugins/grok-bot/` (skill + `HOST.md` + example MCP JSON).
 There is no one-click host wire-up yet — read `HOST.md` for the current
 best path (save the skill in the Bot; drive runs with the CLI). To give the
-Bot the MCP tools, serve them over HTTP and expose them with a tunnel, then add
-the tunnel URL (ending in `/mcp`) as a custom MCP server:
+Bot the MCP tools, serve them over HTTP with a bearer token and expose them with
+a tunnel, then add the tunnel URL (ending in `/mcp`) as a custom MCP server
+whose request header is `Authorization: Bearer <token>`:
 
 ```bash
-agentdescent mcp --transport streamable-http --port 8000
+export AGENTDESCENT_MCP_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+agentdescent mcp --transport streamable-http --port 8000 --http-token-env AGENTDESCENT_MCP_TOKEN
 cloudflared tunnel --url http://127.0.0.1:8000 --http-host-header 127.0.0.1:8000
 ```
 
-The HTTP server has no authentication, so keep the URL private. See
+Every request without the header is answered 401 before an MCP session exists,
+so the tunnel URL on its own reaches no tool. The token lives in the named
+environment variable only — it is not a flag value, not in the URL, and never
+printed. If your connector cannot send a custom `Authorization` header, drive
+runs with the CLI on the Bot's computer instead. See
 [Use it from your agent](plugins.md).
 
 Then load it, and check it is actually there:
@@ -159,7 +177,7 @@ echo "Call the agentdescent doctor tool and print its run_store field." | \
 Skip `install` — Codex reads the same plugin package Claude Code does:
 
 ```bash
-codex plugin marketplace add Birfy/agentdescent
+codex plugin marketplace add ThinkFlowLab/agentdescent
 codex plugin add agentdescent@agentdescent
 codex mcp list        # agentdescent ... enabled
 ```
@@ -201,6 +219,9 @@ instead of the offline one.
 ```bash
 agentdescent init ./my-skill --data cases.jsonl --out spec.json
 agentdescent plan spec.json          # validates and prices it; runs nothing
+agentdescent plan spec.json --probe  # + one minimal call per model, so a dead
+                                     #   key/endpoint/model/subscription is
+                                     #   refused here, before any run exists
 agentdescent evolve spec.json --detach
 agentdescent status
 ```
@@ -222,13 +243,14 @@ values at `init` time instead, for example with only `ARK_API_KEY` set:
 
 ```bash
 agentdescent init ./my-skill --data cases.jsonl --out spec.json \
-  --model doubao-seed-code --base-url https://ark.cn-beijing.volces.com/api/coding/v3
+  --model deepseek-v4-flash --base-url https://ark.cn-beijing.volces.com/api/coding/v3
 ```
 
 ```json
-"reflect": {"ref": "openai_compatible", "model": "doubao-seed-code",
+"reflect": {"ref": "openai_compatible", "model": "deepseek-v4-flash",
             "api_key_env": "ARK_API_KEY",
-            "default_base_url": "https://ark.cn-beijing.volces.com/api/coding/v3"}
+            "default_base_url": "https://ark.cn-beijing.volces.com/api/coding/v3",
+            "stream": true}
 ```
 
 `--key-env NAME` picks the key variable when several are set; with
@@ -254,19 +276,27 @@ Two habits worth keeping from the first run:
 
 * `agentdescent plan` before `evolve`, every time. It is free, and the call
   count it prints is the upper bound you are agreeing to.
+* `--probe` when the run is remote and the answer has to be known now: it sends
+  one minimal call per model-backed agent and reflector, so an expired plan, a
+  wrong model name or a dead endpoint is refused before a run store entry is
+  written. If the probe fails, the last line is the repair action (not
+  `next: agentdescent evolve`); `then:` is `plan <spec> --probe` to re-test,
+  and `--json` sets `ready: false` while leaving `ok` about the plan itself.
+  CLI agents are reported as `probe: … skipped (cli agent)` because one
+  call would cost a whole session.
 * `--budget 5 --usd-per-call 0.02` on the first real run. A dollar budget
   needs a per-call price (the engine counts calls; a tool-using agent's price
-  is not known in advance). Together they stop at five dollars rather than
-  discovering the cost afterwards.
+  is not known in advance). The run stops **between rounds** once
+  `calls × price` crosses the line; one round (plus the seed scan) can still
+  overshoot by up to its call bound — `plan --budget … --usd-per-call …`
+  warns when that bound already exceeds the budget.
 
 ## Where to go next
 
 * [Use it from your agent](plugins.md) — the full plugin surface: every spec
   field, the MCP tools, where runs live, and evolving the plugins themselves.
 * [Set it up and test it](testing-guide.md) — one script that installs
-  AgentDescent and wires up every agent CLI you have, then the whole test
-  path in order.
-* [Testing the plugins](testing-the-plugins.md) — how to verify each host, and
-  what no test can confirm.
+  AgentDescent and wires up every agent CLI you have, how to verify each host,
+  and what no test can confirm.
 * [Quickstart — dataset to skill](quickstart-skill.md) — the same thing from
   Python, if you would rather write the twelve lines yourself.

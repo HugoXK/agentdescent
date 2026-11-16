@@ -150,7 +150,8 @@ def test_demo_algorithm_runs_each_offline_algorithm_end_to_end(tmp_path, monkeyp
     assert f"algorithm: {name}" in out, out
     assert "held-out reward: 0.000 -> 1.000" in out, out
     spec = json.loads((tmp_path / "work" / "spec.json").read_text())
-    assert spec["algorithm"] == name
+    alg = spec["algorithm"]
+    assert alg == name or (isinstance(alg, dict) and alg.get("name") == name)
 
 
 def test_demo_algorithm_accepts_an_alias(tmp_path, monkeypatch):
@@ -164,14 +165,40 @@ def test_demo_algorithm_accepts_an_alias(tmp_path, monkeypatch):
     assert "algorithm: archive_selection" in buf.getvalue()
 
 
-def test_demo_algorithm_refuses_one_that_needs_a_real_model(tmp_path, capsys):
+
+def test_demo_json_emits_a_parseable_result(tmp_path, monkeypatch):
+    # #862: --json was advertised but cmd_demo always printed human text.
+    monkeypatch.setenv("AGENTDESCENT_HOME", str(tmp_path / "home"))
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        code = cli.main(["--store", str(tmp_path / "runs"), "demo",
+                         "--dir", str(tmp_path / "work"),
+                         "--algorithm", "ace", "--json"])
+    out = buf.getvalue()
+    assert code == 0, out
+    payload = json.loads(out)
+    assert payload["ok"] is True
+    assert payload["kind"] == "text"
+    assert payload["algorithm"] == "ace"
+    assert payload["initial_reward"] == 0.0
+    assert payload["final_reward"] == 1.0
+    assert payload["outcomes"].get("committed", 0) >= 1
+    assert "COLUMN: amount" in payload["learned"]
+    assert payload["run_id"]
+    assert payload["plan"]["tasks"] == 12
+    assert payload["plan"]["agent_calls_upper_bound"] >= 1
+    assert any("show" in step for step in payload["next"])
+    # human narrative must not leak into the JSON document
+    assert "A text prompt that totals" not in out
+
+
+def test_demo_algorithm_unknown_name_leaves_no_work_dir(tmp_path, capsys):
+    # Unknown names still use the generic refusal and must not write the work dir.
     code = cli.main(["--store", str(tmp_path / "runs"), "demo",
-                     "--dir", str(tmp_path / "work"), "--algorithm", "evoskill"])
+                     "--dir", str(tmp_path / "work"), "--algorithm", "nope"])
     err = capsys.readouterr().err
     assert code == 2
-    assert "does not run against the offline demo" in err
-    assert "agentdescent algorithms run evoskill" in err
-    # refused before anything is built or run
+    assert "unknown algorithm 'nope'" in err
     assert not (tmp_path / "work").exists()
     assert not (tmp_path / "runs").exists() or not os.listdir(tmp_path / "runs")
 
@@ -182,3 +209,267 @@ def test_demo_algorithm_unknown_name_lists_the_real_ones(tmp_path, capsys):
     err = capsys.readouterr().err
     assert code == 2
     assert "unknown algorithm 'nope'" in err and "archive_selection" in err
+
+
+def test_offline_text_agent_uses_last_column_match():
+    # ACE/DGM keep the seed and append lessons; the last COLUMN wins (#845).
+    prompt = (
+        "COLUMN: id\n\n# Playbook\n## general\n- COLUMN: amount\n\n"
+        "What is the total?\n```csv\nid,amount\n1,10\n2,20\n```"
+    )
+    assert demo.offline_text_agent(prompt) == "30"
+    assert demo.offline_text_agent(
+        "COLUMN: id\n\nWhat is the total?\n```csv\nid,amount\n1,10\n2,20\n```"
+    ) == "3"
+
+
+def test_offline_text_reflector_returns_rule_or_skillopt_json():
+    assert demo.offline_text_reflector("propose a rule") == "COLUMN: amount"
+    out = demo.offline_text_reflector('Return ONLY a JSON object with "edits"')
+    payload = json.loads(out)
+    assert payload["edits"] == [{
+        "op": "replace", "target": "COLUMN: id", "content": "COLUMN: amount",
+    }]
+
+
+def test_build_text_fixture_for_text_only_cards(tmp_path):
+    spec = demo.build(str(tmp_path), algorithm="gepa")
+    assert spec["kind"] == "text" and spec["algorithm"] == "gepa"
+    assert (tmp_path / "prompt.txt").read_text().strip() == "COLUMN: id"
+    assert not (tmp_path / demo.DEMO_SKILL).exists()
+    rows = [json.loads(l) for l in (tmp_path / "cases.jsonl").read_text().splitlines()]
+    assert "```csv" in rows[0]["prompt"] and "fixtures" not in rows[0]
+
+
+def test_demo_algorithm_evoskill_runs_offline(tmp_path, monkeypatch):
+    # #934: evoskill is the skill-library native card; the offline stub speaks
+    # its proposer/generator protocol so a first look needs no key.
+    monkeypatch.setenv("AGENTDESCENT_HOME", str(tmp_path / "home"))
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        code = cli.main(["--store", str(tmp_path / "runs"), "demo",
+                         "--dir", str(tmp_path / "work"), "--algorithm", "evoskill"])
+    out = buf.getvalue()
+    assert code == 0, out
+    assert "held-out reward: 0.000 -> 1.000" in out, out
+    assert "evoskill-select" in out, out
+    assert "algorithm: evoskill" in out
+    assert "SKILL.md" in out and "COLUMN: amount" in out
+    spec = json.loads((tmp_path / "work" / "spec.json").read_text())
+    assert spec["kind"] == "skill_library"
+    assert spec["algorithm"]["name"] == "evoskill"
+    assert spec["algorithm"]["params"]["batch_size"] == 1
+    assert spec["reflect"]["ref"].endswith("offline_evoskill_reflector")
+
+
+def test_demo_algorithm_evoskill_json(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENTDESCENT_HOME", str(tmp_path / "home"))
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        code = cli.main(["--store", str(tmp_path / "runs"), "demo",
+                         "--dir", str(tmp_path / "work"),
+                         "--algorithm", "evoskill", "--json"])
+    out = buf.getvalue()
+    assert code == 0, out
+    payload = json.loads(out)
+    assert payload["ok"] is True
+    assert payload["kind"] == "skill_library"
+    assert payload["algorithm"] == "evoskill"
+    assert payload["initial_reward"] == 0.0
+    assert payload["final_reward"] == 1.0
+    assert payload["outcomes"].get("evoskill-select", 0) >= 1
+    assert "SKILL.md" in payload["learned"]
+    assert "COLUMN: amount" in payload["learned"]
+    assert payload["learned"].lstrip().startswith("column-amount/SKILL.md") or "/SKILL.md" in payload["learned"]
+    assert any("show" in step for step in payload["next"])
+    assert any(s.startswith("agentdescent algorithms run evoskill ") for s in payload["next"])
+    assert "A two-skill library" not in out
+
+
+def test_demo_kind_skill_library_with_evoskill(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENTDESCENT_HOME", str(tmp_path / "home"))
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        code = cli.main(["--store", str(tmp_path / "runs"), "demo",
+                         "--dir", str(tmp_path / "work"),
+                         "--kind", "skill_library", "--algorithm", "evoskill"])
+    out = buf.getvalue()
+    assert code == 0, out
+    assert "held-out reward: 0.000 -> 1.000" in out, out
+    spec = json.loads((tmp_path / "work" / "spec.json").read_text())
+    assert spec["kind"] == "skill_library"
+    assert spec["algorithm"]["name"] == "evoskill"
+
+
+def test_offline_evoskill_reflector_speaks_both_roles():
+    proposer = demo.offline_evoskill_reflector(
+        "You are the Skill Proposer.\nFailures:\n[0] Q: What is the total of "
+        "the requested column in data.csv?\n    agent: 3\n    gold: 42"
+    )
+    assert proposer.startswith("create column-amount")
+    year = demo.offline_evoskill_reflector(
+        "You are the Skill Proposer.\nFailures:\n[0] Q: What year is recorded "
+        "in date.txt?\n    agent: 11\n    gold: 2019"
+    )
+    assert year.startswith("create date-year")
+    body = demo.offline_evoskill_reflector(
+        "You are the Skill Generator.\n" + proposer
+    )
+    assert body.lstrip().startswith("---")
+    assert "name: column-amount" in body and "COLUMN: amount" in body
+
+
+def test_skip_reason_only_for_listed_skips():
+    assert demo.skip_reason("evoskill") is None
+    assert demo.skip_reason("gepa") is None
+    assert not demo.OFFLINE_SKIP
+    assert "evoskill" in demo.OFFLINE_ALGORITHMS
+    assert set(demo.OFFLINE_TEXT_ALGORITHMS).issubset(set(demo.OFFLINE_ALGORITHMS))
+
+
+def test_demo_labels_itself_smoke_and_points_at_library_example(tmp_path, monkeypatch):
+    """#878: default demo is a one-commit smoke; library path is the installed CLI."""
+    monkeypatch.setenv("AGENTDESCENT_HOME", str(tmp_path / "home"))
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        code = cli.main(["--store", str(tmp_path / "runs"), "demo",
+                         "--dir", str(tmp_path / "work")])
+    out = buf.getvalue()
+    assert code == 0, out
+    assert "smoke trajectory" in out
+    assert "demo --kind skill_library" in out
+    assert "skill_library_evolution" not in out
+
+
+def test_build_library_writes_two_valid_skills(tmp_path):
+    spec = demo.build(str(tmp_path), kind="skill_library")
+    assert spec["kind"] == "skill_library"
+    assert spec["target"] == str(tmp_path)
+    assert spec["agent"]["ref"].startswith("agentdescent.")
+    assert spec["reflect"]["ref"].startswith("agentdescent.")
+    assert (tmp_path / "csv-total" / "SKILL.md").exists()
+    assert (tmp_path / "date-parse" / "SKILL.md").exists()
+    assert (tmp_path / "csv-total" / "references" / "rules.md").read_text().strip() == "COLUMN: id"
+    assert (tmp_path / "date-parse" / "references" / "rules.md").read_text().strip() == "FIELD: month"
+    rows = [json.loads(l) for l in (tmp_path / "cases.jsonl").read_text().splitlines()]
+    assert len(rows) == 12
+    assert {r["kind"] for r in rows} == {"csv", "date"}
+
+
+def test_demo_kind_skill_library_runs_and_edits_a_skill_body(tmp_path, monkeypatch):
+    """#878: installed CLI evolves a ≥2-skill library and commits a SKILL.md edit."""
+    monkeypatch.setenv("AGENTDESCENT_HOME", str(tmp_path / "home"))
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        code = cli.main(["--store", str(tmp_path / "runs"), "demo",
+                         "--kind", "skill_library",
+                         "--dir", str(tmp_path / "work")])
+    out = buf.getvalue()
+    assert code == 0, out
+    assert "held-out reward: 0.000 -> 1.000" in out, out
+    assert "COLUMN: amount" in out and "FIELD: year" in out, out
+    assert "init <your-skill-library> --kind skill_library" in out
+    assert "python -m examples" not in out
+    rounds = [line for line in out.splitlines() if line.strip().startswith("round ")]
+    assert len(rounds) >= 2, out
+    runs = runstore.list_runs(store=str(tmp_path / "runs"))
+    assert len(runs) == 1 and runs[0].state == "done"
+    # disk stays at the seed; the body edit lives in the run result
+    assert "STATUS: draft" in (tmp_path / "work" / "csv-total" / "SKILL.md").read_text()
+    assert "csv-total/rules.md" in out and "date-parse/rules.md" in out
+    result = runstore.get(runs[0].run_id, store=str(tmp_path / "runs")).result()
+    assert result is not None
+    assert "STATUS: ready" in result.state["csv-total/SKILL.md"]
+    assert "COLUMN: amount" in result.state["csv-total/references/rules.md"]
+    assert "FIELD: year" in result.state["date-parse/references/rules.md"]
+
+
+def test_demo_kind_skill_library_json(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENTDESCENT_HOME", str(tmp_path / "home"))
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        code = cli.main(["--store", str(tmp_path / "runs"), "demo",
+                         "--kind", "skill_library", "--json",
+                         "--dir", str(tmp_path / "work")])
+    out = buf.getvalue()
+    assert code == 0, out
+    payload = json.loads(out)
+    assert payload["ok"] is True
+    assert payload["kind"] == "skill_library"
+    assert payload["initial_reward"] == 0.0
+    assert payload["final_reward"] == 1.0
+    assert payload["outcomes"].get("committed", 0) >= 1
+    assert "COLUMN: amount" in payload["learned"]
+    assert "FIELD: year" in payload["learned"]
+    assert any("skill_library" in step for step in payload["next"])
+    assert "A two-skill library" not in out
+
+
+def test_demo_kind_skill_library_with_archive_selection(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENTDESCENT_HOME", str(tmp_path / "home"))
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        code = cli.main(["--store", str(tmp_path / "runs"), "demo",
+                         "--kind", "skill_library",
+                         "--algorithm", "archive_selection",
+                         "--dir", str(tmp_path / "work")])
+    out = buf.getvalue()
+    assert code == 0, out
+    assert "algorithm: archive_selection" in out
+    assert "held-out reward: 0.000 -> 1.000" in out, out
+    spec = json.loads((tmp_path / "work" / "spec.json").read_text())
+    assert spec["kind"] == "skill_library" and spec["algorithm"] == "archive_selection"
+
+
+def test_demo_kind_skill_library_refuses_text_only_card(tmp_path, capsys):
+    code = cli.main(["--store", str(tmp_path / "runs"), "demo",
+                     "--kind", "skill_library", "--algorithm", "gepa",
+                     "--dir", str(tmp_path / "work")])
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "skill_library" in err and "gepa" in err
+    assert not (tmp_path / "work").exists()
+
+
+def test_docs_lead_with_installed_library_demo():
+    """#878: README / quickstart / usage name the wheel command first."""
+    files = [
+        os.path.join(ROOT, "README.md"),
+        os.path.join(ROOT, "docs", "quickstart-skill.md"),
+        os.path.join(ROOT, "docs", "usage.md"),
+    ]
+    for path in files:
+        text = open(path, encoding="utf-8").read()
+        assert "demo --kind skill_library" in text, path
+        for line in text.splitlines():
+            if "python -m examples.skill_library_evolution" in line:
+                lowered = line.lower()
+                assert "checkout" in lowered, f"{path}: {line!r} should say it needs a source checkout"
+
+
+@pytest.mark.parametrize("name", ["gepa", "archive_selection"])
+def test_demo_algorithm_next_steps_keep_the_algorithm(tmp_path, monkeypatch, name):
+    # #902: after `demo --algorithm NAME` the "your own run" steps must run
+    # NAME for real, not fall back to a generic init spec.
+    monkeypatch.setenv("AGENTDESCENT_HOME", str(tmp_path / "home"))
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        code = cli.main(["--store", str(tmp_path / "runs"), "demo",
+                         "--dir", str(tmp_path / "work"), "--algorithm", name])
+    out = buf.getvalue()
+    assert code == 0, out
+    assert f"agentdescent algorithms run {name} " in out, out
+    assert f"agentdescent evolve agentdescent.{name}.spec.json" in out
+    assert "agentdescent doctor" in out
+    assert "--out spec.json" not in out
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        code = cli.main(["--store", str(tmp_path / "runs2"), "demo",
+                         "--dir", str(tmp_path / "work2"), "--algorithm", name, "--json"])
+    payload = json.loads(buf.getvalue())
+    assert code == 0
+    assert any(s.startswith(f"agentdescent algorithms run {name} ") for s in payload["next"])
+    assert f"agentdescent evolve agentdescent.{name}.spec.json" in payload["next"]
+    target = "<your-skill-dir>" if payload["kind"] != "text" else "<your-prompt.txt>"
+    assert any(target in s for s in payload["next"])

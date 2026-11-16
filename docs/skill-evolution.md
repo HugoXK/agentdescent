@@ -1,8 +1,8 @@
-# Example: skill evolution (real API, all modules)
+# Example: instruction / playbook evolution (BBH, AppendRules)
 
 The one complete, end-to-end example — a real dataset, a real LLM, and every
-module wired together. It evolves a **skill playbook** (accumulated lessons) on a
-**BIG-Bench-Hard** task, and it uses:
+module wired together. It evolves an `AppendRules` **playbook** (not an Agent
+Skill folder — see `examples.skill_library_evolution` for a library). Uses:
 
 | Module | Used for |
 |---|---|
@@ -12,7 +12,7 @@ module wired together. It evolves a **skill playbook** (accumulated lessons) on 
 | governance | `blast_radius=0.2` → the L2 skill layer |
 
 Source:
-[`examples/skill_evolution.py`](https://github.com/Birfy/agentdescent/blob/main/examples/skill_evolution.py).
+[`examples/skill_evolution.py`](https://github.com/ThinkFlowLab/agentdescent/blob/main/examples/skill_evolution.py).
 
 ```python
 from agentdescent import claude

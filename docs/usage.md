@@ -17,7 +17,7 @@ your own domain into the loop.
     you the library only.
 
 
-### RQ1 — merge vs fork (synchronous DP)
+### Merge vs fork (synchronous DP)
 
 ```bash
 python -m examples.run_demo
@@ -45,7 +45,7 @@ python -m examples.run_async
 
 Compares the three staleness policies and sweeps the `async_ratio` lag budget.
 
-### RQ2 — staleness tolerance sweep
+### Staleness tolerance sweep
 
 ```bash
 python -m examples.rq2_staleness
@@ -54,7 +54,10 @@ python -m examples.rq2_staleness
 ### Evolving a directory (a skill folder a real agent reads)
 
 ```bash
-python -m examples.skill_dir_evolution
+agentdescent demo
+agentdescent demo --kind skill_library
+python -m examples.skill_dir_evolution             # source checkout only
+python -m examples.skill_library_evolution --dry-run  # source checkout only
 ```
 
 Materialises a candidate skill directory into a throwaway workspace at
@@ -65,16 +68,18 @@ offline in seconds; `--agent claude-code` swaps in the real CLI agent, and
 
 ### Self-evolution algorithm ports
 
-Nineteen ports of the latest self-evolution algorithms (see
-[the catalog](self-evolution-examples.md)). Twelve load a real benchmark through
-the [`agentdescent.dataloader`](dataloader.md) data layer; the other six run
-bundled deterministic domains. The eleven [`MethodPolicy`](policies.md) ports
-share a runner and are measured together in the
-[runtime matrix](matrix-overview.md) (`python -m bench.candidate_methods`).
+Twenty-three ports of published self-evolution algorithms; the
+[catalog](self-evolution-examples.md) lists them with their domains, flags and
+measured results. Ports on a real benchmark load it through the
+[`agentdescent.dataloader`](dataloader.md) data layer; the rest run bundled
+deterministic domains. The [`MethodPolicy`](policies.md) ports share a runner
+and are measured together in the [runtime matrix](matrix-overview.md)
+(`python -m bench.candidate_methods`).
 
 Every port's `--dry-run` prints its configuration and makes **no model call**.
-The eight return before touching data too; the eleven build their policy first,
-so a dry run of one on a real benchmark loads and caches the split.
+The eight benchmark-faithful ports return before touching data too; the
+MethodPolicy ports build their policy first, so a dry run of one on a real
+benchmark loads and caches the split.
 
 ```bash
 python -m examples.ace.ace_context_evolution --dry-run      # ACE   / FiNER-139
@@ -171,8 +176,8 @@ pool does, "8 workers only bought 2x" can be attributed rather than guessed at.
 
 ### The reference classes — `AgentDescent` / `AsyncAgentDescent`
 
-The entry points the RQ1/RQ2 and efficiency experiments were published against,
-on the built-in synthetic router domain. **They are adapters over the one
+The entry points the merge-vs-fork, staleness and efficiency experiments were
+measured with, on the built-in synthetic router domain. **They are adapters over the one
 engine now** — see [the note](architecture.md#4-the-two-runtimes) — kept so
 those measurements stay reproducible under their original names. Reach for
 them to reproduce the experiments, not to evolve your own artifact.
@@ -274,7 +279,7 @@ registration, not hard-coded.** To evolve something new, provide four things.
 ### 4.1 An `Evolvable`
 
 Implement the protocol from `agentdescent/evolvable.py`
-([reference: `RouterSkill`](https://github.com/Birfy/agentdescent/blob/main/agentdescent/domains/router.py)):
+([reference: `RouterSkill`](https://github.com/ThinkFlowLab/agentdescent/blob/main/agentdescent/domains/router.py)):
 
 ```python
 from agentdescent import Contract, Diff, EvidenceCard
@@ -341,10 +346,3 @@ with the `base_version` you read, the `touched` artifacts, and a local
 Once these four pieces exist, everything else — the Ledger, the aggregator, the
 schedulers, the governance layers, both runtimes, and all three parallel
 paradigms — works unchanged.
-
----
-
-## 5. Building the documentation site
-
-See [install](install.md#building-the-docs) — one canonical copy of the
-commands lives there.

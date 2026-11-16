@@ -18,6 +18,7 @@ from typing import Dict, List, Optional, Tuple
 from ..evolvable import Diff
 from ..evolution import rule_id
 from . import Algorithm, BuildContext, Overrides, Param, register
+from ._applied import append_tail, split_applied_block
 
 __all__ = ["ACEPlaybook", "GrowAndRefine", "jaccard"]
 
@@ -35,6 +36,55 @@ def jaccard(a: str, b: str) -> float:
     if not ta or not tb:
         return 0.0
     return len(ta & tb) / len(ta | tb)
+
+
+_EMPTY_MARKER = "(empty -- no lessons yet)"
+_CONT = "    "  # continuation indent for multi-line lessons
+
+
+_BULLET = re.compile(r"  - \[(r[0-9a-f]+)\] ?(.*)$")  # as _render_playbook writes
+
+
+def _is_playbook_item(line: str) -> bool:
+    return bool(_BULLET.match(line)) or line.strip() == _EMPTY_MARKER
+
+
+def _is_lesson_continuation(line: str) -> bool:
+    return line.startswith(_CONT)
+
+
+def _is_section(line: str) -> bool:
+    return line.startswith("## ")
+
+
+def _split_applied_playbook(seed: str, title: str) -> Tuple[str, Dict[str, str], str]:
+    """If ``seed`` is a prior ACE render, peel the trailing playbook into state.
+
+    Returns ``(prose, state, tail)``. A first-run target is returned unchanged
+    with an empty state. An applied artifact (prose + ``title`` + section
+    bullets) yields the prose, a state dict keyed by the rendered bullet ids so
+    a second evolve continues under a single header (#741), and any user text
+    after the playbook so a re-render keeps it (#743). Multi-line lessons are
+    rendered with an indented continuation and rejoined here.
+    """
+    block = split_applied_block(seed, title, _is_playbook_item,
+                                _is_lesson_continuation, _is_section)
+    if block is None:
+        return seed, {}, ""
+    entries: List[List[str]] = []  # [bid, section, text]
+    section = "general"
+    for line in block.lines:
+        if line.startswith("## "):
+            section = line[3:].strip() or "general"
+            continue
+        m = _BULLET.match(line)
+        if m:
+            entries.append([m.group(1), section, m.group(2).strip()])
+        elif line.startswith(_CONT) and entries:
+            entries[-1][2] += "\n" + line[len(_CONT):]
+    state = {bid: f"{sec} :: {text}" for bid, sec, text in entries if bid and text}
+    return block.prose, state, block.tail
+
 
 class ACEPlaybook:
     """ACE's context object: sectioned, itemised bullets, grown by delta only.
@@ -54,10 +104,14 @@ class ACEPlaybook:
                  seed: str = ""):
         self.title = title
         self.dedup_threshold = dedup_threshold
-        self.seed = seed
+        prose, state, tail = _split_applied_playbook(seed, title)
+        self._original = seed
+        self.seed = prose
+        self._initial_state = state
+        self._tail = tail
 
     def initial(self) -> Dict[str, str]:
-        return {}
+        return dict(self._initial_state)
 
     @staticmethod
     def _split(entry: str) -> Tuple[str, str]:
@@ -66,10 +120,11 @@ class ACEPlaybook:
 
     def _render_playbook(self, state: Dict[str, str]) -> str:
         if not state:
-            return f"{self.title}\n(empty -- no lessons yet)"
+            return f"{self.title}\n{_EMPTY_MARKER}"
         by_section: Dict[str, List[str]] = {}
         for bid in sorted(state):
             section, text = self._split(state[bid])
+            text = text.replace("\n", "\n" + _CONT)
             by_section.setdefault(section, []).append(f"  - [{bid}] {text}")
         out = [self.title]
         for section in sorted(by_section):
@@ -78,12 +133,16 @@ class ACEPlaybook:
         return "\n".join(out)
 
     def render(self, state: Dict[str, str]) -> str:
+        if state == self._initial_state and self._original:
+            return self._original  # unchanged run: byte-identical apply noop
         if not self.seed:
-            return self._render_playbook(state)
-        if not state:
-            return self.seed
-        body = self.seed.rstrip("\n") + "\n\n" + self._render_playbook(state)
-        return body if body.endswith("\n") else body + "\n"
+            body = self._render_playbook(state)
+        elif not state:
+            body = self.seed
+        else:
+            body = self.seed.rstrip("\n") + "\n\n" + self._render_playbook(state)
+            body = body if body.endswith("\n") else body + "\n"
+        return append_tail(body, self._tail)
 
     def to_diff(self, state, proposal, author, base_version, target) -> Optional[Diff]:
         m = re.match(r"\s*([\w\- /]+?)\s*::\s*(.+)", proposal, re.DOTALL)
@@ -146,17 +205,17 @@ class GrowAndRefine:
             observed_delta=cand - base)
 
 
-# ACE separates the Reflector from the Curator "to avoid conflating what to learn
-# with how to store it" (paper Section 3.2). The Curator is this framework's
-# deterministic aggregator, so here we only need the Reflector prompt.
-_GENERATOR_TMPL = (
+# Domain-locked FiNER/XBRL prompt drafts kept for the examples/ace research
+# port only — the Algorithm card does not install them (#842). Prefer the
+# engine's default propose template (or examples/ace) for XBRL runs.
+_FINER_GENERATOR_TMPL = (
     "You are an expert financial-analysis agent tagging figures in SEC filings "
     "with US-GAAP XBRL concepts.\n\n{artifact}\n\n"
     "Use the playbook above. Read the sentence and output ONLY the single XBRL "
     "tag for the amount wrapped in <<>>. Choose exactly one tag from the "
     "candidate list; output the tag name and nothing else.\n\n{prompt}"
 )
-_REFLECTOR_TMPL = (
+_FINER_REFLECTOR_TMPL = (
     "You are the ACE Reflector. The agent mis-tagged an XBRL amount (score "
     "{reward:.2f}).\n\nPlaybook so far:\n{artifact}\n\nTask:\n{prompt}\n\n"
     "The agent answered:\n{output}\n\n"
@@ -165,6 +224,9 @@ _REFLECTOR_TMPL = (
     "as `section :: lesson` where `section` is the XBRL concept family (e.g. "
     "`revenue`, `debt`, `shares`). Output only that one line, or NONE."
 )
+# Back-compat aliases for anything that still imported the old names.
+_GENERATOR_TMPL = _FINER_GENERATOR_TMPL
+_REFLECTOR_TMPL = _FINER_REFLECTOR_TMPL
 
 
 def _build(ctx: BuildContext, p: Dict[str, object]) -> Overrides:
@@ -175,18 +237,21 @@ def _build(ctx: BuildContext, p: Dict[str, object]) -> Overrides:
                                        dedup_threshold=float(p["dedup_threshold"]),
                                        seed=seed)},
         policies={"acceptance": GrowAndRefine()},
-        notes=["algorithm ace: grow-and-refine admits every structural delta "
-               "(no held-out gate per bullet) and de-duplicates near-identical "
-               "lessons in the same section; utility counters are upstream's job, "
-               "not this engine's. The target text is the seed prompt; an empty "
-               "playbook renders it verbatim so apply is a noop (#731)."])
+        notes=["algorithm ace: grow-and-refine admits every delta that clears "
+               "same-section Jaccard dedup (no held-out gate per bullet); "
+               "proposals without `section ::` land under ## general (#842). "
+               "Utility counters are upstream's job, not this engine's. The "
+               "target text is the seed prompt; an empty playbook renders it "
+               "verbatim so apply is a noop (#731). Re-opening an applied "
+               "artifact parses the trailing playbook back into state so a "
+               "second run does not duplicate the header (#741)."])
 
 
 register(Algorithm(
     name="ace",
-    summary="ACE's sectioned playbook: append content-addressed lessons, refuse "
-            "near-duplicates, and grow-and-refine instead of gating each bullet on "
-            "held-out reward.",
+    summary="ACE's grow-and-refine playbook: append content-addressed lessons "
+            "(optional section :: prefix; else ## general), refuse near-duplicates, "
+            "and admit without a per-bullet held-out gate.",
     kinds=("text",),
     fidelity="mechanism_microport",
     params=(
@@ -197,5 +262,5 @@ register(Algorithm(
     ),
     build=_build,
     source="ACE: Agentic Context Engineering (Zhang et al., 2025)",
-    extra_calls="none (one reflection call per failed rollout, as the default recipe)",
+    extra_calls="one reflection call per failed rollout (same as the default recipe)",
     doc="algo-ace.md"))

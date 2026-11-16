@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "held_out": "not reviewed",
+  "matched_budget": "not reviewed",
+  "cross_model": "not reviewed",
+  "cost": "measured for the campaign, not for this claim: reports/README.md records ~3,140 model calls over ~81 minutes for the Phase 0 audit runs behind reports/audit_phase0_2026-09-09.jsonl. The disagreement count below is recomputed from the committed file with no model call.",
+  "disjoint_search": "not reviewed",
+  "reliability": "The disagreement count is reproducible offline from the committed records and was re-checked at 3a5d5513bbfea71b75911add4fd0aa4854177e49: 177 resolved pairs, 31 disagreements, every one an over-credit (the judge higher than ground truth) and none an under-credit, delta +0.1751. The rest of the table (sigma 0.3812, floor 0.2203, the two hand-written rules at 0.4104 / 0.3243 / 0.3615 and false negatives 0% -> 22.4%) is quoted from the committed report and is NOT recomputed by any test; the module-level constants in tests/test_audit_gate.py:28-32 pin delta and sigma so the gate's arithmetic cannot drift away from the measurement, and tests/test_audit_diagnose.py:133 pins what a floor means, but a test that rebuilds the per-kind table from the records does not exist.",
+  "code": "claim: this verifier credits answers it should not -- 31 of 177 labelled pairs are over-credited and none are under-credited -- so its residual sigma of 0.3812 cannot go below a floor of 0.2203 by fixing errors; below the floor the definition of correct has to change. A rule that removes 74% of the bias (sigma 0.3812 -> 0.4104) also rejects 22.4% of correct answers, so it makes the verifier worse. The measurement is reports/verifier_diagnosis_f55dec40cec559f7.md over reports/audit_phase0_2026-09-09.jsonl, quoted in docs/audit.md:460-471 and in the docstrings of agentdescent/audit/propose.py:19-31. agentdescent/audit/diagnose.py owns floor_sigma and agentdescent/audit/gate.py turns the same delta and sigma into acceptance policy -- tests/test_audit_gate.py:121-137 shows a 20/32 -> 24/32 candidate committing today and being refused once the bias is spent as uncertainty.",
+  "evolved_artifact": "not reviewed",
+  "who_edits": "not reviewed",
+  "feedback": "not reviewed",
+  "timing": "not reviewed -- the committed records' dispatched_at/resolved_at measure the local resolve step (median 0.3 ms), not model latency.",
+  "topology": "not reviewed"
+}

@@ -27,6 +27,7 @@ from ..evolvable import Diff, EvidenceCard
 from ..ledger import CASConflict, Ledger
 from ..selection import Archive, Candidate, SelectionContext
 from . import Algorithm, BuildContext, Overrides, Param, register
+from ._applied import append_tail, split_applied_block
 
 __all__ = ["CAPABILITIES_HEADER", "DGMArchiveAggregator", "DGMContext",
            "HarnessStrategy", "dgm_aggregator_factory", "make_propose"]
@@ -37,7 +38,7 @@ Current capabilities: {capabilities}
 
 A task failed (reward {reward:.2f}):
 {prompt}
-The agent answered:
+{gold_block}The agent answered:
 {output}
 
 Propose ONE short, general capability that would help with this class of task.
@@ -53,6 +54,23 @@ def _caps_of(capabilities: str) -> set:
     return {c.strip() for c in capabilities.split(",") if c.strip()}
 
 
+def _split_applied_capabilities(seed: str) -> Tuple[str, str, str]:
+    """If ``seed`` is a prior DGM render, peel ``## Capabilities`` into state.
+
+    Returns ``(prose_seed, capabilities_csv, tail)``. A plain first-run target
+    is unchanged with an empty capabilities string. An applied artifact yields
+    the prose, the prior bullets so a second evolve keeps a single header
+    (#741), and any user text after the list so a re-render keeps it (#743).
+    """
+    block = split_applied_block(seed, CAPABILITIES_HEADER,
+                                lambda line: line.startswith("- "))
+    if block is None:
+        return seed, "", ""
+    caps = [ln.strip()[2:].strip() for ln in block.lines
+            if ln.startswith("- ")]
+    return block.prose, ",".join(sorted({c for c in caps if c})), block.tail
+
+
 class HarnessStrategy:
     """Prose seed plus an optional capability list; a proposal adds one capability.
 
@@ -61,24 +79,32 @@ class HarnessStrategy:
     bookkeeping; ``render`` keeps the seed verbatim and appends a
     ``## Capabilities`` bullet list when any have been admitted. An unchanged
     run therefore renders byte-identical to the seed so ``apply`` is a noop
-    (#731).
+    (#731). Re-opening an applied artifact parses that trailing list back into
+    state so a second run does not duplicate the header (#741).
     """
 
     def __init__(self, seed: str = "") -> None:
-        self.seed = seed
+        prose, caps, tail = _split_applied_capabilities(seed)
+        self._original = seed
+        self.seed = prose
+        self._initial_capabilities = caps
+        self._tail = tail
 
     def initial(self) -> Dict[str, str]:
-        return {"capabilities": ""}
+        return {"capabilities": self._initial_capabilities}
 
     def render(self, state: Dict[str, str]) -> str:
         caps = sorted(_caps_of(state.get("capabilities", "")))
+        if self._original and set(caps) == _caps_of(self._initial_capabilities):
+            return self._original  # unchanged run: byte-identical apply noop
         if not caps:
-            return self.seed
+            return append_tail(self.seed, self._tail)
         body = self.seed.rstrip("\n")
         if body:
             body += "\n\n"
         body += CAPABILITIES_HEADER + "\n" + "\n".join(f"- {c}" for c in caps)
-        return body if body.endswith("\n") else body + "\n"
+        body = body if body.endswith("\n") else body + "\n"
+        return append_tail(body, self._tail)
 
     def to_diff(self, state, proposal, author, base_version, target) -> Optional[Diff]:
         cap = ((proposal or "").strip().splitlines()[0]
@@ -119,9 +145,17 @@ def make_propose(complete: Completion, *, threshold: float = 0.8):
     def propose(rendered, task, output, reward):
         if reward >= threshold:
             return None
+        answers = task.meta.get("answers")
+        if answers:
+            gold = "\n".join(str(answer) for answer in answers)
+        else:
+            gold_value = task.meta.get("gold", "")
+            gold = "" if gold_value is None else str(gold_value)
+        gold_block = f"Expected answer(s):\n{gold}\n" if gold else ""
         return complete(_PROPOSE_TMPL.format(
             capabilities=rendered or "(none)",
-            reward=reward, prompt=task.prompt, output=output)).strip()
+            reward=reward, prompt=task.prompt, gold_block=gold_block,
+            output=output)).strip()
     return propose
 
 
@@ -167,6 +201,7 @@ class DGMArchiveAggregator(AggregatorProtocol):
         parent = self.ctx.archive[parent_idx]
         with self._lock:
             cards, self.cards = self.cards, []
+        admitted = 0
         for card in cards:
             child_caps = tuple(sorted(_caps_of(
                 card.diff.ops.get("capabilities", ""))))
@@ -181,7 +216,11 @@ class DGMArchiveAggregator(AggregatorProtocol):
                 continue
             self.ctx.archive.append(child)
             self.ctx.best_score = max(self.ctx.best_score, child.score)
-        parent.children += 1
+            admitted += 1
+        # Count only children that entered the archive (paper's 1/(1+children)),
+        # not skipped attempts (#844).
+        if admitted:
+            parent.children += admitted
 
         rows = [Candidate(artifact_id=self.aid, version=i,
                           score=a.score, selected=a.children)
@@ -252,9 +291,10 @@ def _build(ctx: BuildContext, p: Dict[str, object]) -> Overrides:
     seed = _read_text_target(str(ctx.spec.target))
     context = DGMContext(rng=random.Random(int(p["seed"])),
                           archive_mode=str(p["archive_mode"]))
+    strategy = HarnessStrategy(seed=seed)
     knobs: Dict[str, object] = {
-        "strategy": HarnessStrategy(seed=seed),
-        "initial_state": {"capabilities": ""},
+        "strategy": strategy,
+        "initial_state": strategy.initial(),
         "aggregator_factory": dgm_aggregator_factory(
             context, artifact_id=ctx.spec.artifact_id()),
     }
@@ -268,6 +308,8 @@ def _build(ctx: BuildContext, p: Dict[str, object]) -> Overrides:
                "candidate on the held-out set. The target text is the prose "
                "seed (never comma-split); admitted capabilities append under "
                "## Capabilities so an unchanged run is an apply noop (#731). "
+               "Re-opening an applied artifact parses that list back into state "
+               "so a second run does not duplicate the header (#741). "
                "The example's staged evaluator and Docker harness stay "
                "example-only."])
 

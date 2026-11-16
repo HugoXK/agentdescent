@@ -73,9 +73,25 @@ class ParetoAggregator(AggregatorProtocol):
     def __init__(self, ledger: Ledger, verifier, audit, config, policy,
                  artifact_id: str = "gepa_prompt", seed: int = 0,
                  eval_concurrency: int = 8, merge_round=None,
-                 selection: Optional["ParetoFrontier"] = None):
+                 selection: Optional["ParetoFrontier"] = None,
+                 acceptance=None, fusion=None, conflict=None,
+                 promotion=None, screen=None):
         self.ledger = ledger
         self.eval_concurrency = eval_concurrency
+        #: Optional ``AcceptancePolicy`` from ``Policies(acceptance=…)``. When
+        #: set, a survivor that cleared the delta gate still needs this policy's
+        #: yes before it enters the Pareto pool (#807).
+        self.acceptance = acceptance
+        # ``fusion=`` is the Policies name for the same seat as ``merge_round``.
+        if merge_round is None and fusion is not None:
+            merge_round = fusion
+        # conflict/promotion/screen are accepted on the signature so the factory
+        # can take them from evolve (#807 forward), but they are **not** stored:
+        # GEPA's loop does not consult them. Storing them used to make
+        # ``_apply_merge_policies`` report the seats as applied and bypass the
+        # orphan check (#839). Callers who pass them need
+        # ``accept_orphaned_merge_policies=True`` until GEPA honours them.
+        _ = (conflict, promotion, screen)
         #: Optional :class:`~agentdescent.policies.FusionPolicy`. When set, the
         #: round's surviving diffs are combined into **one** candidate before
         #: admission, so the pool grows by one per round instead of one per
@@ -108,6 +124,8 @@ class ParetoAggregator(AggregatorProtocol):
         self.states: List[Dict[str, str]] = []
         self.scores: List[List[float]] = []
         self._seen: Set[str] = set()
+        #: Pool index of the parent last made into the dev head (#844).
+        self._parent_index: int = 0
 
     # -- per-instance evaluation over D_pareto -------------------------------
 
@@ -266,6 +284,22 @@ class ParetoAggregator(AggregatorProtocol):
                 continue
             survivors.append(card.diff)
 
+        if self.acceptance is not None and survivors:
+            from agentdescent.policies import MergeContext
+            kept = []
+            n = max(1, len(self.verifier.held_out))
+            for diff in survivors:
+                cand = head.apply(diff)
+                base = head.score(self.verifier.held_out)
+                em = cand.score(self.verifier.held_out)
+                decision = self.acceptance.accept(MergeContext(
+                    artifact=head, candidate=cand, cards=list(cards),
+                    base_counts=(base * n, (1 - base) * n),
+                    cand_counts=(em * n, (1 - em) * n), diff=diff))
+                if decision.accept:
+                    kept.append(diff)
+            survivors = kept
+
         # **One candidate per round instead of one per worker.** Admission is what
         # this aggregator pays for: every candidate that enters the pool is scored
         # across the whole of D_pareto, so a round from N workers costs N sweeps.
@@ -297,8 +331,10 @@ class ParetoAggregator(AggregatorProtocol):
                           score=sum(row) / len(row) if row else 0.0,
                           per_task=dict(zip(task_ids, row)))
                 for i, (state, row) in enumerate(zip(self.states, self.scores))]
-        ctx = SelectionContext(head=rows[0], candidates=tuple(rows), n_workers=1)
+        head_i = min(max(0, self._parent_index), len(rows) - 1) if rows else 0
+        ctx = SelectionContext(head=rows[head_i], candidates=tuple(rows), n_workers=1)
         k = self.selection.select(ctx, 1)[0].version
+        self._parent_index = k
         target_state = self.states[k]
         report_diff = None
         committed_version = None
@@ -321,14 +357,28 @@ class ParetoAggregator(AggregatorProtocol):
 def pareto_aggregator_factory(artifact_id: str = "gepa_prompt", seed: int = 0,
                               eval_concurrency: int = 8, merge_round=None):
     """Build the `aggregator_factory=` callable evolve() expects, capturing the
-    live aggregator in `.last` so the example can read GEPA's best candidate."""
-    holder = {}
+    live aggregator in `.last` so the example can read GEPA's best candidate.
 
-    def factory(ledger, verifier, audit, config, policy):
-        agg = ParetoAggregator(ledger, verifier, audit, config, policy,
-                               artifact_id=artifact_id, seed=seed,
-                               eval_concurrency=eval_concurrency,
-                               merge_round=merge_round)
+    ``evolve`` forwards merge-side ``Policies`` into this factory (#807):
+    ``fusion`` fills ``merge_round`` when the capture left it empty, and
+    ``acceptance`` is stored and consulted on admit. ``conflict`` /
+    ``promotion`` / ``screen`` are accepted so the call does not TypeError,
+    but are not stored on the aggregator — #807's orphan check then fails
+    closed unless ``accept_orphaned_merge_policies=True`` (#839).
+    """
+    holder = {}
+    default_merge = merge_round
+
+    def factory(ledger, verifier, audit, config, policy,
+                acceptance=None, fusion=None, conflict=None,
+                promotion=None, screen=None, **_ignored):
+        agg = ParetoAggregator(
+            ledger, verifier, audit, config, policy,
+            artifact_id=artifact_id, seed=seed,
+            eval_concurrency=eval_concurrency,
+            merge_round=default_merge if default_merge is not None else fusion,
+            acceptance=acceptance, fusion=fusion, conflict=conflict,
+            promotion=promotion, screen=screen)
         holder["agg"] = agg
         return agg
 
@@ -336,13 +386,37 @@ def pareto_aggregator_factory(artifact_id: str = "gepa_prompt", seed: int = 0,
     return factory
 
 
+_GEPA_PROPOSE_TMPL = (
+    "The artifact just failed a task (score {reward:.2f} out of 1.0).\n\n"
+    "Current artifact:\n{artifact}\n\nTask input:\n{prompt}\n\n"
+    "It produced:\n{output}\n{expected}\n"
+    "Rewrite the COMPLETE artifact so it would handle this and similar cases. "
+    "Output the full improved artifact text only (not a single rule or a "
+    "diff), or NONE if no change would help."
+)
+
+
 def _build(ctx: BuildContext, p: Dict[str, object]) -> Overrides:
-    return Overrides(
-        knobs={"aggregator_factory": pareto_aggregator_factory(
+    from ..evolvespec import _read_text_target
+    from ..evolution import SingleSlot, reflector
+
+    seed = _read_text_target(str(ctx.spec.target))
+    knobs: Dict[str, object] = {
+        "aggregator_factory": pareto_aggregator_factory(
             artifact_id=ctx.spec.artifact_id(), seed=int(p["seed"]),
-            eval_concurrency=int(p["eval_concurrency"]))},
+            eval_concurrency=int(p["eval_concurrency"])),
+        # GEPA mutates whole prompts; keep SingleSlot + a full-rewrite propose
+        # so the default kind=text SeededAppendRules path does not apply (#837).
+        "strategy": SingleSlot(initial_value=seed),
+    }
+    if callable(ctx.reflect):
+        knobs["propose"] = reflector(ctx.reflect, template=_GEPA_PROPOSE_TMPL)
+    return Overrides(
+        knobs=knobs,
         notes=["algorithm gepa: the Pareto pool replaces the merge/acceptance path; "
                "the spec's agent/reflect still run the rollouts and mutations.",
+               "algorithm gepa: SingleSlot + full-rewrite propose (genetic prompt "
+               "mutation), not SeededAppendRules (#837).",
                "algorithm gepa: the pool is in memory and re-seeds from dev on a "
                "resumed ledger; the example's ReflectiveFusion merge is example-only."])
 

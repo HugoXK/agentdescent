@@ -28,9 +28,14 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from typing import (Any, Callable, Dict, List, Mapping, Optional, Protocol,
-                    Sequence, Tuple, runtime_checkable)
+                    Sequence, runtime_checkable)
 
 from .evolvable import ContractError
+from ._subprocess import decode_output
+# The host-session denylist is shared with the detached-run scrub in
+# ``surface_common``: it used to be two lists, and the shorter one let
+# OpenCode/OpenAI-Agents markers through (#1082).
+from .surface_common import SESSION_MARKERS, is_session_marker
 
 Completion = Callable[[str], str]
 
@@ -269,28 +274,6 @@ class WorkspaceAgent(Protocol):
     def in_workspace(self, path: str) -> Completion: ...
 
 
-#: Environment variables a host agent sets in its own session and its children
-#: inherit. A worker that sees them believes it is *inside* that session:
-#: Claude Code refuses to start, DSH loads the parent's profile, and a worker
-#: whose host runs this package's MCP server would call it recursively.
-SESSION_MARKERS: Tuple[str, ...] = (
-    "CLAUDECODE", "CLAUDE_CODE_", "CLAUDE_CONFIG_DIR", "CODEX_", "DSH_",
-    "OPENAI_AGENT_", "MCP_",
-    # OpenCode reads three of these, and redirecting only the directory is not
-    # isolation: `OPENCODE_CONFIG` (a file) and `OPENCODE_CONFIG_CONTENT`
-    # (inline JSON) both win over `OPENCODE_CONFIG_DIR` -- measured, a config
-    # named by `OPENCODE_CONFIG` still supplied its MCP servers with the dir
-    # pointed at an empty directory. They are dropped by name rather than by an
-    # "OPENCODE_" prefix on purpose: `OPENCODE_API_KEY` is a provider
-    # credential, and a worker needs its keys.
-    "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT",
-    # Dropped so the redirect below can take: `setdefault` cannot override a
-    # value the parent already exported, and this one usually is exported.
-    # It is broader than the others -- every XDG-respecting tool the worker
-    # runs sees the workspace copy -- which is the point of an isolated worker.
-    "XDG_CONFIG_HOME",
-)
-
 #: Set for every worker so a tool the worker reaches (this package's own MCP
 #: server, when the plugin that hosts it is being evolved) can tell it is inside
 #: a run and refuse to start another. See ``agentdescent.mcp``.
@@ -337,8 +320,7 @@ def worker_env(workspace: Optional[str], extra: Optional[Mapping[str, str]] = No
     the user's setup.
     """
     env = {k: v for k, v in os.environ.items()
-           if not (isolate and any(k == m.rstrip("_") or k.startswith(m)
-                                   for m in SESSION_MARKERS))}
+           if not (isolate and is_session_marker(k))}
     env[NESTED_MARKER] = "1"
     if workspace:
         # `cwd=` moves the process, not `$PWD`, and a runtime that resolves its
@@ -427,12 +409,18 @@ class _CliAgent:
             # caller's stdin: `opencode run "<prompt>"` waits on an inherited
             # pipe that never reaches EOF and burns the whole timeout. So stdin
             # is the prompt (`via_stdin`) or nothing at all, never the caller's.
-            stdin = {"input": prompt} if self.via_stdin else {"stdin": subprocess.DEVNULL}
+            stdin = {"input": prompt.encode("utf-8")} if self.via_stdin else {"stdin": subprocess.DEVNULL}
             proc = subprocess.run(
                 argv, **stdin,
-                capture_output=True, text=True, timeout=self.timeout,
+                capture_output=True, timeout=self.timeout,
                 cwd=self.workspace, env=env,
             )
+            proc.stdout = decode_output(proc.stdout)
+            proc.stderr = decode_output(proc.stderr)
+        except UnicodeError as e:
+            if self.usage is not None:
+                self.usage.record(seconds=time.time() - t0, failed=True)
+            raise AgentError(f"{self.command[0]} could not exchange UTF-8 text: {e}") from e
         except FileNotFoundError as e:
             raise AgentError(
                 f"{self.command[0]!r} is not installed or not on PATH") from e
@@ -565,10 +553,50 @@ class QuotaExhausted(ProviderConfigError):
     """
 
 
+class SubscriptionInactive(ProviderConfigError):
+    """The account has no active subscription or credit for this endpoint (#1006).
+
+    Ark Coding refuses an expired plan with HTTP 400 ``InvalidSubscription``
+    ("does not have a valid CodingPlan subscription, or your subscription has
+    expired"); OpenAI ``account_deactivated`` and Anthropic ``billing_error`` /
+    "credit balance is too low" are the same shape. They are not a throttled
+    quota and not a malformed request, so before this type they fell through
+    every 4xx hint as a bare ``RuntimeError``: ``with_retries`` spent three
+    attempts per call and ``diagnose`` sent the user to ``doctor``, which only
+    checks that the key is set. A subscription is renewed by a human, so this
+    fails on the first call and ``resume`` refuses it like a quota refusal.
+    """
+
+
 #: Body markers of a deterministic refusal, for gateways that answer it with a
 #: 400 rather than 401/403/404.
 _CONFIG_ERROR_MARKERS = ("unsupportedmodel", "model_not_found", "invalid_api_key",
                          "modelnotfound", "invalidapikey", "authenticationerror")
+
+
+#: Body markers of an account-level subscription/billing refusal on any 4xx.
+#: Ark Coding names the expired plan ``InvalidSubscription`` on a 400 -- neither
+#: a 401/403 nor a 429, so neither existing hint caught it (#1006).
+_SUBSCRIPTION_ERROR_MARKERS = (
+    "invalidsubscription",        # Volcengine Ark Coding: expired plan
+    "account_deactivated",        # OpenAI: the account is not active
+    "accountdeactivated",
+    "billing_error",              # Anthropic: no credit
+    "billingerror",
+    "credit balance is too low",  # Anthropic billing_error's message
+)
+
+
+def _subscription_inactive_hint(code: int, detail: str, *,
+                                api_key_env: str) -> Optional[str]:
+    """Hint for a 4xx refusing the account's subscription/credit, or ``None``."""
+    if not 400 <= code <= 499:
+        return None
+    lowered = detail.lower()
+    if not any(m in lowered for m in _SUBSCRIPTION_ERROR_MARKERS):
+        return None
+    return (f"the account has no active subscription for this endpoint: renew "
+            f"it at the provider, or point {api_key_env} / model at another plan")
 
 
 #: Body markers / substrings of a permanent quota or billing exhaustion on a
@@ -944,6 +972,11 @@ def openai_compatible(model: str, *, base_url_env: str = "OPENAI_BASE_URL",
                 except ValueError:
                     retry_after = None
                 raise RateLimited(message, retry_after) from e
+            subscription_hint = _subscription_inactive_hint(
+                e.code, detail, api_key_env=api_key_env)
+            if subscription_hint is not None:
+                raise SubscriptionInactive(
+                    f"{message} -- {subscription_hint}") from e
             hint = _provider_config_hint(e.code, detail, base=base, model=model,
                                          api_key_env=api_key_env,
                                          base_url_env=base_url_env)
@@ -1066,6 +1099,11 @@ def anthropic_compatible(model: str, *, base_url_env: str = "ANTHROPIC_BASE_URL"
                 except ValueError:
                     retry_after = None
                 raise RateLimited(message, retry_after) from e
+            subscription_hint = _subscription_inactive_hint(
+                e.code, detail, api_key_env=api_key_env)
+            if subscription_hint is not None:
+                raise SubscriptionInactive(
+                    f"{message} -- {subscription_hint}") from e
             hint = _provider_config_hint(e.code, detail, base=base, model=model,
                                          api_key_env=api_key_env,
                                          base_url_env=base_url_env)

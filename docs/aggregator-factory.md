@@ -24,7 +24,7 @@ ledger commit that rewrites the head.**
 | Aggregator | What it adds | Where |
 |---|---|---|
 | `Aggregator` | the shipped pipeline: dedupe, staleness, conflict, fusion, statistical acceptance, transactional commit, promotion | `agentdescent.aggregator` |
-| `PopulationAggregator(Aggregator)` | an archive of every distinct committed head (with held-out score) + any standard `SelectionPolicy` picking the next parent, committed back to dev; `finalize()` lands the archive's best | `agentdescent.population` — **not** something you install yourself: `Policies(selection=…)` installs it, on both drivers ([selection](selection.md)) |
+| `PopulationAggregator(Aggregator)` | an archive of every distinct committed head (held-out mean **and** per-task score vector) + any standard `SelectionPolicy` picking the next parent, committed back to dev; `finalize()` lands the archive's best. Per-task rows let `ParetoFrontier` ride the Policies path without a factory (#806) | `agentdescent.population` — **not** something you install yourself: `Policies(selection=…)` installs it, on both drivers ([selection](selection.md)) |
 | `ParetoAggregator` | GEPA's pool with per-instance score rows and Algorithm-2 frontier sampling | `examples/gepa/` |
 | `DGMArchiveAggregator` | DGM's keep-all archive with `sigmoid(perf) × 1/(1+children)` parent selection | `examples/dgm/` |
 | `MetaSearchAggregator` | ADAS's keep-all archive over agent designs (head rule: shipped `Beam(1)`) | `examples/adas/` |
@@ -32,19 +32,28 @@ ledger commit that rewrites the head.**
 | `StrictGateAggregator` | SkillOpt's strict gate (acceptance rule: `StrictImprovement`) + rejected-edit buffer + LR schedule | `examples/skillopt/` |
 | `PromptBreederPopulation` | PromptBreeder's binary tournament: two units re-scored on a train batch, the loser's slot reused | `examples/promptbreeder/` |
 
-## The one trap
+## Composing with merge Policies (#807)
 
-The factory path bypasses the default-aggregator construction, so `Policies`
-fields that the default path would wire (`conflict`, `fusion`, `acceptance`,
-`promotion`) **do not reach a factory-built aggregator through the bundle**.
-Pass them into your aggregator's constructor instead, and strip them from the
-bundle — carried in both places, one copy is silently ignored, which is the
-exact failure `require_supported` exists to prevent on the other path.
-`agentdescent.population.population_factory` shows the pattern.
+`evolve` forwards merge-side `Policies` (`conflict`, `fusion`, `acceptance`,
+`promotion`, `screen`) into the factory when its signature accepts them, and
+then applies any remaining slots onto attributes the returned aggregator
+exposes (`fusion` also maps to `merge_round` on GEPA/SkillOpt). A factory that
+still leaves requested slots unused **raises** unless
+`Policies(accept_orphaned_merge_policies=True)` — warn-and-drop was how callers
+lost governance gates.
+
+`agentdescent.population.population_factory` remains the template for a custom
+`Aggregator` subclass. Shipped mechanism factories (`gepa`, `skillopt`) accept
+the same kwargs.
 
 A declared `selection` policy and an `aggregator_factory=` are refused together
 rather than resolved: both fill the aggregator seat, and a caller who passed
 both has nothing to read that says which one ran.
 
 Prefer a policy field when one decision is enough; reach for the factory when
-your mechanism needs state the pipeline does not keep.
+your mechanism needs state the pipeline does not keep. The contributor map is
+the [algorithm decision tree](algorithm-decision-tree.md). Composing factory
+with merge Policies without a silent drop is **done**
+([#807](https://github.com/ThinkFlowLab/agentdescent/issues/807), see above);
+`plan` still warns when merge-side Policies would be unused on an older path
+(#805).

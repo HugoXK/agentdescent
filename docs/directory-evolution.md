@@ -156,6 +156,20 @@ run = tree_runner(claude_code(), layout="claude_skill", name="pdf-audit")
 | `agents_skill` | `.agents/skills/<name>/` (the Agent Skills standard; dsh and Codex both read it) |
 | `root` | the workspace itself |
 
+Path A: `agentdescent init DIR --kind skill_library` seeds ≥2 `*/SKILL.md`,
+and `kind: "skill_library"` in a spec composes `FileTree` + `tree_runner(layout="skill_library")`.
+See also [`examples.skill_library_evolution`](https://github.com/ThinkFlowLab/agentdescent/blob/main/examples/skill_library_evolution.py)
+and [EvoSkill](algo-evoskill.md).
+
+After a library run, install into the host skills root without pruning unrelated skills:
+
+```bash
+agentdescent apply <run_id> --install-to ~/.claude/skills --dry-run
+agentdescent apply <run_id> --install-to ~/.claude/skills
+```
+
+`--install-to` is an alias of `--to` with the same `write_to(..., backup=True, prune=False)` semantics (extras listed, not deleted).
+
 Any literal prefix works too. Per rollout the runner makes a fresh workspace,
 materialises the candidate, overlays the pristine frozen files, stages the task's
 fixtures (`task.meta["fixtures"]`, or a `fixtures=` callable), runs the agent
@@ -180,8 +194,10 @@ plan = result.write_to("~/.claude/skills/pdf-audit", dry_run=True)
 ```
 
 This is the only call in the package that writes into a directory you care about,
-so it is conservative: `backup=True` (default) copies the directory to
-`<path>.bak-N` first; files present in the target but not in the artifact are
+so it is conservative: `backup=True` (default) copies the directory under
+`$AGENTDESCENT_HOME/backups/<name>-<digest>/bak-N` (not a sibling `<path>.bak-N`,
+which host skill scanners would load as another skill and shadow the evolved
+copy — see #758); files present in the target but not in the artifact are
 reported as `extra` and **left alone** unless `prune=True`; `dry_run=True` returns
 the plan without touching anything. Only files whose content would change are
 `written`; files already identical to the artifact are `unchanged`, and when

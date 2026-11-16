@@ -4,8 +4,16 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from agentdescent import cli
 from agentdescent.mcp import TOOL_DESCRIPTIONS, Tools
+
+@pytest.fixture(autouse=True)
+def _write_allowlist(tmp_path, monkeypatch):
+    """The tool honours the operator's allowlist (#1018): allow the run dir."""
+    monkeypatch.setenv("AGENTDESCENT_SURFACE_WRITE_DIRS", str(tmp_path))
+
 
 _FLAGS = dict(model="deepseek-v4-flash",
               base_url="https://ark.cn-beijing.volces.com/api/coding/v3")

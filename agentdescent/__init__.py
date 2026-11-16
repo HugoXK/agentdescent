@@ -61,7 +61,15 @@ from .invariants import (
     check_invariants,
 )
 from .fusion import KeepContradictions, ReflectiveFusion, LearnableFusionPolicy, reflective_merge
-from .sampling import DifficultyWeighted, ReplaySampler, RoundRobin, TaskSampler
+from .sampling import (
+    DifficultyWeighted,
+    FailureStratifiedSampler,
+    ReplaySampler,
+    RoundRobin,
+    SamplingReport,
+    TaskSampler,
+    TaskSplit,
+)
 from .replay import ReplayAwareProposal
 from .selection import (
     Archive,
@@ -131,6 +139,15 @@ from .policies import (
     SandboxSpec,
     ScreenPolicy,
     VerifierProtocol,
+    policy_digest,
+)
+from .cost import (
+    Cost,
+    CostPolicy,
+    CostReport,
+    cost_efficiency,
+    cost_report,
+    cost_status,
 )
 from .evalcache import CacheProtocol, FileCache, MemoryCache
 from .trajectory import (
@@ -154,6 +171,13 @@ from .checkpoint import (
     list_checkpoints,
 )
 from .budget import BudgetGovernor, CallBudget, budgeted_completion
+from .evolve_settings import (
+    BudgetSettings,
+    EVOLVE_PARAM_ALLOWLIST,
+    EVOLVE_STABLE_SUBSET,
+    ObservabilitySettings,
+    RuntimeSettings,
+)
 from .consolidation import (
     ConsolidationRecord,
     ConsolidationStore,
@@ -376,9 +400,10 @@ from .promotion import (
     ProofEvidence,
     PromotionRequest,
     PromotionDecision,
+    ReviewCost,
     promote,
 )
-from .trust_evidence import TrustEvidence, build_trust_evidence
+from .trust_evidence import RunHealth, TrustEvidence, build_trust_evidence
 from .compute_policy import (
     ComputeAction,
     ComputeOption,
@@ -417,6 +442,17 @@ from .platform import PlatformConfig, PlatformReport, RSIPlatform
 from .risk_policy import RiskContext, RiskDecision, RiskPolicy, RiskRule
 from .manifest import (RunManifest, build_manifest, diff_manifest,
                        verify_manifest)
+from .replay_fidelity import (
+    REPLAY_ENV_ALLOWLIST,
+    EnvironmentFingerprint,
+    ReplayCheck,
+    ReplayFidelity,
+    ReplayNotEligible,
+    RngRecord,
+    content_digest,
+    replay_check,
+    rng_digest,
+)
 from .recursive import (
     RecursiveRound,
     RecursiveSelfImproveReport,
@@ -449,6 +485,7 @@ from .agents import (
     AgentError,
     ProviderConfigError,
     QuotaExhausted,
+    SubscriptionInactive,
     Completion,
     Usage,
     claude,
@@ -474,6 +511,7 @@ from .evolution import (
     Strategy,
     AppendRules,
     KeyedRules,
+    SeededAppendRules,
     SingleSlot,
     EvolutionResult,
     FusionStats,
@@ -507,7 +545,7 @@ from .parallel import (
     shard_round_robin,
 )
 
-__version__ = "0.8.0"
+__version__ = "0.10.0"
 
 __all__ = [
     "Contract",
@@ -534,8 +572,11 @@ __all__ = [
     "baselines",
     "dataloader",
     "DifficultyWeighted",
+    "FailureStratifiedSampler",
     "RoundRobin",
+    "SamplingReport",
     "TaskSampler",
+    "TaskSplit",
     "ReflectiveFusion",
     "KeepContradictions",
     "LearnableFusionPolicy",
@@ -632,6 +673,7 @@ __all__ = [
     "ReflectiveStaleness",
     "get_policy",
     "Policies",
+    "policy_digest",
     "AcceptancePolicy",
     "AcceptDecision",
     "ConflictPolicy",
@@ -692,6 +734,7 @@ __all__ = [
     "AgentError",
     "ProviderConfigError",
     "QuotaExhausted",
+    "SubscriptionInactive",
     "Usage",
     "metered",
     "claude",
@@ -708,6 +751,7 @@ __all__ = [
     "Strategy",
     "AppendRules",
     "KeyedRules",
+    "SeededAppendRules",
     "SingleSlot",
     "EvolutionResult",
     "RewardContractError",
@@ -902,9 +946,17 @@ __all__ = [
     "ProofEvidence",
     "PromotionRequest",
     "PromotionDecision",
+    "ReviewCost",
     "promote",
+    "Cost",
+    "CostPolicy",
+    "CostReport",
+    "cost_efficiency",
+    "cost_report",
+    "cost_status",
     "PromotionLedger",
     "ReleaseRecord",
+    "RunHealth",
     "TrustEvidence",
     "build_trust_evidence",
     "ComputeAction",
@@ -950,6 +1002,15 @@ __all__ = [
     "build_manifest",
     "diff_manifest",
     "verify_manifest",
+    "REPLAY_ENV_ALLOWLIST",
+    "EnvironmentFingerprint",
+    "ReplayCheck",
+    "ReplayFidelity",
+    "ReplayNotEligible",
+    "RngRecord",
+    "content_digest",
+    "replay_check",
+    "rng_digest",
     "RecursiveRound",
     "RecursiveSelfImproveReport",
     "recursive_self_improve",
@@ -1006,6 +1067,11 @@ __all__ = [
     "BudgetGovernor",
     "CallBudget",
     "budgeted_completion",
+    "BudgetSettings",
+    "RuntimeSettings",
+    "ObservabilitySettings",
+    "EVOLVE_PARAM_ALLOWLIST",
+    "EVOLVE_STABLE_SUBSET",
     # value-directed budget allocation
     "AllocatorContext",
     "AllocatorPolicy",

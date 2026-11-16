@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "held_out": "not reviewed",
+  "matched_budget": "not reviewed",
+  "cross_model": "not reviewed",
+  "cost": "measured for the campaign, not for this claim: reports/README.md records ~3,140 model calls over ~81 minutes for the Phase 0 audit runs that produced reports/audit_phase0_2026-09-09.jsonl. Re-running the claim's own check makes no model call, so the claim itself has no cost.",
+  "disjoint_search": "not reviewed",
+  "reliability": "Pinned by tests/test_audit_evolve_judge.py::test_always_no_ties_the_real_judge_on_the_pool_this_rung_trains_on, which reads the committed records rather than a fixture: of the 55 records whose purpose is improvement, a constant always-NO rubric scores 0.836 against ground truth and the real judge scores exactly the same, so the two are tied to within the 0.001 tolerance. A second test (::test_balancing_removes_the_tie) shows the class-balanced set puts the same constant at 0.500, which is why the rung trains on a balanced pool. Offline, no network, no model call; deterministic over the committed file.",
+  "code": "claim: on the improvement pool this audit rung trains on, the judge is not better than a constant rubric -- both score 0.836 against ground truth -- so a run that reports the judge's agreement as evidence is reporting a constant. The records are reports/audit_phase0_2026-09-09.jsonl (177 records, present at 3a5d5513bbfea71b75911add4fd0aa4854177e49); they are read through scripts/audit_workloads.py's resolved_records and read_verdict, the pool is selected by purpose == improvement in scripts/audit_evolve_judge.py, and the pinned assertions are tests/test_audit_evolve_judge.py:323-361. The number is quoted in scripts/audit_evolve_judge.py's docstring because the first draft of that docstring claimed the constant scored 0.62 and beat the judge; the measurement is what corrected it.",
+  "evolved_artifact": "not reviewed",
+  "who_edits": "not reviewed",
+  "feedback": "not reviewed",
+  "timing": "not reviewed -- the committed records carry dispatched_at/resolved_at, but they measure the local resolve step (median 0.3 ms), not model latency, so they are not evidence about time.",
+  "topology": "not reviewed"
+}

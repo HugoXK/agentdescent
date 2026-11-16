@@ -4,17 +4,19 @@ description: A runnable reproduction of Voyager's embodied skill library with a 
 
 # Voyager — Embodied skill-library agent
 
-> **Skill-library self-evolution.** Grow a library of executable skills from a
-> curriculum, repairing failed programs from environment feedback. Runs through
-> the shared [`MethodPolicy`](policies.md) runner with `self_verify` on (the
-> critic). Example:
-> [`examples/voyager/voyager_skill_library.py`](https://github.com/Birfy/agentdescent/blob/main/examples/voyager/voyager_skill_library.py).
+> **Keyed skill-bank self-evolution** (MethodPolicy microport). Grow a bank of
+> executable skill *strings* keyed by goal — not a disk `skills/*/SKILL.md`
+> library. Runs through the shared [`MethodPolicy`](policies.md) runner with
+> `self_verify` on (the critic). Example:
+> [`examples/voyager/voyager_skill_library.py`](https://github.com/ThinkFlowLab/agentdescent/blob/main/examples/voyager/voyager_skill_library.py).
+> For an Agent Skill library on disk, use
+> [`examples.skill_library_evolution`](https://github.com/ThinkFlowLab/agentdescent/blob/main/examples/skill_library_evolution.py).
 
 | | |
 |---|---|
 | **Paper** | *Voyager: An Open-Ended Embodied Agent with Large Language Models* — Wang et al., 2023 ([arXiv:2305.16291](https://arxiv.org/abs/2305.16291)) |
 | **Upstream code** | [MineDojo/Voyager@55e45a88](https://github.com/MineDojo/Voyager/tree/55e45a880755d0c8c66ca7fb5fe7962ac8974f89) |
-| **Example** | [`examples/voyager/voyager_skill_library.py`](https://github.com/Birfy/agentdescent/blob/main/examples/voyager/voyager_skill_library.py) |
+| **Example** | [`examples/voyager/voyager_skill_library.py`](https://github.com/ThinkFlowLab/agentdescent/blob/main/examples/voyager/voyager_skill_library.py) |
 | **Domain** | deterministic crafting world — 48 recipe goals, 16/16/16 splits |
 | **Layer** | L1 (`blast_radius=0.6`, set by the shared runner) |
 | **Fidelity** | `environment_analogue` — [what the classes mean](port-fidelity.md) |
@@ -36,7 +38,7 @@ from a gold program.
 
 | Upstream mechanism | Where it lives here |
 |---|---|
-| Add-only skill library | `SkillLibrary`: per-goal keys that accumulate and union-merge; the reusable placeholder skill evolves under the generic key |
+| Add-only keyed bank | `KeyedSkillBank`: per-goal **prompt strings** that accumulate and union-merge (not an on-disk Agent Skill library); the reusable placeholder evolves under the generic key. For a real `*/SKILL.md` library see [`skill_library_evolution`](https://github.com/ThinkFlowLab/agentdescent/blob/main/examples/skill_library_evolution.py) / [EvoSkill](algo-evoskill.md) |
 | Repair from environment errors | a deterministic crafting simulator reports the first failed step; that message is all the repair prompt sees |
 | The critic | the engine's `self_verify` rollout: every proposal re-runs and is judged by the environment reward |
 | Curriculum at the frontier | `DifficultyWeighted` sampling over the task pool |
@@ -54,7 +56,7 @@ reflective merge **off** and `self_verify` on (both this method's own
 declaration — the library overwrites a key, so a synthesised merge would not be
 the algorithm), `deepseek-v4-flash` at temperature 0.7. Recorded
 in
-[`bench/results/voyager-skill-library.json`](https://github.com/Birfy/agentdescent/blob/main/bench/results/voyager-skill-library.json).
+[`bench/results/voyager-skill-library.json`](https://github.com/ThinkFlowLab/agentdescent/blob/main/bench/results/voyager-skill-library.json).
 
 | seed | test quality | validation | accepted | calls |
 |---|---|---|---|---|

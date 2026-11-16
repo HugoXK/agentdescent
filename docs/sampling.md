@@ -4,7 +4,7 @@
     This is the `task_sampler` field of the [Policies bundle](policies.md); where a keyword argument exists it is a shortcut onto that field, and an explicit argument wins over a bundle default.
 
 
-*Module:* [`agentdescent.sampling`](https://github.com/Birfy/agentdescent/blob/main/agentdescent/sampling.py)
+*Module:* [`agentdescent.sampling`](https://github.com/ThinkFlowLab/agentdescent/blob/main/agentdescent/sampling.py)
 · *API:* [`TaskSampler`, `RoundRobin`, `DifficultyWeighted`](api.md#task-sampling)
 
 [Parallelism](parallelism.md) decides which *shard* a worker owns. The sampler
@@ -140,6 +140,41 @@ Without a wired aggregator the counts never increase, `ctx.rejected` is always
 empty, and the sampler behaves identically to `DifficultyWeighted(temperature=0)`.
 
 ## EvolvingArtifact`](api.md#task-sampling)
+
+## `FailureStratifiedSampler` — fix the pool before the run
+
+A search set dominated by one failure mode teaches the proposer that mode, and
+the gain then disappears on held-out tasks (the HDA finding). `FailureStratifiedSampler`
+groups tasks by a base failure signature — a task family, an error type, or any
+label you supply — splits every stratum into disjoint `search` / `select` /
+`final` sets, and rotates picks so each populated stratum is sampled before any
+gets a second pick.
+
+```python
+from agentdescent import FailureStratifiedSampler
+
+sampler = FailureStratifiedSampler(signature, tasks=list(tasks))
+split = sampler.split()          # fix the split once, before the run
+evolve(split.search, reward, agent=agent, task_sampler=sampler)
+```
+
+Pass **only** `split.search` as `tasks`. `pick()` never returns a `select` or
+`final` id, so a shard made of hidden ids has nothing the proposer may train on;
+that case raises a `ValueError` telling you to pass the search set.
+
+The hidden sets pay off when the caller scores them and reports back:
+
+```python
+for task_id in split.select:     # in your own gate, between rounds
+    sampler.record(task_id, reward(task, run(task)))
+for task_id in split.final:
+    sampler.record(task_id, reward(task, run(task)))
+print(sampler.report().transfer.status)   # improves / holds / degrades / no_data
+```
+
+`transfer.status` stays `no_data` until both hidden sets are scored. The
+comparison of the two means keeps a float floor (`1e-12`), so two means of
+identical scores report `holds` even at the default `transfer_tolerance=0.0`.
 
 ## Writing your own
 

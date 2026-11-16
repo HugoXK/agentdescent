@@ -58,8 +58,8 @@ def test_install_codex_writes_env_vars_once(tmp_path):
     assert any(l.startswith("kept ") for l in again), again
 
 
-@pytest.mark.parametrize("launcher", [None, ["/old/python", "-m", "agentdescent.cli"],
-                                      ["/old/python", "-P", "-m", "agentdescent.cli"]])
+@pytest.mark.parametrize("launcher", [None, [sys.executable, "-m", "agentdescent.cli"],
+                                      [sys.executable, "-P", "-m", "agentdescent.cli"]])
 def test_reinstall_repairs_the_legacy_block(tmp_path, monkeypatch, launcher):
     monkeypatch.setattr(sys, "executable", "/new/python")
     _cfg(tmp_path).parent.mkdir()
@@ -127,7 +127,7 @@ def test_plugin_mcp_manifest_forwards_the_same_variables(tmp_path):
 PROJECTS = '\n[projects."/home/u/proj"]\ntrust_level = "trusted"\n'
 
 
-@pytest.mark.parametrize("launcher", [None, ["/old/python", "-P", "-m", "agentdescent.cli"]])
+@pytest.mark.parametrize("launcher", [None, [sys.executable, "-P", "-m", "agentdescent.cli"]])
 def test_legacy_block_followed_by_a_codex_table_is_repaired_in_place(tmp_path, launcher):
     """Codex appends `[projects."..."]` once a folder is trusted -- the usual state
     of anyone who used the old install. The block is not last, but it is ours."""

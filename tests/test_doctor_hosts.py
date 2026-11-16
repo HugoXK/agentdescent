@@ -8,6 +8,9 @@ copied by an older package version, were both invisible.
 import io
 import json
 import os
+import re
+from pathlib import Path
+import sys
 from contextlib import redirect_stdout
 
 import pytest
@@ -375,3 +378,116 @@ def test_a_skill_beside_a_commented_config_without_our_entry_is_partial(home):
     (root / "opencode.jsonc").write_text(_COMMENTED)
     info = host_status("opencode", home=str(home))
     assert (info["state"], info["mcp"]) == ("partial", "missing")
+
+
+# -- #918: a deleted interpreter is mcp broken, not mcp ok -------------------
+
+MCP_HOSTS = [h for h in HOST_NAMES if h != "grok-bot"]
+
+
+def _pin_launcher(home, host, command):
+    """Rewrite the installed MCP launcher's first argument to ``command``."""
+    root = _root(home, host)
+    if host == "opencode":
+        for name in ("opencode.jsonc", "opencode.json"):
+            path = os.path.join(root, name)
+            if not os.path.isfile(path):
+                continue
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+            entry = (data.get("mcp") or {}).get("agentdescent")
+            if not isinstance(entry, dict) or "command" not in entry:
+                continue
+            if isinstance(entry["command"], list) and entry["command"]:
+                entry["command"][0] = command
+            else:
+                entry["command"] = command
+            Path(path).write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+            return
+        raise AssertionError("no opencode mcp entry to rewrite")
+    if host == "claude-code":
+        path = os.path.join(root, ".mcp.json")
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        data["mcpServers"]["agentdescent"]["command"] = command
+        Path(path).write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        return
+    if host == "codex":
+        path = os.path.join(root, "config.toml")
+        text = Path(path).read_text(encoding="utf-8")
+        updated, n = re.subn(
+            r"(?m)^(\s*command\s*=\s*).*$",
+            lambda m: m.group(1) + json.dumps(command, ensure_ascii=False),
+            text, count=1)
+        if n != 1:
+            raise AssertionError(f"codex command line not rewritten in {path}")
+        Path(path).write_text(updated, encoding="utf-8")
+        return
+    if host == "dsh":
+        path = os.path.join(root, "cordis.patch.yml")
+        text = Path(path).read_text(encoding="utf-8")
+        updated, n = re.subn(
+            r"(?m)^(\s*command:\s*).*$",
+            lambda m: m.group(1) + json.dumps(command, ensure_ascii=False),
+            text, count=1)
+        if n != 1:
+            raise AssertionError(f"dsh command line not rewritten in {path}")
+        Path(path).write_text(updated, encoding="utf-8")
+        return
+    raise AssertionError(f"no launcher to pin for {host}")
+
+
+@pytest.mark.parametrize("host", MCP_HOSTS)
+def test_a_deleted_interpreter_is_mcp_broken(home, host):
+    """Acceptance for #918: install, then point the launcher at a missing path."""
+    install(host, home=str(home))
+    info = host_status(host, home=str(home))
+    assert (info["state"], info["skill"], info["mcp"]) == ("ok", "ok", "ok"), info
+
+    dead = str(home / "gone" / "python3")
+    _pin_launcher(home, host, dead)
+    info = host_status(host, home=str(home))
+    assert info["mcp"] == "broken" and info["state"] == "partial", info
+    assert info["mcp_launcher"] == dead
+    assert info["skill"] == "ok"
+
+    # doctor_report may already have other problems (no provider key); the
+    # broken launcher must still be a problem and force exit 1.
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        code = cli.main(["doctor", "--home", str(home), "--json"])
+    report = json.loads(buf.getvalue())
+    host_info = report["hosts"][host]
+    assert host_info["mcp"] == "broken" and host_info["state"] == "partial"
+    assert host_info["mcp_launcher"] == dead
+    assert any(
+        f"{host}: the MCP launcher points at a deleted interpreter" in p
+        and f"run `agentdescent install {host}`" in p
+        for p in report["problems"]), report["problems"]
+    assert code == 1
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        cli.main(["doctor", "--home", str(home)])
+    out = buf.getvalue()
+    assert f"host {host}: partial (skill ok, mcp broken: {dead} not found;" in out
+    assert f"! {host}: the MCP launcher points at a deleted interpreter; " \
+           f"run `agentdescent install {host}`" in out
+
+
+@pytest.mark.parametrize("host", MCP_HOSTS)
+def test_a_live_interpreter_still_reads_mcp_ok(home, host):
+    install(host, home=str(home))
+    # Re-pin to this interpreter explicitly: install already did, but the
+    # rewrite path must not flag a path that exists and is executable.
+    _pin_launcher(home, host, sys.executable)
+    info = host_status(host, home=str(home))
+    assert (info["state"], info["mcp"]) == ("ok", "ok"), info
+    assert "mcp_launcher" not in info
+
+
+@pytest.mark.parametrize("host", MCP_HOSTS)
+def test_a_bare_python3_command_is_not_flagged(home, host):
+    install(host, home=str(home))
+    _pin_launcher(home, host, "python3")
+    info = host_status(host, home=str(home))
+    assert info["mcp"] == "ok" and info["state"] == "ok", info
+    assert "mcp_launcher" not in info

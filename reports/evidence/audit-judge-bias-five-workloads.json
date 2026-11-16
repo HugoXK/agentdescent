@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "held_out": "not reviewed -- Phase 0 measures a judge against oracle labels on drawn samples, not a held-out quality split.",
+  "matched_budget": "not reviewed",
+  "cross_model": "not reviewed -- one endpoint, deepseek-v4-flash through an Anthropic-compatible API.",
+  "cost": "About 3,140 model calls over about 81 minutes for the whole Phase 0 campaign (reports/README.md header).",
+  "disjoint_search": "not reviewed",
+  "reliability": "The mechanism is pinned offline: tests/test_audit_attach.py::test_a_run_recovers_the_bias_and_the_gate_commits_less runs a whole loop with a known bias and recovers delta_hat about +0.35 with residual sd about 0.38, driving acceptance 0.60 -> 0.37; tests/test_audit_evolve_judge.py::test_the_offline_judge_with_no_rubric_reproduces_the_phase0_draw reproduces the Phase 0 draw. The five per-workload percentages are live measurements and are not reproducible offline: they need the dataset join and a model, and the stores behind them are preserved only at commit c86e216, which a squash merge does not reach.",
+  "code": "claim: the judge's error rate tracks the judging task, not the solving task -- across the five Phase 0 workloads the judge-oracle disagreement rate was 0.0% on GSM8K, 3.7% on GSM-Hard, 17.5% on HotpotQA, 18.6% on MBPP and 32.7% on BBH, while GSM-Hard (79.6% solver) and MBPP (75.5%) sit at the same difficulty. On GSM-Hard the judge itself made no error in 54 units: both of the two disagreements were the oracle failing to parse a correct answer (`14053029 2/3` is exactly the reference; it read `3`). Published as the five-row table in reports/README.md, 'Does the verifier's bias exist and matter?', and quoted in docs/audit.md.",
+  "evolved_artifact": "not reviewed",
+  "who_edits": "not reviewed",
+  "feedback": "not reviewed",
+  "timing": "About 81 minutes of model time for the campaign; no per-call latency is reported.",
+  "topology": "not reviewed"
+}

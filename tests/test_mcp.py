@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from agentdescent import runstore
-from agentdescent.mcp import TOOL_DESCRIPTIONS, Tools, build_server
+from agentdescent.mcp import PATH_A_TOOLS, TOOL_DESCRIPTIONS, Tools, build_server
 from agentdescent.cli import NESTED_ENV
 
 from tests.test_evolvespec import _dir_spec  # noqa: F401
@@ -18,6 +18,7 @@ from tests.test_evolvespec import _dir_spec  # noqa: F401
 @pytest.fixture
 def store(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENTDESCENT_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("AGENTDESCENT_SURFACE_WRITE_DIRS", str(tmp_path))
     return str(tmp_path / "runs")
 
 
@@ -112,15 +113,18 @@ def test_resources_are_json(store, tmp_path):
     assert "error" in json.loads(t.rounds_resource("nope"))
 
 
-def test_standalone_mcp_guide_lists_every_registered_tool():
+def test_standalone_mcp_guide_lists_path_a_and_advanced_sets():
     guide = (
-        Path(__file__).resolve().parents[1] / "docs" / "testing-the-plugins.md"
+        Path(__file__).resolve().parents[1] / "docs" / "testing-guide.md"
     ).read_text()
-    expected = re.search(r"Expected tools: `([^`]+)`", guide)
-    assert expected is not None
-    documented = set(expected.group(1).split())
-    assert documented == set(TOOL_DESCRIPTIONS)
-    assert len(documented) == 36
+    path_a = re.search(r"Expected tools \(Path A default\): `([^`]+)`", guide)
+    assert path_a is not None
+    assert set(path_a.group(1).split()) == set(PATH_A_TOOLS)
+    assert len(PATH_A_TOOLS) == 13
+    full = re.search(r"full set is also registered: `([^`]+)`", guide)
+    assert full is not None
+    assert set(full.group(1).split()) == set(TOOL_DESCRIPTIONS)
+    assert len(TOOL_DESCRIPTIONS) == 40
 
 
 def test_every_tool_has_a_description_written_for_the_model():
@@ -131,20 +135,76 @@ def test_every_tool_has_a_description_written_for_the_model():
     assert "WITHOUT running" in TOOL_DESCRIPTIONS["plan"]
 
 
+def test_demo_is_on_path_a_and_runs_offline_without_provider_keys(store, monkeypatch):
+    """#903: hosts can smoke an algorithm with no provider key via MCP demo."""
+    for name in list(os.environ):
+        if name.endswith("_API_KEY") or name in ("OPENAI_BASE_URL", "OPENAI_API_BASE"):
+            monkeypatch.delenv(name, raising=False)
+    assert "demo" in PATH_A_TOOLS
+    out = Tools(store).demo(algorithm="gepa")
+    assert out["ok"] is True, out
+    assert out["algorithm"] == "gepa"
+    assert out["kind"] == "text"
+    assert out["initial_reward"] is not None
+    assert out["final_reward"] > out["initial_reward"]
+    assert out["run_id"]
+    assert "COLUMN: amount" in out["learned"]
+    assert any("show" in step for step in out["next"])
+
+
+def test_demo_refuses_unknown_cards_like_cli(store, capsys):
+    """#903: MCP demo errors match the CLI wording."""
+    from agentdescent import cli
+
+    t = Tools(store)
+    unknown = t.demo(algorithm="nope")
+    assert unknown.get("ok") is False
+    assert "unknown algorithm 'nope'" in unknown["error"]
+    assert "archive_selection" in unknown["error"]
+    code = cli.main(["--store", store, "demo", "--algorithm", "nope"])
+    err = capsys.readouterr().err
+    assert code == 2 and unknown["error"] in err
+
+
+def test_demo_evoskill_runs_offline_like_cli(store):
+    """#934: evoskill is no longer a real-model-only card on demo or MCP."""
+    t = Tools(store)
+    out = t.demo(algorithm="evoskill")
+    assert out.get("ok") is True, out
+    assert out["algorithm"] == "evoskill"
+    assert out["kind"] == "skill_library"
+    assert out["initial_reward"] == 0.0
+    assert out["final_reward"] == 1.0
+    assert out["outcomes"].get("evoskill-select", 0) >= 1
+    assert "SKILL.md" in out["learned"] and "COLUMN: amount" in out["learned"]
+    assert any(s.startswith("agentdescent algorithms run evoskill ") for s in out["next"])
+
+
+def test_demo_kind_errors_are_actionable(store):
+    t = Tools(store)
+    plugin = t.demo(kind="plugin")
+    assert plugin.get("ok") is False
+    assert "plugin" in plugin["error"] and "offline" in plugin["error"]
+    mismatch = t.demo(algorithm="gepa", kind="skill_dir")
+    assert mismatch.get("ok") is False
+    assert "gepa" in mismatch["error"] and "text" in mismatch["error"]
+
+
 # ---------------------------------------------------------------------------
 # with the SDK
 # ---------------------------------------------------------------------------
 
 
-def test_server_registers_every_tool_and_both_resources(store):
+def test_server_registers_path_a_by_default_and_both_resources(store):
     pytest.importorskip("mcp")
     import asyncio
 
-    server = build_server(store)
+    server = build_server(store, advanced=False)
 
     async def go():
         tools = {t.name for t in await server.list_tools()}
-        assert tools == set(TOOL_DESCRIPTIONS)
+        assert tools == set(PATH_A_TOOLS)
+        assert "audit_status" not in tools
         uris = {str(r.uri) for r in await server.list_resources()}
         assert "agentdescent://runs" in uris
         templates = await server.list_resource_templates()
@@ -155,6 +215,34 @@ def test_server_registers_every_tool_and_both_resources(store):
 
     res = asyncio.run(go())
     assert res is not None
+
+
+def test_server_registers_every_tool_when_advanced(store):
+    pytest.importorskip("mcp")
+    import asyncio
+
+    server = build_server(store, advanced=True)
+
+    async def go():
+        tools = {t.name for t in await server.list_tools()}
+        assert tools == set(TOOL_DESCRIPTIONS)
+        assert "audit_status" in tools and "plan" in tools
+
+    asyncio.run(go())
+
+
+def test_advanced_env_opts_into_full_tool_set(store, monkeypatch):
+    pytest.importorskip("mcp")
+    import asyncio
+    from agentdescent.mcp import ADVANCED_ENV
+
+    monkeypatch.setenv(ADVANCED_ENV, "1")
+    server = build_server(store)  # advanced=None → env
+
+    async def go():
+        return {t.name for t in await server.list_tools()}
+
+    assert asyncio.run(go()) == set(TOOL_DESCRIPTIONS)
 
 
 def test_status_with_no_runs_still_says_something(store):

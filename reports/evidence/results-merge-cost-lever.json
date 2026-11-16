@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "held_out": "20-task HotpotQA test split and no gate sees it; the 8-item D_pareto set is what GEPA's own frontier selects on.",
+  "matched_budget": "16 rollouts pinned on every arm (--budget-rollouts 16 --rounds 9999), so the arms differ only in width and scheduling.",
+  "cross_model": "not reviewed -- one model, GLM-5.2.",
+  "cost": "calls: serial 97, sync 70 (-28%), async 95. Wall-clock net of failed calls: serial 1425 s (1424.8 s before rounding), sync 1022 s, async 742 s. One seed.",
+  "disjoint_search": "not reviewed",
+  "reliability": "Recomputed offline by tests/test_evidence_card_reports.py from bench/results/matrix-gepa-b16-w8-seed0-clean.json through bench/matrix_report.py's renderer, whose table carries 1425 s, 1.39× and 1.92× for these cells. The net figure is the file's own arithmetic -- wall_seconds minus failure_seconds, so the serial cell's raw 2148.4 s loses the 723.6 s spent inside two calls that timed out at 600 s. One seed, so the test-EM column (0.75 / 0.60 / 0.65) is one to three tasks on a 20-task split and this card makes no quality claim from it.",
+  "code": "claim: merging is a cost lever where admissions are the cost -- at a pinned 16-rollout budget the 8-wide sync arm spends 70 calls against serial's 97 (-28%) and finishes 1.39× faster (1424.8 s -> 1021.6 s), while the async arm reaches 1.92× at 95 calls; wall-clock and call count pull in opposite directions across the two parallel arms. Published in docs/results.md, 'Merging as a cost lever: serial vs 8-wide, sync and async -- GEPA/HotpotQA' (lines 304-388); cells in bench/results/matrix-gepa-b16-w8-seed0-clean.json.",
+  "evolved_artifact": "not reviewed",
+  "who_edits": "not reviewed",
+  "feedback": "not reviewed",
+  "timing": "1425 s serial net of 723.6 s lost in failed calls, 1022 s sync, 742 s async; seed 0 only.",
+  "topology": "not reviewed"
+}

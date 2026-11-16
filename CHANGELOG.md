@@ -6,6 +6,1110 @@ All notable changes to AgentDescent are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-11-13
+
+### Added
+
+- `agentdescent github publish|status`: publish one accepted candidate as a
+  proposal branch, commit, pull request and optional check run, and read a PR's
+  state and checks back. Publishing is a plan by default (`--apply` writes), the
+  token comes only from an environment variable, the base branch is never written,
+  and an existing proposal PR is updated rather than duplicated. The PR body
+  carries the run/artifact ids and evidence hash; there is no auto-approval,
+  auto-merge or branch-protection change.
+
+- `agentdescent github review`: read a PR's reviews, inline comments and check
+  runs into one packet, extract classified review constraints (test, security,
+  api, docs, style, behavior), and report merge readiness with blockers. It is
+  read-only, never approves or merges, and requires an explicit `requires_human_click`
+  step; `CHANGES_REQUESTED` and its inline comments are blocking, plain notes are
+  not turned into tasks, resolved ids can be supplied because REST does not
+  expose thread resolution, and only a reviewer's decisive review counts (a later plain
+  comment never lifts a block), so a change request that reviewer later
+  approved or had dismissed no longer blocks.
+
+- `agentdescent skills report|audit|search`: a durable skill bank with an outcome
+  ledger (`uses`/`successes`/`failures`), a bank-relative lift audit that
+  quarantines underperforming skills (read-only unless `--apply`), active-only
+  retrieval through the artifact graph, and explicit retire/activate lifecycle
+  states. The store is an atomically written JSON snapshot; no model or network
+  call is made.
+
+- `agentdescent hgm next|report`: HGM's missing evaluation policy and
+  expand-vs-evaluate scheduler over a JSON tree. The planner applies the
+  `n_task_evals ** alpha` budget split, Thompson sampling on clade evidence for
+  expansion, own evidence for evaluation, optional cool-down, and unsubmitted-task
+  selection; it stops at the budget or when every task is spent. Utility measures
+  are validated as `[0, 1]`; no model or network call is made.
+
+- `agentdescent harness manifest|check` and `HarnessManifest`: a file-level
+  component contract for harness evolution. Components name path globs, an RRSI/SHE
+  responsibility, editable/frozen state and per-component file/line budgets; the
+  manifest also has global budgets, allowed/forbidden paths and a `FileTree` kwargs
+  projection. `check` fails closed on frozen, forbidden, unowned or over-budget
+  edits; no model or network call is made.
+
+- `agentdescent compile-skill` and `compile_skill`: turn a skill document into a
+  single tested function through a caller-supplied `text -> source` compiler,
+  behind the framework AST gate, with repeatable tests and optional
+  reference/case equivalence. Any gate, test or equivalence failure returns
+  `status: "text"` with a reason and leaves the skill document as the fallback; no
+  model or network call is made by the module.
+
+- Documented the contributor decision tree for Algorithm card vs MethodPolicy vs full `examples/` port vs `aggregator_factory` (`docs/algorithm-decision-tree.md`), cross-linked from authoring / port-fidelity / aggregator-factory. `plan` now warns when acceptance/promotion (as well as conflict/fusion) are installed on a factory path and will be ignored — engine composition without silent drop remains #807.
+
+- `kind=skill_library` is a first-class EvolveSpec / CLI / MCP kind: `FileTree` +
+  `tree_runner(layout="skill_library")`, `init --kind skill_library` seeds ≥2
+  `*/SKILL.md`, and `plan` echoes the resolved layout. See
+  `examples.skill_library_evolution` (#820).
+
+- `agentdescent apply --install-to PATH` (and MCP `install_to`) installs an evolved
+  `skill_library` into a host skills root such as `~/.claude/skills` with the same
+  `write_to` backup semantics and without pruning unrelated host skills (#823).
+
+- `agentdescent demo --algorithm` runs offline for gepa, dgm, ace, skillopt and
+  rrsi on a text fixture (archive_selection stays on the skill_dir demo);
+  evoskill is refused with an explicit reason (#845).
+
+- `agentdescent demo --kind skill_library` runs the offline multi-file
+  `*/SKILL.md` library demo from an install (no source checkout, no key).
+  The default `demo` smoke note and README / quickstart-skill / usage now
+  point at that command; `python -m examples.skill_library_evolution` stays
+  as the source-checkout CLI (`--dry-run`, `--agent`, `--install-to`) (#878).
+
+- `status`, `watch`, `show`, `apply`, `cancel`, `resume` and `diagnose` accept
+  `latest` (or `last`) in place of a run id and use the newest run in the store,
+  so `agentdescent show latest` works straight after a demo; an empty store
+  says so instead of `no run 'latest'` (#892).
+
+- MCP Path A now has a `demo` tool (`algorithm`, optional `kind`) that returns
+  the same payload as `agentdescent demo --json`, so a host can run the zero-key
+  smoke without a provider key. The shared skill tells hosts to try `demo` (or
+  `agentdescent demo --json`) before doctor → plan → start (#903).
+
+- The read-only run store streams a run's status and new rounds over Server-Sent
+  Events at `GET /api/runs/<id>/events`, with `Last-Event-ID` resume, so a host
+  panel or platform can follow a run without polling (#922).
+
+- `agentdescent demo --algorithm evoskill` (and `demo --kind skill_library --algorithm evoskill`) now runs the evoskill card offline, with no API key: the demo reflector speaks the Proposer/Generator protocol and induces a `*/SKILL.md` with frontmatter, held-out reward rises, and outcomes include `evoskill-select`. Documentation no longer says evoskill is refused in the offline demo (#934).
+
+- `RunManifest.replay_eligible` / `replay_notes` and an optional `replay` record
+  (`agentdescent.replay_fidelity.ReplayFidelity`) that captures what a replay needs
+  and the manifest's input hashes do not cover: RNG seed/state digests at
+  interaction boundaries, an environment fingerprint (cwd, interpreter, tool
+  versions, and the **names** of the allowlisted environment variables present --
+  `PYTHONHASHSEED`,
+  `PYTHONPATH`, `LANG`, `LC_ALL`, `TZ`, `OMP_NUM_THREADS`), and hidden-state
+  digests. No value material is stored (not even hashed), a caller cannot widen the
+  allowlist, and a credential-shaped name is refused even when allowlisted. `Trajectory` carries the same record (with `replay_eligible` /
+  `replay_notes` properties), `ReplayLab(manifest=...)` refuses a counterfactual
+  with `ReplayNotEligible` naming what was not reconstructed, and `replay_check()`
+  refuses to compare two runs when either side was not captured (#939).
+
+- A run, a commit and a decision can now name the decision procedure that produced
+  them, as a content hash over the `Policies` bundle, the decision-relevant
+  `AggregatorConfig` fields and the verifier's knobs:
+  `policy_digest` on `DecisionRecord`, `MergeContext`, `RunManifest` (`build_manifest`)
+  and `EvolutionResult`, plus a `policy-digest:` trailer on the ledger's commit
+  message. A decision taken under a different policy than the previous one for the
+  same artifact links to it (`parent_id` + `evidence["policy_change"]`), and
+  `agentdescent.policies.policy_digest()` computes the version for a hand-built
+  bundle, and `StableDistanceAcceptance` / `AdaptiveTrustRegion` now expose their
+  own knobs to it. A decision record that does not state a policy keeps
+  `policy_digest` empty rather than claiming the shipped default, and
+  `run_guarded()` records the digest its result carried. Additive: empty by
+  default, unchanged commit messages and unchanged `manifest_id` (#943).
+
+- A promotion decision now sees what reviewing the change costs a human: the new
+  `ReviewCost` records the diff's files, lines, blast radius, coarse risk tier and
+  evidence count and estimates review minutes from documented constants, and
+  `PromotionRules` gains the opt-in `max_review_cost` / `max_review_minutes` limits
+  (both default off, so with them unset the decision and its hashes are unchanged)
+  that defer a disproportionate change and recommend batching it. The decision's
+  evidence reports `attention_per_accepted_gain` when a cost and a positive eval
+  delta are present (#950).
+
+### Changed
+
+- Hard **cards vs ports** contract: Path A names wheel Algorithm cards only;
+  `examples/` research ports stay source-only CLI modules (same slug ≠ same
+  fidelity). Decision tree, README, plugins, SKILL.md, and port-fidelity updated;
+  future MethodPolicy card candidates listed as scoped follow-ons (#384).
+
+- `algorithms list` / `show`, MCP `list_algorithms` / `describe_algorithm`, and `plan`'s algorithm echo now label every registry entry as an Algorithm **card** (`surface=card`), filter-friendly by host `kind`, and — for ACE / GEPA / DGM / SkillOpt / EvoSkill — name the sibling `examples/<algo>/` research port with an honest `fidelity_note` so same name is never read as same fidelity.
+
+- The homepage interactive demo now replays a session the way the shipped skill runs one: each host's real slash command (or plain request for DeepSeek Harness), default skill folder and MCP tool naming; doctor, spec, plan with the real call estimate, a start approval, status polls with a round/phase/held-out progress panel, `show diff=true` with a unified diff, and a separately approved apply with the real backup location. Still a browser-only sample; no model calls.
+
+- The README is reorganised around install, a 60-second offline quickstart,
+  calling any named algorithm, adding one, and a host table (Claude Code, Codex,
+  OpenCode, DeepSeek Harness, Grok Bot). `docs/testing-the-plugins.md` is merged
+  into `docs/testing-guide.md`, and stale port counts, version references and
+  duplicated install text across the docs are fixed (#797).
+
+- The MCP server now exposes **Path A** by default (doctor → plan → start → status/show → apply, plus cancel/resume, diagnose, and algorithm list/describe/spec). Audit, release, platform, experience and the other satellites stay callable with the same names when `agentdescent mcp --advanced` or `AGENTDESCENT_MCP_ADVANCED=1` is set. Docs: `docs/mcp-path-a.md`.
+
+- `evolve` / `async_evolve` accept typed `BudgetSettings`, `RuntimeSettings` and `ObservabilitySettings` bags; flat kwargs stay as shortcuts. Docs and `EVOLVE_PARAM_ALLOWLIST` freeze the flat surface so new knobs go in Policies or a bag (#804).
+
+- `aggregator_factory=` now forwards merge-side `Policies` into the factory and
+  applies them on aggregators that expose the slots; leaving them unused raises
+  unless `accept_orphaned_merge_policies=True`. GEPA and SkillOpt factories honour
+  `acceptance` / `fusion` (#807).
+
+- `ProposalPolicy` may return multiple strings: `evolve` / `async_evolve` ingest
+  each as its own evidence card, pass `ctx.k` from `policy.k`, and no longer raise
+  `ProposalContractError` on `len > 1`. Self-verify, when enabled, runs per
+  proposal (#808).
+
+- `evolve(asynchronous=True)` is a deprecated bridge to `async_evolve`: it now
+  requires explicit `max_seconds` and `max_rollouts` (no silent 20s default, no
+  `rounds` reinterpretation) and emits `FutureWarning`. Policies wiring is one
+  shared `_POLICY_DRIVER_SUPPORT` table for both drivers (#809).
+
+- Flagship skill demo is now `examples/skill_library_evolution.py`: a multi-file Agent Skill library (`layout="skill_library"`, offline agent must read skills off disk, `--dry-run` / `--install-to`). `examples/skill_evolution.py` and README / `docs/quickstart-skill.md` are retitled as instruction / playbook evolution so SingleSlot / AppendRules are not called "a skill" without qualification (#818).
+
+- MethodPolicy's keyed string bank is renamed `KeyedSkillBank` (alias `SkillLibrary`
+  kept). Voyager / SkillWeaver docs and imports no longer call it an Agent Skill
+  library; disk libraries point at `skill_library_evolution` / EvoSkill (#821).
+
+- Decision tree and aggregator-factory prose match closed #807 (compose/raise, no
+  stale “until”); quickstart-skill titles say instruction / one skill / library;
+  README lists `policy_slot` and points at #820 for `skill_library`; GEPA docs /
+  print paths say prompt/instruction, not skill folder (#822).
+
+- `algorithm: evoskill` on `kind=skill_library` selects `SkillLibraryTree` LIBRARY
+  layout (`skills/*/SKILL.md`); `skill_dir` stays SINGLE_SKILL. `plan` notes name
+  the layout. Card `kinds` include `skill_library` (#824).
+
+- ACE card notes and summary state the `## general` fallback and that admit means
+  "cleared Jaccard dedup"; FiNER templates are labeled example-only; `extra_calls`
+  no longer says `none` while describing a reflection call (#842).
+
+- Docs state that Path A reported held-out reward is the select-set score (optimistic); a locked test split remains #843.
+
+- `evolve(test_frac=...)` can carve a test partition out of the held-out tail:
+  accept/select keep reading the select split, the test split is scored once at
+  the end and reported as `test_reward`, so the printed reward is no longer the
+  score of the set that chose the winner. With no split, `evolve`, `show` and
+  `diagnose` now say plainly that the reported reward is the select set, not an
+  unseen test set (#843).
+
+- A text-only Algorithm card asked to run on a `skill_library` (or any other tree
+  kind) now says so in the kind-mismatch error, before the list of cards that do
+  apply: `'gepa' is text-only: it reads a single text file, not a skill_library
+  target`. The list of applicable cards and the one-file `--kind text` route are
+  unchanged (#846).
+
+- Algorithm decision tree notes which cards are text-only vs `skill_library`-capable (#846).
+
+- `agentdescent demo` labels itself a smoke trajectory and points at
+  `examples.skill_library_evolution` for multi-round library edits; that offline
+  path now edits a `*/SKILL.md` body (STATUS draft→ready) and
+  `init --algorithm evoskill` defaults `batch_size` to 1 (#847).
+
+- `init --kind skill_library` tips name the `archive_selection` Path A card
+  (and `algorithms list --kind skill_library`); quickstart-skill, decision-tree,
+  and algorithm-authoring kinds stay aligned (#864, Refs #846).
+
+- An unknown algorithm name that is a near-miss typo of a registered card now ends
+  with "did you mean 'gepa'?" (`algorithms show` / `run`, specs, MCP), instead of
+  only listing every card (#874).
+
+- `agentdescent plan` and the plan step of `algorithms run` print a short human
+  summary by default -- task and round counts, the agent-call upper bound, the
+  agent, the small-held-out warning `evolve` raises, and the `next:` command --
+  instead of the whole plan document. `--json` is unchanged (#919).
+
+- `TrustEvidence` can now carry a `RunHealth` record (`attempted`,
+  `failed_tasks`, `threshold`): failed tasks are dropped from the paired scores
+  instead of being folded in as zeroes, so the reported gain is the mean over the
+  tasks that answered, and a run whose failure rate is above the threshold fails
+  its eval gate, so `promote()` cannot return `promote`. A bundle built without
+  health data keeps today's keys, values and hash (#993).
+
+### Fixed
+
+- The skill-library seed (`init <target> --kind skill_library` and
+  `algorithms run <name> --kind skill_library`) now refuses an unwritable target
+  as one `error: cannot write <path>: <reason>` line with exit 2, or
+  `{"ok": false, "error": ...}` under `--json`, instead of a traceback. Both
+  destinations are preflighted before anything is written, so a refused `--out`
+  leaves no seeded `*/SKILL.md` behind; a writable target still seeds its
+  starters and the `#868` one-starter note is unchanged (#1003).
+
+- An expired or unprovisioned subscription refused by the provider -- Ark
+  Coding's HTTP 400 `InvalidSubscription`, OpenAI's `account_deactivated`,
+  Anthropic's `billing_error` -- now fails the first call as `SubscriptionInactive`
+  instead of being retried as a transient `RuntimeError`. The run stops within
+  seconds instead of after three attempts per call, the error line names the
+  subscription as the cause, `diagnose` repeats that next step instead of
+  recommending `doctor`, and `resume` refuses it without `--force` (#1006).
+
+- `--budget` / `budget_usd` is only checked between rounds: `plan`, `evolve`, and
+  MCP `start` now warn when the budget is below the seed+one-round call upper
+  bound (so the first round alone can overshoot), and the plugin quickstart /
+  plugins docs match that semantics (#764).
+
+- ReflectiveFusion now ranks a synthesised union against its parent singles before the acceptance gate, so a merge that loses to a stronger parent cannot commit just because it still beats the seed (`trust_union=True` keeps the older cheap unranked path).
+
+- ReflectiveFusion's MERGE_PROMPT now receives compact parent cheap-score and rationale metadata, and instructs the model to pick one coherent parent for incompatible taxonomies/enums instead of OR-concatenating them (#767).
+
+- `plan` / `evolve` / MCP start now hard-refuse a bare isolated `opencode` worker
+  when a gateway key (e.g. `ARK_API_KEY`) is set, instead of soft-warning and then
+  burning calls on OpenCode's unactivated Volcengine default. Init/`algorithms run`
+  warnings say filling `reflect` alone is not enough — pass `--model` / `--base-url`
+  (or write the Coding recipe). Wired `--model`/`--base-url` specs stay green (#790).
+
+- Missing-CLI plan/algorithms-run errors for directory kinds no longer suggest
+  `openai_compatible` (which those kinds refuse); they point at WorkspaceAgent
+  CLIs instead. kind=text / reflect remedies are unchanged (#791).
+
+- `agentdescent algorithms list --kind policy_slot` now prints the same explanation
+  MCP `list_algorithms` already returns (that kind evolves a policy slot and `plan`
+  refuses an algorithm), instead of a bare "no algorithms for kind" line. `--json`
+  keeps the array shape and puts the note on stderr (#799).
+
+- `agentdescent algorithms show` / `run` (and MCP `describe_algorithm` /
+  `algorithm_spec`) now tip that a documented `examples/` research port
+  (`reflexion`, `textgrad`, `self-refine`, …) is not a named Algorithm card —
+  pointing at `docs/algo-*.md` and the checkout `python -m examples.<slug>…`
+  path — instead of only listing the seven registered cards (#801).
+
+- `PopulationAggregator` now archives per-task held-out scores and fills
+  `Candidate.per_task`, so `Policies(selection=ParetoFrontier(...))` can run
+  GEPA-class parent selection without `aggregator_factory=` (#806).
+
+- `doctor` keeps tipping Grok Bot operators to save the scaffold skill as a user skill when `user_skill` is missing (and appends the same follow-up on a stale/partial scaffold problem). The Bot loads the saved user skill, not the scaffold alone (#825).
+
+- `init` / `algorithms run` writing an Ark (`*.volces.com`) `openai_compatible` block now set `"stream": true` by default so reasoning models like `deepseek-v4-flash` do not hit the 120s non-streaming propose timeout; `plan` warns when a hand-edited Ark block omits it, and the quickstart / plugins Ark examples match (#832).
+
+- The offline `agentdescent demo` sample output in the plugin quickstart and
+  testing guide now shows the plan line the CLI actually prints (`up to 68 agent
+  calls`, not 64) (#833).
+
+- `agentdescent show` / `show --json` (and MCP `show`) now surface
+  `fusion_stats` / `fusion_summary` from reflective-merge ranking
+  (contested, unranked, losses) so Path A can see merge health after #766
+  without the ledger Python API (#834).
+
+- `kind=text` now uses `SeededAppendRules` so a one-sentence reflector proposal
+  appends under `# Learned rules` instead of replacing the whole seed prompt
+  via `SingleSlot` (#837). GEPA keeps `SingleSlot` with a full-rewrite propose
+  template.
+
+- `evoskill` on `kind=skill_library` writes top-level `<slug>/SKILL.md` (with
+  Agent Skills frontmatter) instead of nested `skills/<slug>/SKILL.md`, so apply
+  into a host skills root stays loadable and edits reuse the seed path (#838).
+
+- GEPA no longer stores unused `conflict`/`promotion`/`screen` Policies as
+  attributes, so #807's orphan check fails closed instead of reporting them
+  as active (#839).
+
+- SkillOpt `LRScheduler` clamps the anneal fraction to `[0, 1]` so the edit
+  budget stays at `min_lr` after `total_steps` instead of climbing back (#840).
+
+- RRSI card defaults use `T=8`, a small `noise_band`, and non-zero betas so a
+  short evolve run still exercises the anneal and cost gates (#841).
+
+- DGM increments `children` only for archive admits; unused evoskill `val_every`
+  removed; GEPA `SelectionContext.head` tracks the last selected parent (#844).
+
+- `algorithms run` error paths dedupe identical init/plan tips, and `--help`
+  names Path A vs `algorithms` (#848).
+
+- `agentdescent demo --json` now emits a parseable result object (ok, run_id,
+  rewards, learned, plan, next) instead of ignoring the flag and printing the
+  human narrative (#862).
+
+- `agentdescent init <path>` and `agentdescent algorithms run NAME <path>` now
+  guess `kind=skill_library` for a directory with two or more `*/SKILL.md` and
+  no root `SKILL.md`, instead of falling through to `skill_dir` (#866).
+
+- `init --kind skill_library` / `algorithms run` on a library path now name only
+  the starter `*/SKILL.md` folders actually written (e.g. `example-alpha` when the
+  target already had one skill), instead of always claiming `example-alpha /
+  example-beta` (#868).
+
+- When a GSM8K research port cannot fetch the dataset, the error now ends with
+  what to do next: `pip install pyarrow` (when that is why the parquet path
+  failed), set `HF_ENDPOINT` to a reachable mirror, or set
+  `AGENTDESCENT_GSM8K_SAMPLE=1` for the bundled offline sample (#870).
+
+- The missing-reflector-key warning from `plan` / `algorithms run` now names how
+  long the run really lasts: "fails after one round" on a `--rounds 1` quick
+  trial instead of always "two rounds" (#872).
+
+- Unknown algorithm parameter names now fold case and `-`/`_` (`batch-size` →
+  `batch_size`) and a near-miss typo ends with "did you mean 'batch_size'?",
+  matching how algorithm names already resolve (#876).
+
+- When a `kind=text` card or caller sets `strategy`, plan no longer also
+  claims `SeededAppendRules`. `gepa` / `ace` / `dgm` / `skillopt` drop the
+  generic note; `rrsi` and a bare text spec still show it (#879).
+
+- `--kind` and spec `kind` now fold case and `-`/`_` (`skill-library` →
+  `skill_library`) and a near-miss typo ends with "did you mean 'skill_library'?",
+  matching how algorithm and parameter names already resolve (#882).
+
+- `--agent` now folds case and `-`/`_` (`claude-code` → `claude_code`,
+  `openai-compatible` → `openai_compatible`), matching how algorithm names,
+  parameter names, and `--kind` already resolve (#884).
+
+- An unknown CLI verb no longer lists the internal `run` worker among
+  `choose from` choices, and a near-miss (`algoritms`, `compile_skill`)
+  gets `did you mean …?` (#886).
+
+- Algorithm parameter values that declare `choices` now fold case and `-`/`_`
+  (`sigmoid-novelty` → `sigmoid_novelty`, `KEEP_ALL` → `keep_all`) and a
+  near-miss typo ends with "did you mean 'novelty'?", matching how
+  parameter names already resolve (#888).
+
+- `uninstall` no longer tells grok-bot, dsh, or OpenCode users to remove files
+  via a host marketplace those hosts do not have. The marketplace aside stays
+  only for Claude Code and Codex, which can be installed that way (#890).
+
+- `init --algorithm` writes the registered algorithm name into the spec, so
+  `--algorithm GEPA` or `archive-selection` is saved as `gepa` /
+  `archive_selection` (matching `algorithms list` and `algorithms run`) instead
+  of the alias as typed (#894).
+
+- `show_payload` / `status_payload` / `apply_payload` and the MCP `show` / `status` / `apply` / `diagnose` / `cancel` / `resume` tools accept `latest` (or `last`) the same way the CLI does, so a host that asks to show the newest run no longer gets `no run 'latest'` (#896).
+
+- `agentdescent diagnose` now names the runnable next command with the resolved run id for `solved` (`show <id>`, `apply <id> --dry-run`), `cancelled` (`resume <id>`), `running` (`watch <id>`) and `partial-improvement` (`show <id> --json`), instead of prose such as "review and apply the artifact" (#898).
+
+- `agentdescent resume` (CLI and the MCP `resume` tool) now refuses a run that is already `done [target_reward]` and points at `show <id>` / `apply <id> --dry-run`, instead of relaunching it, spending calls again and overwriting its recorded initial reward and outcomes with the no-op rerun. Runs that stopped on a bound, were cancelled or failed still resume (#900).
+
+- `agentdescent demo --algorithm NAME` now ends with the one command that runs that algorithm on your own data (`agentdescent algorithms run NAME <your-prompt.txt|your-skill-dir> <your-cases.jsonl> --model <model> ...`, then `agentdescent evolve agentdescent.NAME.spec.json`), in both the text footer and `--json` `next`, instead of a generic `init` that dropped the algorithm. `demo` without `--algorithm` is unchanged (#902).
+
+- `agentdescent demo` no longer leaves an `agentdescent-demo-*` directory in the
+  temporary path after every bare run: the default root is removed on the success
+  and the error path, while `--dir` keeps the directory it names and `--json`
+  still reports a `dir` that exists. The quickstart line now says which case keeps
+  the files (#906).
+
+- A run store that cannot be created (`--store`, `AGENTDESCENT_HOME` or the default
+  `~/.agentdescent/runs` on a read-only, missing, unwritable or file path) is now a
+  `RunStoreError`: the CLI exits 2 with one `error: cannot create run store ...`
+  line, or `{"ok": false, "error": ...}` under `--json`, instead of a raw
+  `FileNotFoundError` / `FileExistsError` / `PermissionError` traceback (#907).
+
+- The install FAQ's port taxonomy now names all four catalogue groups, Genesis
+  included, so the dry-run split adds up to the 23 ports the same paragraph
+  quotes instead of the 8 + 14 = 22 it printed (#908).
+
+- `agentdescent serve --host <non-loopback>` now refuses to start, with one
+  `error:`-style line and exit 2, unless the operator passes `--allow-remote`: the
+  run panel has no authentication and lists every run in the store, which a single
+  `--host 0.0.0.0` used to publish to the network. Loopback hosts are unchanged,
+  and the opt-in prints the same no-authentication warning `agentdescent mcp`
+  does (#911).
+
+- `agentdescent github publish` now reads the repository's `default_branch` and
+  refuses a proposal that names it, even when the proposal's own base is another
+  branch. An existing proposal branch is only fast-forwarded: a rewritten history
+  raises one `GitHubError` and nothing is written, and no ref update is ever sent
+  with `force: true` (#913).
+
+- The review gate now counts a `Verdict: PASS` written above its `Tip SHA:` line,
+  above a bare `Tip: <sha>` line, or carrying `(tip <sha>)` inline, so a PASS at
+  the right tip is no longer read as "says nothing at this tip"; `What I ran (...)`
+  counts as the `Ran:` list. A PASS with no `Ran:`/`Not run:` is still counted but
+  marked `weak: no Ran:/Not run:` (#915).
+
+- `doctor` now flags an MCP launcher whose first argument is an absolute path that is no longer an executable file: the host reads `mcp broken` / `state: partial` (exit 1) instead of a silently green `mcp ok`. The host line names the dead path, and the problems line tells you to re-run `agentdescent install <host>`. A relative or bare command such as `python3` is not flagged; Grok Bot stays `mcp n/a` (#918).
+
+- `agentdescent resume` no longer relaunches a run whose last failure was a spent
+  provider quota: a `failed` run whose error starts with `QuotaExhausted` is
+  refused with exit 2 and the provider's own reset time in the message, plus
+  `--force` to retry anyway, and the status file is left untouched (#926). Only
+  that case is gated -- a cancelled, bounded or ordinary provider failure still
+  resumes. The MCP `resume` tool takes `force=true` for the same opt-out.
+
+- `agentdescent demo --algorithm rrsi` printed what it learned as the internal
+  state mapping (`state -> {'ra4bfacbc48': 'COLUMN: amount'}`) in the human footer
+  and in the `--json` `learned` field; both now name the rule text
+  (`rules -> 'COLUMN: amount'`), join several rules with ` | ` and count any
+  beyond the first two, so no internal id or Python repr reaches the reader and
+  the line matches what `show` renders (#927).
+
+- The review gate no longer treats a later `Ran:` / `What I ran:` block as
+  strong just because an earlier block in the same body had a `Not run:` line;
+  `hasNotRun` now resets when a later list starts, the same way `ran` already
+  does (#931).
+
+- `agentdescent harness check` and the `FileTree` it configures now share one
+  matcher (`filetree.match_any`), so a manifest cannot mean two different things
+  on the two surfaces. Every matching component applies -- read-only wins over
+  editable and a frozen catch-all can no longer be hidden behind an earlier one --
+  budgets are charged to each matching component, and `*` no longer crosses `/`
+  (`**` means any depth) (#932).
+
+- `github review` no longer reports `ready: false` because a reviewer's approval
+  body or a lifted (dismissed) review contains an action word such as `add`,
+  `required` or `cannot`: the action-word promotion is now keyed on the review
+  state and applies to comments only, and a review body that is itself a
+  `Verdict: PASS` report is never blocking. Those rows are still listed as
+  suggestions, and `CHANGES_REQUESTED` (with its inline comments) still blocks
+  (#933).
+
+- `agentdescent apply --install-to` (and MCP `apply(install_to=...)`) now resolves known host names and aliases (`claude-code`/`claude`, `codex`, `opencode`/`open-code`, `dsh`/`deepseek-harness`) to their host skills root using the same path helpers and `--home` / host env rules as `install` and `doctor` when no matching path exists in the working directory, while `grok-bot`/`grok` refuses writes, exits 2, and prints manual user-skill save paths (#935). `agentdescent apply --json` also emits structured `{"ok": false, "error": ...}` payloads on errors like other CLI verbs.
+
+- `build_trust_evidence(..., artifact_changed=False)` now reports `gain == 0` and
+  `noise_only is True` for an artifact that is byte-identical before and after,
+  and such a bundle can no longer return `promote`: the zeroed eval delta is not a
+  pass, so evaluation noise is not repriced as learning (#937).
+
+- The review skill now takes the merge lane the diff's risk tier gives it: a T0/T1
+  pull request is still auto-merged pinned to the reviewed tip, while a T2/T3 one
+  gets `awaiting-approval` and waits for the maintainer's click instead of being
+  auto-merged by an agent (#961).
+
+- `append_provenance` keeps its records in the ledger's `.git/` directory instead
+  of the artifact work tree, so `git add -A` can no longer sweep provenance files
+  (and their `.lock`) into an artifact commit; an `artifact_id` containing a path
+  separator, `..` or an absolute prefix is rejected instead of escaping the
+  provenance root (#966).
+
+- MCP `apply` validates resolved destinations, changed tree entries and backup
+  paths against the operator's write allowlist before writing. The shared path
+  guard also resolves directory links, including Windows junctions, so an
+  allowed path spelling cannot redirect a write outside the configured roots (#969).
+
+- `evolve()` cancels workers still waiting for a concurrency slot when their round
+  times out, so they cannot start new rollouts after the round or run has ended.
+  Calls already in flight may still finish (#970).
+
+- Async runs now record workers that fail during initialization, task selection
+  or completion bookkeeping, and stop with an error when every worker has
+  retired. Caller contract errors propagate to the calling thread; rollout
+  backend retries and healthy workers keep their existing behavior (#971).
+
+- `EvalOps.run()` now uses the default regression gate to set `passed`, so a
+  single-task result no longer reports a pass that `EvalOps.gate()` rejects.
+  Explicit gates that disable significance checks remain available.
+
+- Use UTF-8 for CLI agent, code/plugin runner and command grader pipes regardless of the parent locale, preserving Unicode answers and JSON grading inputs. Invalid UTF-8 output raises an explicit adapter error instead of corrupting answers or scores (#973).
+
+- `agentdescent serve` SSE round events (`GET /api/runs/<id>/events`) now emit each row's 0-based append ordinal in `rounds.jsonl` as the event `id:` instead of `row["round"]`, keeping `round` in `data` and ensuring resumed runs and `Last-Event-ID` reconnects never skip rows (#976).
+
+- `apply` refuses a symlink planted in the destination (`--to`) instead of
+  following it: the link itself, or any existing component under `--to`, is named
+  in the error, so a link at `skills/SKILL.md` can no longer redirect the write -
+  or the `.bak-N` copy taken before it - to a file outside `--to`. Containment is
+  checked on the leaf as well as its parent, and the destination rule now lives in
+  `filetree.dest_problem` beside the tree writer's boundary. The directory
+  backup slots scan `bak-N` with `lexists` too, so a dangling link there is
+  skipped instead of crashing the backup copy (#977).
+
+- `merge-lane` reads `review-policy.json` and `risk-rules.json` from the PR's base
+  commit instead of the clone it runs in, so a branch that edits either file can
+  no longer lend itself a PASS or a lower tier; `.github/**` and
+  `.claude/skills/**` are T3 by rule, and a base that cannot serve either file
+  prints no lane at all (#978).
+
+- A refused artifact write — `init --out`, `algorithms run --out`, or
+  `apply --to` for a text file or a tree — now prints one
+  `error: cannot write <path>: <reason>` line and exits 2, or
+  `{"ok": false, "error": ...}` under `--json`, instead of raising the raw
+  `OSError` as a traceback. The run store's `cannot create run store ...`
+  contract (#907) is unchanged (#990).
+
+- The last artifact writes outside the run store now report a refused write as
+  one `error: cannot write <path>: <reason>` line with exit 2 instead of a
+  traceback: `init --out` over an existing spec (the `.bak-N` copy runs before the
+  wrapped `open`), and `apply --from <file>` / `apply --from <dir>` when the
+  destination's parent cannot be created, including the tree branch's per-entry
+  writes and backups (#994).
+
+## [0.9.0] — 2026-11-06
+
+### Added
+
+- `RSIPlatform` + `PlatformConfig` / `PlatformReport`: one bounded cycle that hands
+  compute allocation, the durable loop, trusted promotion, capability admission and
+  continual experience to each other. `complete` is false when a configured layer
+  does not produce a decision; a layer skipped by an upstream decision (for example
+  the foundry after a rejected promotion) is named in `skipped` and `detail`.
+  Post-loop decisions are cached per `run_id`, so re-running a terminal run returns
+  them instead of re-admitting or re-learning; a terminal run without a cache is
+  refused. A cycle that validates experience on its own rows marks
+  `self_validated=True`.
+
+  Changed
+  `LoopGeneration` now carries the observation's evidence, so the platform (and a
+  caller's own report) can see the compute action/option/features that produced a
+  generation without re-reading the event payload.
+
+- `CapabilityArchive`: a quality-diversity archive, artifact graph and semantic
+  dedup kept in sync. A near-duplicate never occupies a QD cell or the graph; an
+  elite replacement removes the evicted graph node and fingerprint; `add` rolls
+  the QD cell back to the previous elite if the graph rejects the artifact;
+  prepopulated graphs seed the dedup fingerprints. Retrieval goes through the
+  graph and selection through the QD archive.
+
+  Changed
+  `ArtifactGraph.remove()` removes an artifact and decrements document frequency
+  once per distinct token. Descendants keep their parent ids and treat the
+  removed node as external.
+
+- `CapabilityScout`: packages failed `TaskCandidate`s as `ToolSynthesisRequest`
+  examples, runs the existing `ToolSynthesizer`, and hands the selected candidate
+  to the caller's `CapabilityRequest` builder before `CapabilityFoundry.admit`.
+  The report makes `no-candidate` and `no-request` explicit; only an admitted tool
+  reaches `promoted`.
+
+- `BudgetedSearch`: runs `SearchFabric` at increasing UCT budgets and stops when
+  the value gain per expansion falls below a bar, using the existing
+  `MarginalGainStop` or a patience rule. The report keeps every round, the gain
+  it bought and why the search stopped, so compute spend is auditable rather than
+  hidden in one fixed budget.
+
+- `PromotionLedger`: only an accepted `promote()` decision becomes a release. It
+  builds an `ArtifactManifest` carrying the evidence/decision hashes and reasons,
+  HMAC-signs it, verifies the signature, and writes a lineage node with the parent
+  artifacts, run id, manifest hash and key id. Refused promotions are not signed.
+
+- `CounterfactualExperience`: turns `ReplayLab.shapley` step credit into per-step
+  `ExperienceRecord` rewards and ingests it into `ExperienceEngine`. Credits below
+  `min_credit` are dropped and an empty reward map is refused, so a trace with no
+  attributable gain cannot silently become zero-information replay.
+
+- `PreferenceReplay`: ranks stored `ExperienceRecord`s by a fitted
+  `PreferenceModel` and ingests the preferred slice into `ExperienceEngine`
+  without duplicating records. The preference model becomes the replay-selection
+  policy, so human pairwise feedback affects what the meta-policy learns from.
+
+- A current `main`-branch capability map covering the evolution loop, verification
+  and statistics, trusted promotion, durable operations, task/capability
+  discovery, archives and continual experience, with a staged path for evolving
+  Skills and Workflows.
+
+- `CapabilityLoop`: composes `TaskPipeline`, `CapabilityScout` and
+  `CapabilityArchive` so production traces become a validated, admitted and
+  archived capability in one call. The report records the pipeline verdict, scout
+  outcome and archive result; `admitted` is true only when the archive added the
+  artifact (#677).
+
+- `BudgetedStep`: composes `SearchFabric` and `BudgetedSearch` into a durable
+  loop step that scales search budgets with the controller's `budget_scale`,
+  stops on marginal gain, and returns a `LoopObservation` with round-by-round
+  evidence, risk and an artifact id (#678).
+
+- `curriculum_meta_run` gains opt-in verified seeding: `min_exam` (via
+  `verified_rules`) excludes unexamined, flagged or audit-biased rules when set,
+  and `oracle` + `audit_store` audit a sampled slice of the
+  validation pairs and persist the verdict with `audited_n`, `oracle_gain` and
+  `gain_bias` in the report. The generated-problem map is pruned to the live
+  frontier pool, and default run_ids get a random suffix so same-second
+  adoptions no longer collide (#679).
+
+- `release_evidence` and `release_candidate` compose trust evidence, promotion
+  and the `PromotionLedger` into one fail-closed release seam. An accepted
+  promotion is signed and written to lineage; a reject or defer returns a report
+  without touching the ledger. An accepted promotion requires an artifact hash (`artifact_hash=` or
+  `content_hash=`); missing signing material or a missing/mismatched artifact
+  hash is refused rather than silently signed (#680).
+
+- `PlatformCampaign`: runs several `RSIPlatform` cycles under the existing
+  `RSIController` stop policy (target, cost, patience, cycle count), cloning the
+  platform with a fresh seed and run id per cycle while sharing the run store,
+  compute, foundry and experience. An exception or incomplete cycle is reported
+  as an error and stops the campaign, and `PlatformCampaignReport.best_cycle`
+  names the highest-reward cycle (#681).
+
+- `TenantPlatform` wraps `RSIPlatform.run_cycle` so each cycle routed through it
+  is a reserved, authorized and audited tenant action. A cycle reserves quota at
+  the stated tokens/cost (which enforces `run:write` and the workspace limits)
+  and commits actual usage on success. An overrun or a recorded generation error
+  is charged the reserved amount before the refusal, so repeated overruns still
+  consume quota; only a platform call that produced no generation is released
+  without charge. `TenantCycleReport` exposes the platform report, reservation,
+  usage and a JSON-safe summary (#682).
+
+- `AdaptiveExperience`: one cross-cycle composition that ingests counterfactual
+  credit through `CounterfactualExperience`, selects validation anchors from a
+  fitted `PreferenceReplay` (or feature recall, recent history, or self-validation
+  on the first cycle), and delegates the guarded update to `ExperienceEngine`.
+  Ingestion deduplicates by `run_id`, and missing validation or bridge features
+  fail closed (#683).
+
+- `agentdescent.governed_harness` composes the capability gate, proof runner,
+  human approval store, canary/rollback plan and promotion rules into one governed
+  path for harness and code self-modifications. A denied gate, failed proof,
+  pending or rejected approval never reaches promotion, and approval keys are
+  content-bound so an old approval cannot be replayed for a different change. The
+  returned report is JSON-safe for manifests and decision logs (#684).
+
+- `CampaignOps` + `CampaignOpsReport`: publish a sequence of finished
+  `LoopReport`s into the control room in one call, recording each into the
+  console, lineage, telemetry and QD and returning the campaign metrics, alerts
+  and snapshot. Unknown statuses, duplicate run ids, malformed costs and invalid
+  thresholds fail closed before anything is recorded; fractional per-generation
+  costs are summed per loop and rounded up to integer calls (#685).
+
+- `meta_campaign_run` turns continuous meta-learning into a bounded campaign:
+  `RSIController` stop conditions wrap repeated `continuous_meta_run` sessions
+  that share one durable `ConsolidationStore`, each in its own fresh ledger repo,
+  so every session seeds from the adopted rule the last one archived. A failed
+  session is reported and stops the campaign instead of being promoted
+  (#686).
+
+- `agentdescent release` and the MCP `release` tool: one evidence-gated release
+  seam that builds trusted evidence from paired held-out scores, runs the
+  fail-closed promotion decision, and only on an accepted promotion signs an
+  `ArtifactManifest` and writes its lineage node. Signing material comes from an
+  environment variable or file (never argv); reject/defer leaves the lineage
+  untouched; the JSON result carries `schema_version: 1`. Use `--lineage` to
+  persist and extend the receipt graph and `--out` to write the full report.
+
+- Product surfaces for the four P1 capabilities, each with a CLI verb and an MCP
+  tool: `platform` runs a durable five-layer campaign from a JSON spec with a
+  runnable `--demo`; `capability` turns failure traces into an admitted, archived
+  capability; `ops` publishes terminal runs to the console/lineage/telemetry/
+  metrics with alerts; and `experience` reports, ingests, recalls, updates and
+  preference-replays an ExperienceStore. All returns carry `schema_version: 1`,
+  invalid input fails closed with a JSON `{"ok": false, "error": ...}` under
+  `--json`, and each command has a docs page and an offline demo or sample.
+
+- `agentdescent governed-harness` and the MCP `governed_harness` tool: one
+  spec-driven surface for the existing safety-gate -> proof -> approval ->
+  canary/rollback -> promotion chain. `init --demo` is runnable offline; `plan`
+  validates refs and scores without running the gates; `run` returns the full
+  `GovernedHarnessReport`. A failed proof or pending/rejected approval never
+  reaches promotion; a conformal/sequential reject is never waived; MCP refs and
+  writes use the operator's surface allowlists. JSON results carry
+  `schema_version: 1`. Direct `govern_harness_change` callers also get the
+  matching fix: optional conformal `insufficient` / sequential `continue`
+  evidence is ignored when the rules do not require those tests, while a
+  conformal/sequential reject still fails the promotion.
+
+- `agentdescent meta-campaign` and the MCP `meta_campaign` tool: repeated
+  `continuous_meta_run` sessions over one `ConsolidationStore`, each in a fresh
+  ledger repo, with `RSIController` target/cost/patience/session stops. `init
+  --demo` is runnable offline from `agentdescent.meta_demo`; `plan` resolves refs
+  and configs without calling builders or creating the archive; `run` returns the
+  per-session verdicts, best session and archive count. A rejected rule is a
+  normal measured session; an errored session stops the campaign with
+  `complete=false`. MCP refs and writes use the operator's surface allowlists.
+  JSON results carry `schema_version: 1`.
+
+- `agentdescent algorithms run` and `agentdescent init` take `--rounds N` /
+  `--workers N` (each >= 1), written into the spec's `evolve` block, so a cheap
+  trial of a named algorithm (`--rounds 1 --workers 1`) needs no hand-edited JSON.
+  Without the flags the plain `algorithms run` output names that quick-trial path
+  when the default plan is large, and the host skill and `/algorithms` commands
+  mention it (#707).
+
+- `evolve` / `async_evolve` score the seed artifact once on the held-out set
+  before round 0 and record it as `initial_reward` on `EvolutionResult`,
+  `result.json`, and run-store `status`. Foreground `evolve` / `demo` print
+  `held-out reward: <initial> -> <final>`; `show` and `status --json` / MCP
+  carry the field. Seed scoring never aborts the run (`null` on failure).
+  `plan`'s estimate adds `seed_score_calls` (#708).
+
+- `tools.module_audit`, a read-only reachability audit for the package: it
+  classifies every module as `cli/mcp`, `exported-only` or `isolated` (following
+  intra-package imports and `agentdescent.module:attribute` string refs), reports
+  module/LOC totals, the top-level `__all__` length and the CLI/MCP surface
+  counts, and emits JSON for scripting. It changes nothing by default;
+  `--fail-on-isolated` is an opt-in local check. This makes "what is actually on
+  the product path" measurable before any quarantine or merge work.
+
+- `agentdescent experience cycle` and the MCP `experience_cycle` tool: one
+  guarded adaptive-experience cycle that ingests new `ExperienceRecord`s, chooses
+  validation/anchors through the preference/recall/history cascade, and delegates
+  the update and forgetting guard to `ExperienceEngine`. It makes the previously
+  isolated `AdaptiveExperience` reachable from the product surface; the result
+  carries the plan, ingested ids and update decision, with `schema_version: 1`.
+  The CLI exits 1 when the update is not accepted; MCP `store` writes use
+  `AGENTDESCENT_SURFACE_WRITE_DIRS`.
+
+- `docs/experimental.md`, a status map for the modules that the CLI/MCP product
+  path does not exercise: research prototypes (`society_runtime`, `openended`,
+  `scaling`, `calibrated_deferral`/`deferral`) and the
+  `algorithms/_TEMPLATE.py` contributor template. It also records the recently
+  productized `adaptive_experience` (`experience cycle`, #711), `budgeted_loop`
+  (`platform step.budgeted`, #712) and `tenant_platform`/`workspaces`
+  (`tenant run`, #715). It explains that the
+  module audit's `isolated` category means "not statically referenced", not
+  "dead", and names the reversible cleanup order.
+
+- `agentdescent tenant` and the MCP `tenant` tool: one platform cycle under a
+  `WorkspaceRegistry` principal/workspace/roles/quota. The spec nests the normal
+  platform spec plus tenancy fields and the tokens/cost to reserve; `plan`
+  validates refs and checks `run:write` without creating the SQLite DB, and `run`
+  reserves quota, executes the cycle and commits usage through `TenantPlatform`.
+  A denied role or exhausted quota fails closed. This gives the previously
+  isolated `workspaces` / `tenant_platform` pair a product consumer. JSON results
+  carry `schema_version: 1`; MCP refs and writes use the operator allowlists.
+
+- `docs/main-path.md`: the design contract for the three supported product paths
+  (evolve one artifact, governed release, continuous platform), the advanced
+  capability/tenancy/ops/meta/harness layers, and a canonical-vs-alias table for
+  the near-duplicate control, promotion, ops, experience and campaign modules. It
+  also states the consumer-first rule for new modules. Docs only; no runtime
+  behavior changes.
+
+- `agentdescent demo --algorithm NAME` runs the offline demo with a named
+  algorithm, so one can be watched end to end before wiring a model and data.
+  Only algorithms verified against the offline agent are accepted
+  (`archive_selection`); others are refused with the `algorithms run` command
+  that runs them for real (#719).
+
+- MCP `algorithm_spec` tool: the MCP form of `agentdescent algorithms run NAME
+  PATH [cases]`. It runs the same checks, writes the starter spec beside the
+  target (never inside a directory target), plans it, and returns the estimate
+  plus the absolute `spec` dict to pass to `start`, so an MCP-only host no longer
+  hand-assembles a spec to try a named algorithm. `algorithms run` and the tool
+  share one code path (#723).
+
+- `PersistentWorkspaceRegistry` and the tenant spec's optional `registry` path:
+  the tested in-memory `WorkspaceRegistry` can now be saved as one atomically
+  replaced JSON snapshot, so quota usage, reservations and audit accumulate across
+  `agentdescent tenant` runs instead of being discarded with the process.
+  `WorkspaceRegistry` gains `to_dict`/`from_dict` and small existence/getters
+  (`workspace_exists`, `principal_exists`, `get_workspace`, `get_principal`); the
+  tenant surface uses the persistent registry when `registry` is set and keeps the
+  in-memory behavior when it is not. The file is authoritative: when it already
+  has a workspace or principal, `plan`/`run` compare the persisted quota and roles
+  with the spec and refuse a mismatch instead of silently using either value. The
+  file is a single-writer JSON slice, not a multi-process database.
+
+- `agentdescent release verify` and the MCP `release_verify` tool: recompute the
+  HMAC over a signed receipt's embedded manifest, check that its decision is an
+  accepted `promote` with both hashes present, and optionally require the lineage
+  node to carry the same manifest hash. A well-formed but edited or wrongly keyed
+  receipt reports `valid: false` and exits 1, so CI can consume the exit code
+  without trusting the JSON file.
+
+- `agentdescent governed-harness approvals|approve|reject`: list pending,
+  approved or rejected human-approval requests, and record a decision with an
+  optional note. A missing store is an empty queue; an unknown key or an
+  already-decided request is an input error, so a rejection cannot be silently
+  flipped into an approval. The decide verbs stay CLI-only, so a host model cannot
+  approve the change it proposed for itself, and the next `run` of the same
+  governed-harness spec reads the decision.
+
+- `agentdescent ops publish --history FILE` appends one JSONL record per publish
+  (tenant, workspace, each run's metrics and alerts) with an fsync, and
+  `agentdescent ops history` aggregates those records across runs. Totals are
+  deduplicated by run id, so publishing the same database twice does not double
+  the counts; alerts are deduplicated by message. Malformed lines are skipped and
+  counted, tenant/workspace filters and a missing history are handled without
+  rewriting the file, and the last record is reported with an ISO-8601 timestamp.
+
+- `agentdescent platform status` and the MCP `platform_status` tool: inspect a
+  campaign's SQLite run database after the process that wrote it has exited. With
+  no `--run-id`, list the most recent runs (newest first) with status, best
+  reward, generation count, accepted count and stop reason; with `--run-id`,
+  return that run's full loop report. The command only reads the database and
+  needs no compute, foundry or experience callbacks; a missing database or
+  unknown run is an input error.
+
+- `agentdescent tenant report --registry FILE`: a read-only view of a persistent
+  workspace registry with per-workspace quota and accumulated usage, principals
+  and their roles, and the most recent audit events when `--principal` names an
+  actor with `audit:read`. A missing registry is an input error and is never
+  created; a viewer or operator gets `audit: null` with a note. The command is
+  CLI-only so the local audit trail is not exposed to a host model. The report also makes stale `active` reservations visible, which a hard kill can otherwise leave behind.
+
+- `agentdescent traces digest|show` and the MCP `traces_digest` tool: turn raw
+  agent trajectory JSONL/JSON into a layered, sourced evidence digest (per-run and
+  per-task counts, normalised failure signatures, and a token-bounded prompt
+  block), then drill back into the exact source events by signature id. Failure
+  messages are normalised so repeated causes group, secret-shaped values are
+  redacted, malformed input is an input error, and no model or network call is
+  made.
+
+- `agentdescent predictions predict|observe|report`: an append-only prediction log
+  that pairs a proposal's expected delta, confidence and expected flipped tasks
+  with the later observation. Observations score hit/miss, delta error, task
+  overlap and Brier, and the report aggregates hit rate, calibration buckets and
+  falsified predictions. Predictions written before measurement stay pending until
+  observed; no model or network call is made.
+
+### Changed
+
+- The `docs/plugins.md` title and install line and the README host section now
+  name Grok Bot (as a scaffold that needs a tunnel, not a one-click install),
+  matching `plugin-quickstart.md` (#606).
+
+- An `--algorithm` / `algorithm:` kind mismatch (in `init`, `plan`, `evolve`,
+  campaigns and tournaments) now says which named algorithms do apply to that
+  kind (`agentdescent algorithms list --kind <kind>`), suggests targeting a skill
+  directory's single `SKILL.md` as `--kind text` when the algorithm runs on text,
+  and points to the default loop when nothing applies.
+
+- A `platform` spec may now set `step: {"budgeted": {...}}` to use the existing
+  `BudgetedStep` (PRM/verifier search with marginal-gain stopping) as the durable
+  loop's step. The block takes a `SearchFabric` builder/instance, a state
+  callable, `BudgetedStepConfig` and optional `risk`/`evidence_of` callables;
+  `plan` validates refs and config without calling the builders. This gives the
+  previously isolated `budgeted_loop` a product consumer without changing the
+  platform's compute or promotion behavior.
+
+- Moved the research prototypes `society_runtime`, `openended`, `scaling`,
+  `calibrated_deferral` and `deferral` under `agentdescent/experimental/`, so the
+  top-level package no longer presents them as part of the main engine. Their old
+  import paths remain compatibility shims (`from agentdescent.experimental.x
+  import *`), so existing code and tests keep working. No CLI/MCP verb or
+  top-level export changed.
+
+- `agentdescent install` / `uninstall` accept common host aliases, case-insensitive
+  (`claude`, `grok`, `grokbot`, `deepseek-harness`, `open-code`, …), and a bare
+  `install` / `uninstall` lists every host with its state and the command to run
+  instead of argparse's "the following arguments are required" (exit 2; `--json`
+  returns the same data) (#721).
+
+- `docs/main-path.md` now names the product verbs added around the three supported
+  paths: independent release-receipt verification, `platform status` over the
+  durable run store, `ops history`, governed-harness approval decisions, and the
+  persistent tenant registry report. Docs only; no runtime behavior changes.
+
+- Deep documentation refresh: one documentation map with the three supported paths
+  and the product surfaces, current main-path tables (tenant registry/report,
+  release verification, platform status, ops history, harness approvals), a module
+  map for the CLI/MCP surfaces, stale "on main" markers removed, the experimental
+  status updated for the persistent registry, and the navigation grouped into a
+  product-surfaces section. Docs only; no runtime behavior changes.
+
+### Fixed
+
+- `OpsFabric.record` now closes the `ops.record` span as `error` for a
+  failed run and `cancelled` for a cancelled one, instead of `ok` for every
+  terminal run, so telemetry error counts match the console (#630).
+
+- The key-preflight tests no longer fail on a machine that exports `ARK_API_KEY`
+  or another provider key: their fixture clears every name the preflight reads
+  (#632).
+
+- `openai_compatible` and `anthropic_compatible` now raise `ProviderConfigError`
+  on a deterministic refusal (HTTP 401/403/404, or a body naming
+  `UnsupportedModel` / `model_not_found` / `invalid_api_key`) and the engines stop
+  the run on the first one, instead of retrying it and spending a full round of
+  identical failing calls. The error names what to fix (the `model` or base URL,
+  or which `api_key_env` to check); 429, 5xx and timeouts still retry as before.
+  `diagnose` no longer recommends `log.txt` for a run that has none (#635).
+
+- `agentdescent mcp --transport streamable-http` now checks that its host:port
+  can be bound before announcing the URL: a busy port prints one line naming the
+  port and suggesting another `--port`, and exits 4 instead of failing inside
+  uvicorn's logs with the same exit code 3 as a missing MCP SDK. The Grok Bot
+  `HOST.md` scaffold and `docs/plugins.md` mention it (#636).
+
+- The `init` starter-reflector warning test no longer fails on a machine that
+  exports `ARK_API_KEY` or another provider key: it clears every name `init`
+  reads before pinning the "OPENAI_API_KEY is not set" warning (#646).
+
+- `agentdescent plan --json` on a missing, unreadable or malformed spec file now
+  prints the same `{"ok": false, "error": ...}` object on stdout as a spec that
+  fails to compile, instead of a bare `error:` line on stderr; without `--json`
+  the stderr line is unchanged (#648).
+
+- `agentdescent evolve`, `campaign` and `tournament` with `--json` now answer a
+  missing, unreadable, malformed or non-compiling spec with the same
+  `{"ok": false, "error": ...}` object on stdout that `plan --json` prints,
+  instead of a bare stderr line; without `--json` they print `spec error: ...`
+  on stderr as before (`evolve` on an unreadable file now uses that same
+  prefix) (#650).
+
+- A foreground `agentdescent evolve` whose provider refuses the model or key
+  (`ProviderConfigError`, or any other exception from the run) no longer dies with
+  a Python traceback: it prints the status line, one `error: ...` line with the
+  hint, the run dir and `next: agentdescent diagnose <run_id>`, and exits 1. With
+  `--json` it prints one `{"ok": false, "run_id", "state", "error", "dir"}`
+  object. `status`/`diagnose` are unchanged; `AGENTDESCENT_DEBUG=1` keeps the
+  traceback (#652).
+
+- `openai_compatible` and `anthropic_compatible` now raise `QuotaExhausted`
+  (a `ProviderConfigError`) on a quota- or billing-exhausted 429 — Ark
+  `AccountQuotaExceeded`, OpenAI `insufficient_quota`, and bodies naming
+  `quota` / `billing` — so `with_retries` and the engines fail on the first
+  call instead of backing off for minutes as a rate limit. Real throttling
+  (`rate_limit_exceeded`, bare 429 + `Retry-After`) still retries.
+  `diagnose` suggests waiting for the provider reset or pointing
+  `api_key_env` / `model` at another plan, not `doctor` (#653).
+
+- Foreground `campaign` and `tournament` print AgentDescent warnings as one
+  `warning: …` line (no `file:line` or source), matching `evolve`. The early-stop
+  warning is no longer echoed on the terminal when the status/summary line already
+  shows the error; library `evolve()` callers keep standard `warnings` behaviour
+  (#654).
+
+- Under `--json`, run-store errors (`status` / `show` / `apply` / `cancel` /
+  `resume` / `diagnose` on an unknown run) and archive errors (`portfolio` /
+  `audit` / `safety`) print `{"ok": false, "error": ...}` on stdout instead of a
+  bare `error:` line on stderr; exit codes and plain output are unchanged (#658).
+
+- Under `--json`, `init` ValueError / agent-mismatch refusals and `rsi`
+  archive or parameter errors print `{"ok": false, "error": ...}` on stdout
+  instead of a bare `error:` line on stderr; exit codes and plain output are
+  unchanged (#660).
+
+- `agentdescent init --json` now prints one `{"ok": true, "spec", "kind",
+  "providers_config", "warnings", "notes", "next"}` object on success instead
+  of the human prose lines; plain output is unchanged (#662).
+
+- `--json` now also covers argparse usage errors (missing required argument,
+  invalid choice, unknown option): instead of usage text on stderr, the CLI
+  prints one `{"ok": false, "error", "usage"}` object on stdout and still
+  exits 2; plain output is unchanged (#664).
+
+- An abbreviated `--json` (`--js`, `--jso`, `--j`), which argparse already
+  accepts, now also turns usage errors into the one `{"ok": false, "error",
+  "usage"}` object on stdout instead of plain usage text on stderr (#666).
+
+- `agentdescent serve` on a busy, privileged or out-of-range `--port` now prints
+  one `cannot listen on HOST:PORT -- <reason>` line and exits 4, like
+  `agentdescent mcp --transport streamable-http`, instead of announcing the URL
+  and then crashing with a traceback; under `--json` it is one
+  `{"ok": false, "error"}` object on stdout. The banner now names the port
+  actually bound, so `--port 0` reports the real one (#668).
+
+- `agentdescent exam --json` on a missing archive now prints one
+  `{"ok": false, "error"}` object on stdout (exit 2) like every other read-only
+  verb, instead of a bare `error:` line on stderr; plain output is unchanged and
+  the archive is still not created (#670).
+
+- `agentdescent exam --domain module:builder` now turns a builder that raises
+  (e.g. `TypeError` from `--domain json:dumps`) or returns a dict missing
+  required keys into one `error:` line (exit 2), or one `{"ok": false, "error"}`
+  object under `--json`, instead of a raw traceback (#672).
+
+- `agentdescent algorithms run NAME PATH [cases.jsonl]` now matches the plugin
+  slash `algorithms … run` verb: it writes a starter spec with that algorithm
+  (default `./agentdescent.<name>.spec.json`) and prints a `plan` estimate, then
+  points at `agentdescent evolve <spec>` — without starting a run (#674).
+
+- `agentdescent doctor` now checks the skill Grok Bot actually loads: a saved user
+  skill named `agentdescent` under `$AGENTDESCENT_GROK_BOT_SKILLS` (default
+  `<home>/agent-data/workflows`) is reported as `user skill ok|stale|missing`, a
+  stale one is a problem with a rewrite hint, and `--json` gains
+  `hosts.grok-bot.user_skill` / `user_skill_path`. The `host grok-bot` line no
+  longer says `cli not on PATH` (#675).
+
+- `agentdescent algorithms run` now prints `wrote <spec>` before the error when
+  the plan step fails after writing the spec, rejects an invalid group-level
+  `--kind` with the list of kinds before writing anything, and accepts
+  `--agent REF` like `init` (a mismatched ref is refused before writing) (#688).
+
+- `agentdescent algorithms run` now tips the optional `cases.jsonl` third
+  argument (or checks the path you passed) when plan fails because `data.path`
+  does not exist, instead of only naming the missing file (#692).
+
+- When the plan step of `agentdescent algorithms run` fails, `next` now says to
+  fix the spec and run `agentdescent plan <spec>` again. Before, `--json` said
+  `agentdescent evolve <spec>` on a spec that plan had just refused. Both
+  failure shapes now carry `spec_path` as well, and plain mode prints the same
+  `next:` line after the error (#694).
+
+- Algorithm names now ignore case and `-` vs `_`: `agentdescent algorithms show
+  GEPA`, `algorithms run archive-selection …`, `campaign` and an EvolveSpec
+  `algorithm` resolve to the one registered algorithm they match instead of
+  failing as unknown. `algorithms run` writes the registered name into the spec
+  and its default file name; an ambiguous name is still reported as unknown
+  (#696).
+
+- A case or `-`/`_` variant of a third-party algorithm plugin's name that failed
+  to load (`algorithms show ACME-Method` for a broken `acme_method`) now reports
+  the plugin's load error instead of "unknown algorithm" (#698).
+
+- `tests/test_async_meta_population.py` now really runs its outer meta-proposer
+  (a missing module-level `import re` made it raise `NameError` every round, so
+  no island was ever promoted) and checks that the async run promotes the same
+  island as the sequential one, each from its own copy of the archive (#700).
+
+- `agentdescent algorithms run NAME PATH` no longer answers a kind mismatch with
+  the `init --algorithm` text: the error names `algorithm 'NAME'` (the name is
+  positional), routes the one-file fix through `algorithms run NAME FILE --kind
+  text`, and, when `--kind` was not given, says a file is always `text` or that a
+  directory's kind was guessed and `--kind` overrides it (#702).
+
+- `init PATH` and `algorithms run NAME PATH` now refuse a PATH that does not
+  exist before guessing kind: exit 2 with `target '…' does not exist (cwd …)` and
+  no spec written, instead of falling through `guess_kind` to `skill_dir` and a
+  kind-mismatch or "is not a directory" error. With `--kind text`, a path-looking
+  missing target still writes the spec but warns that the path string will be used
+  as the prompt; `plan` surfaces the same warning. Directory kinds' `plan` says
+  `does not exist` when the target is absent (#706).
+
+- `init`, `algorithms run` and the MCP `algorithm_spec` tool no longer replace an
+  existing, different spec at the output path without a word: the old copy is
+  saved as a `<out>.bak-N` backup and a note names it. An identical re-run writes no backup
+  (#725).
+
+- `init`, `algorithms run` and the MCP `algorithm_spec` tool now back up a
+  replaced spec to numbered `<out>.bak-N` slots (like `apply`), so a second
+  re-run no longer overwrites the first backup; the OpenCode provider-only config
+  written next to the spec is backed up and named in a note the same way when it
+  held different content (#727).
+
+- The MCP `algorithm_spec` tool now passes its `params` object straight through
+  instead of re-encoding it as `--param KEY=VALUE` strings, so a key containing
+  `=` is no longer split into a different key and value, and an empty or
+  repeated key is reported as a `params` key rather than a CLI flag (#729).
+
+- `algorithms run ace` / `dgm` no longer drop or comma-shred the user's existing text prompt: ace seeds the playbook from the target and only appends lessons under `# Playbook (ACE)`, dgm keeps the prose intact and lists admitted capabilities under `## Capabilities`, and an unchanged run reports `apply` noop (#731).
+
+- When the seed prompt already scores the target on held-out and the run does
+  not improve on it, `diagnose` now reports `seed-already-solved` (add cases the
+  seed gets wrong, use a stricter score, or raise `target_reward`) instead of
+  `solved` / "review and apply the artifact", and foreground `evolve` prints the
+  same note after `held-out reward: 1.000 -> 1.000` (and adds `note` to `--json`).
+  `docs/algorithms.md` replaces an empty code block with a tip to include cases
+  the seed fails (#732).
+
+- `algorithms` ace / dgm: re-opening an applied text artifact parses the trailing `# Playbook (ACE)` / `## Capabilities` block back into strategy state so a second run appends under a single header instead of duplicating it (#741).
+
+- `algorithms` ace / dgm: re-opening an applied target no longer drops user text written after the `# Playbook (ACE)` / `## Capabilities` block; it is re-attached after the block, an unchanged run stays a byte-identical `apply` noop, and multi-line ACE lessons round-trip (#743).
+
+- `init` / `algorithms run`: an unknown `--agent` (for example the install host
+  name `claude-code`) is refused before the spec is written, listing only the
+  agent refs and suggesting `claude_code`, instead of writing a spec `plan`
+  rejects with a list of policy classes (#745).
+
+- `agentdescent algorithms run` no longer hides init's notes and warnings when
+  the follow-up `plan` fails: text mode prints the `note:` / `warning:` lines
+  (including where an overwritten spec was backed up as `<out>.bak-N`), and the
+  `--json` / MCP `algorithm_spec` error object now carries `notes` and
+  `warnings` lists like the success object (#749).
+
+- `init` / `algorithms run`: an `--agent` that is an `install` host name or alias
+  now gets a host-aware hint — `deepseek-harness` / `claudecode` / `open-code`
+  suggest `dsh` / `claude_code` / `opencode`, and `grok-bot` / `grok` say Grok
+  Bot is an install host with no worker CLI and point at `agentdescent doctor` /
+  `openai_compatible` (#752).
+
+- The only-`ARK_API_KEY` example in `docs/plugin-quickstart.md` now names
+  `deepseek-v4-flash`, the model the Ark Coding endpoint serves, instead of
+  `doubao-seed-code`, which that endpoint refuses with 404 `UnsupportedModel`
+  (#754).
+
+- `kind: text` now refuses an existing directory as its target: `init`,
+  `algorithms run`, `plan`, `evolve` and MCP `start` stop with "is a directory"
+  and point at a file inside it or `--kind skill_dir`, instead of evolving the
+  path string as the prompt; `apply` / `apply --dry-run` onto a directory give
+  the same error instead of claiming a write and then tracing back on
+  `IsADirectoryError` (#755).
+
+- `diagnose` no longer calls a run `partial-improvement` when its held-out reward
+  never rose above the seed's (for example `0.000 -> 0.000` with only
+  `dgm-select` parent-pick commits); such a run falls through to
+  `agent-failures` / `no-improvement`, and `partial-improvement` now names
+  `initial -> final` (#756).
+
+- Directory `apply` backups (both `EvolutionResult.write_to` and
+  `apply --from`) now land under `$AGENTDESCENT_HOME/backups/` instead of a
+  sibling `<path>.bak-N`, so host skill scanners (OpenCode, Claude Code) no longer
+  load the backup and shadow the evolved skill (#758).
+
+- DGM reflection prompts now include available task answers so spec-driven capability proposals can learn from failed outputs.
+
+- `init` and `algorithms run` now write an explicit reflector for `agent_dir`.
+  The reflector and OpenCode provider configuration use the same selected API key
+  environment variable (#760).
+
+- EvoSkill frontier merge reports now use category `evoskill-select`, so evolve/show/diagnose outcomes no longer collapse successful runs into `unknown`.
+
 ## [0.8.0] — 2026-10-30
 
 ### Added
@@ -3516,7 +4620,7 @@ value-directed evaluation or Genesis blind-mode proposals.
   `http://127.0.0.1.evil.com`.
 - **Codex installs the same plugin as Claude Code.** Codex reads the Claude
   Code plugin format and marketplace, so `codex plugin marketplace add
-  Birfy/agentdescent && codex plugin add agentdescent@agentdescent` installs the
+  ThinkFlowLab/agentdescent && codex plugin add agentdescent@agentdescent` installs the
   package this repository already publishes, and the MCP server comes with it --
   verified with `codex plugin list` and `codex mcp list` against codex-cli
   0.153.4. `agentdescent install codex` still writes the files for anyone who
@@ -6535,17 +7639,19 @@ First public release on PyPI as **`agentdescent`**.
   discrete-space `Aggregator`, staleness policies, DP/TP/PP parallelism, layered
   governance, and the provider-agnostic `agentdescent.agents` completion layer.
 
-[Unreleased]: https://github.com/Birfy/agentdescent/compare/v0.8.0...HEAD
-[0.8.0]: https://github.com/Birfy/agentdescent/compare/v0.7.0...v0.8.0
-[0.7.0]: https://github.com/Birfy/agentdescent/compare/v0.6.0...v0.7.0
-[0.6.0]: https://github.com/Birfy/agentdescent/compare/v0.5.1...v0.6.0
-[0.5.1]: https://github.com/Birfy/agentdescent/compare/v0.5.0...v0.5.1
-[0.5.0]: https://github.com/Birfy/agentdescent/compare/v0.4.6...v0.5.0
-[0.4.6]: https://github.com/Birfy/agentdescent/compare/v0.4.5...v0.4.6
-[0.4.5]: https://github.com/Birfy/agentdescent/compare/v0.4.2...v0.4.5
-[0.4.2]: https://github.com/Birfy/agentdescent/compare/v0.4.1...v0.4.2
-[0.4.1]: https://github.com/Birfy/agentdescent/compare/v0.4.0...v0.4.1
-[0.4.0]: https://github.com/Birfy/agentdescent/compare/v0.3.0...v0.4.0
-[0.3.0]: https://github.com/Birfy/agentdescent/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/Birfy/agentdescent/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/Birfy/agentdescent/releases/tag/v0.1.0
+[Unreleased]: https://github.com/ThinkFlowLab/agentdescent/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/ThinkFlowLab/agentdescent/compare/v0.9.0...v0.10.0
+[0.9.0]: https://github.com/ThinkFlowLab/agentdescent/compare/v0.8.0...v0.9.0
+[0.8.0]: https://github.com/ThinkFlowLab/agentdescent/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/ThinkFlowLab/agentdescent/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/ThinkFlowLab/agentdescent/compare/v0.5.1...v0.6.0
+[0.5.1]: https://github.com/ThinkFlowLab/agentdescent/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/ThinkFlowLab/agentdescent/compare/v0.4.6...v0.5.0
+[0.4.6]: https://github.com/ThinkFlowLab/agentdescent/compare/v0.4.5...v0.4.6
+[0.4.5]: https://github.com/ThinkFlowLab/agentdescent/compare/v0.4.2...v0.4.5
+[0.4.2]: https://github.com/ThinkFlowLab/agentdescent/compare/v0.4.1...v0.4.2
+[0.4.1]: https://github.com/ThinkFlowLab/agentdescent/compare/v0.4.0...v0.4.1
+[0.4.0]: https://github.com/ThinkFlowLab/agentdescent/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/ThinkFlowLab/agentdescent/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/ThinkFlowLab/agentdescent/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/ThinkFlowLab/agentdescent/releases/tag/v0.1.0

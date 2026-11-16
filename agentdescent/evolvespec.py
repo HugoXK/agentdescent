@@ -24,13 +24,14 @@ shown to the user and logged, so anything in it is public.
 The composition table -- what each ``kind`` assembles -- is
 :data:`KIND_ROWS` and is meant to be read::
 
-    kind        strategy       run                 propose          reward         layer
-    text        SingleSlot     model(template)     reflector        scorer         L2
-    skill_dir   FileTree       tree_runner         tree_reflector   scorer         L2
-    agent_dir   FileTree       tree_runner         tree_reflector   scorer         L1
-    agent_code  FileTree       code_runner         tree_reflector   gated_reward   L1
-    plugin      FileTree       plugin_runner       tree_reflector   gated_reward   L1
-    policy_slot SlotSpec       one inner search    slot_reflector   meta_reward    L1
+    kind           strategy       run                 propose          reward         layer
+    text           SeededAppendRules model(template)   reflector        scorer         L2
+    skill_dir      FileTree       tree_runner         tree_reflector   scorer         L2
+    skill_library  FileTree       tree_runner         tree_reflector   scorer         L2
+    agent_dir      FileTree       tree_runner         tree_reflector   scorer         L1
+    agent_code     FileTree       code_runner         tree_reflector   gated_reward   L1
+    plugin         FileTree       plugin_runner       tree_reflector   gated_reward   L1
+    policy_slot    SlotSpec       one inner search    slot_reflector   meta_reward    L1
 
 ``policy_slot`` is the odd one and the reason the table is worth reading: its
 artifact is not a file but a *decision rule of the optimiser itself*, and one
@@ -44,6 +45,7 @@ there is nothing to diff against and ``apply`` has to be told a destination.
 from __future__ import annotations
 
 import csv
+import difflib
 import json
 import os
 import shlex
@@ -53,7 +55,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 from . import algorithms as _algorithms
 from .agents import Completion, Usage, WorkspaceAgent
 from .aggregator import AggregatorConfig
-from .evolution import (MIN_HELD_OUT, EvolutionResult, SingleSlot, Task, evolve,
+from .evolution import (MIN_HELD_OUT, EvolutionResult, SeededAppendRules, SingleSlot, Task, evolve,
                         held_out_size, reflector, small_held_out_message, tasks_from)
 from .filetree import TreeSpec, load_tree
 from .fusion import reflective_merge
@@ -61,7 +63,9 @@ from .governance import HARNESS_BLAST_RADIUS, SKILL_BLAST_RADIUS
 from .policies import Policies
 from .rewards import SCORERS, command_scorer, scorer
 from .runners import code_runner, gated_reward, tree_runner
-from .skillspec import SKILL_FILE, SkillTreeValidator, parse_skill_frontmatter, validate_skill_tree
+from .skillspec import (SKILL_FILE, SkillLibraryValidator, SkillTreeValidator,
+                        parse_skill_frontmatter, skill_names_in_library,
+                        validate_skill_library, validate_skill_tree)
 from .staleness import get_policy
 from .treestrategy import FileTree, tree_reflector
 from .workspec import DEFAULT_ALLOWED_PREFIXES, Ref, RefError
@@ -70,9 +74,12 @@ __all__ = [
     "KINDS",
     "KIND_ROWS",
     "SHORT_REFS",
+    "fold_kind",
+    "resolve_kind",
     "Composition",
     "EvolveSpec",
     "SpecError",
+    "budget_round_overshoot_warning",
     "compose",
     "estimate",
     "load_spec",
@@ -82,17 +89,53 @@ __all__ = [
 
 #: The artifact shapes a spec can name. ``plugin`` is a host plugin (a DSH Cordis
 #: package, a Claude Code plugin directory); see :func:`~agentdescent.runners.plugin_runner`.
-KINDS: Tuple[str, ...] = ("text", "skill_dir", "agent_dir", "agent_code", "plugin",
-                          "policy_slot")
+KINDS: Tuple[str, ...] = ("text", "skill_dir", "skill_library", "agent_dir",
+                          "agent_code", "plugin", "policy_slot")
+
+
+def fold_kind(value: Any) -> Any:
+    """Canonical :data:`KINDS` entry when ``value`` is a case/hyphen alias.
+
+    ``skill-library`` and ``SKILL_LIBRARY`` become ``skill_library``. A value
+    that is not such an alias is returned unchanged, so argparse ``choices=``
+    can still report an unknown flag.
+    """
+    if isinstance(value, str):
+        folded = value.strip().casefold().replace("-", "_")
+        if folded in KINDS:
+            return folded
+    return value
+
+
+def resolve_kind(value: Any, *, where: str = "kind") -> str:
+    """The :data:`KINDS` entry ``value`` names, ignoring case and ``-`` vs ``_``.
+
+    Raises :class:`SpecError` when nothing matches. A near-miss typo
+    (``skil_library``) appends ``did you mean 'skill_library'?``.
+    """
+    folded = fold_kind(value)
+    if folded in KINDS:
+        return folded
+    shown = list(KINDS) if where.startswith("-") else KINDS
+    msg = f"{where} must be one of {shown}, got {value!r}"
+    if isinstance(value, str) and value.strip():
+        close = difflib.get_close_matches(
+            value.strip().casefold().replace("-", "_"), list(KINDS), n=1,
+            cutoff=0.75)
+        if close:
+            msg += f"; did you mean {close[0]!r}?"
+    raise SpecError(msg)
 
 #: The composition table, for readers and for the test that checks it against
 #: the quickstarts. Values are the *names* of what is assembled; :func:`compose`
 #: is the code.
 KIND_ROWS: Dict[str, Dict[str, str]] = {
-    "text":       {"strategy": "SingleSlot", "run": "model(template)", "propose": "reflector",
+    "text":       {"strategy": "SeededAppendRules", "run": "model(template)", "propose": "reflector",
                    "reward": "scorer", "blast_radius": "SKILL_BLAST_RADIUS"},
     "skill_dir":  {"strategy": "FileTree", "run": "tree_runner", "propose": "tree_reflector",
                    "reward": "scorer", "blast_radius": "SKILL_BLAST_RADIUS"},
+    "skill_library": {"strategy": "FileTree", "run": "tree_runner", "propose": "tree_reflector",
+                      "reward": "scorer", "blast_radius": "SKILL_BLAST_RADIUS"},
     "agent_dir":  {"strategy": "FileTree", "run": "tree_runner", "propose": "tree_reflector",
                    "reward": "scorer", "blast_radius": "HARNESS_BLAST_RADIUS"},
     "agent_code": {"strategy": "FileTree", "run": "code_runner", "propose": "tree_reflector",
@@ -205,11 +248,12 @@ class EvolveSpec:
     editable: Sequence[str] = ("**",)
     frozen: Sequence[str] = ()
     max_files_per_diff: int = 2
-    #: ``skill_dir`` only: reject, before any rollout, a candidate that deletes
-    #: ``SKILL.md`` or breaks its Agent Skills frontmatter (``name`` /
-    #: ``description`` rules, ``name`` kept stable). Skipped with a note when the
-    #: initial tree does not pass itself. ``false`` for a host that accepts a
-    #: looser format. See :mod:`agentdescent.skillspec`.
+    #: ``skill_dir`` / ``skill_library``: reject, before any rollout, a candidate
+    #: that deletes ``SKILL.md`` or breaks Agent Skills frontmatter (``name`` /
+    #: ``description`` rules, ``name`` kept stable). For a library, each
+    #: ``*/SKILL.md`` is checked. Skipped with a note when the initial tree does
+    #: not pass itself. ``false`` for a host that accepts a looser format. See
+    #: :mod:`agentdescent.skillspec`.
     validate_skill: bool = True
     #: ``agent_code`` only.
     entrypoint: Sequence[str] = ()
@@ -257,6 +301,12 @@ class EvolveSpec:
     #: :func:`compose` call ignores it.
     record_rollouts: bool = True
     version: int = 1
+
+    def __post_init__(self) -> None:
+        # Aliases such as ``skill-library`` become the canonical kind so later
+        # checks (absolutise, compose) see ``skill_library``. Unknown values
+        # stay as written; :func:`compose` / :func:`resolve_kind` name them.
+        self.kind = fold_kind(self.kind)
 
     # -- (de)serialisation ------------------------------------------------
 
@@ -693,6 +743,9 @@ class Composition:
     #: parameters resolved to what will run, and which of its defaults the spec
     #: itself overrides. ``None`` when the spec names none.
     algorithm: Optional[Dict[str, Any]] = None
+    #: Resolved runner layout for directory kinds (``claude_skill``,
+    #: ``skill_library``, …). ``None`` for ``text`` / ``policy_slot``.
+    layout: Optional[str] = None
 
     def run(self) -> EvolutionResult:
         return evolve(self.tasks, self.reward, **self.kwargs)
@@ -728,6 +781,25 @@ def looks_like_path_target(target: str) -> bool:
         return True
     lower = target.lower()
     return any(lower.endswith(suffix) for suffix in _TEXT_PATH_SUFFIXES)
+
+
+def text_target_dir_message(target: str) -> Optional[str]:
+    """Why ``kind='text'`` cannot take ``target``, when it is an existing directory.
+
+    A text spec evolves one file's contents (or inline prompt text). An existing
+    directory used to pass with only a warning: the run spent its calls on the
+    path *string* as the prompt, ``apply --dry-run`` claimed it would write the
+    directory and ``apply`` died on ``IsADirectoryError`` (#755). A missing
+    path-looking target keeps the #706 warning; only a real directory refuses.
+    """
+    path = os.path.expanduser(str(target))
+    if not os.path.isdir(path):
+        return None
+    skill = os.path.join(str(target).rstrip("/\\"), "SKILL.md")
+    return (f"target {target!r} is a directory; kind=text evolves the text of one "
+            f"file, not a directory. Point the target at a file inside it (for "
+            f"example {skill!r}) or use --kind skill_dir / skill_library / agent_dir for the "
+            "directory")
 
 
 def _read_text_target(target: str) -> str:
@@ -976,9 +1048,19 @@ def _algorithm_echo(chosen: Tuple[Any, Dict[str, Any]], spec: EvolveSpec,
         [f"policies.{k}" for k in ov.policies if k in asked]
         + [f"agg_config.{k}" for k in ov.agg_config if k in spec.agg_config]
         + [f"evolve.{k}" for k in ov.knobs if k in spec.evolve])
-    return {"name": alg.name, "summary": alg.summary, "fidelity": alg.fidelity,
-            "params": params, "extra_calls": alg.extra_calls, "source": alg.source,
-            "doc": alg.doc, "overridden_by_spec": overridden}
+    card = alg.describe()
+    echo: Dict[str, Any] = {
+        "name": card["name"], "summary": card["summary"],
+        "fidelity": card["fidelity"], "surface": card.get("surface", "card"),
+        "params": params, "extra_calls": card["extra_calls"],
+        "source": card["source"], "doc": card["doc"],
+        "overridden_by_spec": overridden,
+    }
+    if card.get("research_port"):
+        echo["research_port"] = card["research_port"]
+    if card.get("fidelity_note"):
+        echo["fidelity_note"] = card["fidelity_note"]
+    return echo
 
 
 #: ``evolve()`` parameters whose annotation is made only of these names take plain
@@ -1078,8 +1160,9 @@ def compose(spec: EvolveSpec, *, usage: Optional[Usage] = None,
     defaults the kind wants. Raises :class:`SpecError` for anything the spec
     gets wrong, *before* a single rollout runs -- which is what ``plan`` is for.
     """
-    if spec.kind not in KINDS:
-        raise SpecError(f"kind must be one of {KINDS}, got {spec.kind!r}")
+    resolved = resolve_kind(spec.kind)
+    if resolved != spec.kind:
+        spec = replace(spec, kind=resolved)
     if spec.agent is None:
         raise SpecError("agent is required (for kind='text' it is the model)")
     if spec.version != 1:
@@ -1089,6 +1172,10 @@ def compose(spec: EvolveSpec, *, usage: Optional[Usage] = None,
         raise SpecError("algorithm: not available for kind='policy_slot'; that kind "
                         "evolves one policy slot, not a recipe")
     chosen = _parse_algorithm(spec)
+    if spec.kind == "text":
+        why = text_target_dir_message(str(spec.target))
+        if why:
+            raise SpecError(why)
 
     if spec.kind == "policy_slot":
         return _compose_policy_slot(spec, usage=usage, on_round=on_round, **overrides)
@@ -1096,6 +1183,7 @@ def compose(spec: EvolveSpec, *, usage: Optional[Usage] = None,
     tasks = build_tasks(spec)
     reward = build_reward(spec)
     notes: List[str] = []
+    resolved_layout: Optional[str] = None
     agent = _resolve(spec.agent, spec, where="agent", usage=usage)
     reflect = (_resolve(spec.reflect, spec, where="reflect", usage=usage)
                if spec.reflect else agent)
@@ -1133,8 +1221,10 @@ def compose(spec: EvolveSpec, *, usage: Optional[Usage] = None,
 
         kwargs.update(
             run=run, propose=reflector(reflect),
-            strategy=SingleSlot(initial_value=_read_text_target(spec.target)),
+            strategy=SeededAppendRules(seed=_read_text_target(spec.target)),
             blast_radius=SKILL_BLAST_RADIUS)
+        # The SeededAppendRules note is added after knobs merge, once we know
+        # whether a card or caller replaced strategy (#879).
         # Inline text is supported, but a path-looking missing file is almost
         # certainly a typo -- warn so plan surfaces it (#706).
         if looks_like_path_target(spec.target) and not os.path.isfile(
@@ -1208,6 +1298,27 @@ def compose(spec: EvolveSpec, *, usage: Optional[Usage] = None,
                         f"the target directory {dirname!r}; the Agent Skills spec "
                         f"requires them to match, so install the result as "
                         f"{root_name}/ (the gate keeps the name stable).")
+        elif spec.kind == "skill_library" and spec.validate_skill:
+            initial_errors = validate_skill_library(tree)
+            names = skill_names_in_library(tree)
+            if not names:
+                notes.append(
+                    "kind='skill_library': no */SKILL.md found under the target; "
+                    "seed at least two Agent Skill folders (init --kind skill_library "
+                    "writes a starter pair) or set validate_skill: false.")
+            elif initial_errors:
+                notes.append(
+                    "kind='skill_library': the initial library is not fully valid "
+                    f"({'; '.join(initial_errors)}), so the per-skill SKILL.md gate "
+                    "is off for this run; fix the frontmatter to enable it, or set "
+                    "validate_skill: false to silence this.")
+            else:
+                validators.append(SkillLibraryValidator())
+                if len(names) < 2:
+                    notes.append(
+                        f"kind='skill_library': only {len(names)} skill folder "
+                        f"({names[0]!r}); a library is ≥2 */SKILL.md — add another "
+                        "or use kind='skill_dir' for a single skill.")
         strategy = FileTree(tree, editable=list(spec.editable), frozen=frozen,
                             max_files_per_diff=spec.max_files_per_diff,
                             max_file_bytes=tspec.max_file_bytes,
@@ -1221,22 +1332,30 @@ def compose(spec: EvolveSpec, *, usage: Optional[Usage] = None,
                              sandbox_pool=sandbox_pool)
         context_files: Sequence[str] = ("**/SKILL.md", "**/AGENT.md", "*.md")
 
-        if spec.kind in ("skill_dir", "agent_dir"):
+        if spec.kind in ("skill_dir", "skill_library", "agent_dir"):
             if not isinstance(agent, WorkspaceAgent):
                 raise SpecError(
                     f"kind={spec.kind!r} needs a WorkspaceAgent ({WORKSPACE_AGENT_REFS}) "
                     f"so the directory is put in front of it; got "
                     f"{type(agent).__name__}")
-            layout = spec.layout or ("claude_skill" if spec.kind == "skill_dir" else "claude_agent")
+            if spec.kind == "skill_dir":
+                layout = spec.layout or "claude_skill"
+            elif spec.kind == "skill_library":
+                layout = spec.layout or "skill_library"
+            else:
+                layout = spec.layout or "claude_agent"
+            resolved_layout = layout
             extra = {"prompt_template": spec.prompt_template} if spec.prompt_template else {}
             kwargs["run"] = tree_runner(agent, layout=layout, **extra, **runner_common)
-            kwargs["blast_radius"] = (SKILL_BLAST_RADIUS if spec.kind == "skill_dir"
-                                      else HARNESS_BLAST_RADIUS)
+            kwargs["blast_radius"] = (SKILL_BLAST_RADIUS if spec.kind in (
+                "skill_dir", "skill_library") else HARNESS_BLAST_RADIUS)
+            notes.append(f"kind={spec.kind!r}: resolved layout={layout!r}")
         elif spec.kind == "agent_code":
             if not spec.entrypoint:
                 raise SpecError("kind='agent_code' needs entrypoint (argv the task prompt is appended to)")
+            resolved_layout = spec.layout or "root"
             kwargs["run"] = code_runner(
-                list(spec.entrypoint), layout=spec.layout or "root",
+                list(spec.entrypoint), layout=resolved_layout,
                 setup_cmd=list(spec.setup_cmd) or None,
                 test_cmd=list(spec.test_cmd) or None, timeout=spec.timeout,
                 env={k: os.environ[k] for k in spec.env_passthrough if k in os.environ},
@@ -1244,9 +1363,11 @@ def compose(spec: EvolveSpec, *, usage: Optional[Usage] = None,
             reward = gated_reward(reward)
             kwargs["blast_radius"] = HARNESS_BLAST_RADIUS
             context_files = ("**/*.py",)
-        else:  # plugin
+            notes.append(f"kind='agent_code': resolved layout={resolved_layout!r}")
+        elif spec.kind == "plugin":
             from .runners import PLUGIN_CONTEXT, plugin_runner
 
+            resolved_layout = spec.layout  # plugin_runner picks host layout
             kwargs["run"] = plugin_runner(
                 spec.host, agent_args=list(spec.entrypoint),
                 env_passthrough=list(spec.env_passthrough), timeout=spec.timeout,
@@ -1256,6 +1377,8 @@ def compose(spec: EvolveSpec, *, usage: Optional[Usage] = None,
             context_files = PLUGIN_CONTEXT[spec.host]
             notes.append("kind='plugin': candidate plugin code runs inside the host "
                          "process; prefer a container sandbox (see docs/plugins.md).")
+        else:
+            raise SpecError(f"kind {spec.kind!r} has no compose path")
 
         kwargs.update(strategy=strategy, agg_config=cfg,
                       propose=tree_reflector(reflect, strategy=strategy,
@@ -1267,6 +1390,14 @@ def compose(spec: EvolveSpec, *, usage: Optional[Usage] = None,
     # -- knobs: kind defaults < spec.evolve < caller overrides ------------------
     knobs: Dict[str, Any] = {**defaults, **(ov.knobs if ov else {}),
                              **_evolve_pass_through(spec.evolve), **overrides}
+    # kind=text defaults to SeededAppendRules above; a card (gepa/ace/dgm/
+    # skillopt) or compose(strategy=...) puts "strategy" in knobs and then
+    # overwrites that default. Don't also claim SeededAppendRules (#879).
+    if spec.kind == "text" and "strategy" not in knobs:
+        notes.append(
+            "kind=text: SeededAppendRules keeps the seed prompt and appends each "
+            "accepted one-sentence rule under '# Learned rules' (#837); pass "
+            "strategy=SingleSlot(...) in evolve knobs for full-rewrite semantics")
     # The dedicated field and the pass-through agree; an explicit `spec.evolve`
     # entry wins, exactly as it would for any other knob.
     if spec.extra_artifacts:
@@ -1281,9 +1412,20 @@ def compose(spec: EvolveSpec, *, usage: Optional[Usage] = None,
     knobs.setdefault("n_workers", max(1, min(default_workers, train)))
     if not knobs.get("asynchronous"):
         knobs.setdefault("max_concurrency", knobs["n_workers"])
-    elif "max_seconds" not in knobs:
-        knobs["max_seconds"] = 600.0
-        notes.append("asynchronous=True needs max_seconds; defaulted to 600.")
+    else:
+        # Async is a second contract (#809). Plan must name budgets in async
+        # units — never leave rounds to be reinterpreted at evolve() time.
+        if "max_seconds" not in knobs:
+            knobs["max_seconds"] = 600.0
+            notes.append("asynchronous=True needs max_seconds; defaulted to 600.")
+        if "max_rollouts" not in knobs:
+            rounds = int(knobs.get("rounds", 15))
+            workers = int(knobs["n_workers"])
+            knobs["max_rollouts"] = rounds * max(1, workers)
+            notes.append(
+                f"asynchronous=True needs max_rollouts; derived "
+                f"{knobs['max_rollouts']} from rounds*n_workers at plan time "
+                f"(rounds is sync-only — pass max_rollouts= to be explicit).")
     if "agg_config" in knobs and isinstance(knobs["agg_config"], Mapping):
         knobs["agg_config"] = build_agg_config(spec, **knobs["agg_config"])
     elif spec.kind == "text" and (spec.agg_config or (ov and ov.agg_config)):
@@ -1336,7 +1478,8 @@ def compose(spec: EvolveSpec, *, usage: Optional[Usage] = None,
         notes.append(small_held_out_message(n_held, len(tasks), held_out))
     return Composition(tasks=tasks, reward=reward, kwargs=kwargs, tree=tree,
                        notes=notes, audit=audit,
-                       algorithm=_algorithm_echo(chosen, spec, ov) if chosen else None)
+                       algorithm=_algorithm_echo(chosen, spec, ov) if chosen else None,
+                       layout=resolved_layout)
 
 
 def run_spec(spec: EvolveSpec, **hooks: Any) -> EvolutionResult:
@@ -1398,3 +1541,35 @@ def estimate(comp: Composition, *, usd_per_call: Optional[float] = None) -> Dict
         out["assumptions"].append(
             "no per-call price known for this agent; pass usd_per_call to price it")
     return out
+
+
+def budget_round_overshoot_warning(
+    est: Dict[str, Any],
+    budget_usd: Optional[float],
+    usd_per_call: Optional[float],
+) -> Optional[str]:
+    """Warn when a dollar budget can be blown by the seed + first round (#764).
+
+    ``--budget`` / ``budget_usd`` is checked between rounds via
+    ``evolve(stop_when=)``, so one round (plus the seed held-out scan) can
+    overshoot by up to its call bound. Prefer this warning over inventing an
+    in-round hard stop. Reuses :func:`estimate`'s ``seed_score_calls`` and
+    ``calls_per_round`` math.
+    """
+    if budget_usd is None or usd_per_call is None or usd_per_call <= 0:
+        return None
+    per_round = sum(est["calls_per_round"].values())
+    first_bound = int(est["seed_score_calls"]) + per_round
+    first_usd = first_bound * usd_per_call
+    if budget_usd >= first_usd:
+        return None
+    # Keep money readable: drop trailing zeros without inventing precision.
+    def _money(v: float) -> str:
+        return f"{v:g}"
+
+    return (
+        f"budget ${_money(budget_usd)} is below the seed+one-round upper bound "
+        f"(~{first_bound} calls × ${_money(usd_per_call)}/call ≈ "
+        f"${_money(first_usd)}); budget is only checked between rounds, so one "
+        f"round can overshoot by up to its call bound"
+    )

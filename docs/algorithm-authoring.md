@@ -13,9 +13,19 @@ card** that `plan` / `init` / hosts can call — without reading the whole
 
 | You want… | Use… |
 |---|---|
-| A name in `agentdescent algorithms list` / `"algorithm": "…"` | **This page** |
+| A name in `agentdescent algorithms list` / `"algorithm": "…"` | **This page** (Algorithm **card**) |
 | A full `examples/<name>/` research port | [porting-checklist.md](porting-checklist.md) |
 | A `MethodPolicy` microport in the matrix | [porting-methodpolicy.md](porting-methodpolicy.md) |
+| Not sure which / population vs Policies | [algorithm decision tree](algorithm-decision-tree.md) |
+
+Same name ≠ same fidelity: a card such as `"algorithm": "gepa"` is a wheel
+mechanism slice; `examples/gepa/` is the paper-faithful port. See
+[port fidelity](port-fidelity.md).
+
+Same name ≠ same fidelity: a card such as `"algorithm": "gepa"` is a wheel
+mechanism slice (`surface=card`); `examples/gepa/` is the paper-faithful port.
+`algorithms list --kind K` / MCP `list_algorithms(kind=…)` must filter by host
+kind so ineligible cards are not offered. See [port fidelity](port-fidelity.md).
 
 The catalog of shipped cards is generated from the registry:
 [named algorithms](algorithms.md).
@@ -41,11 +51,11 @@ Copy an existing small card, register it, expose params / kinds / fidelity,
 add a thin doc page, and a changelog fragment. That is the whole PR.
 
 1. **Copy a pattern.** Smallest shipped preset:
-   [`archive_selection` in `agentdescent/algorithms/builtin.py`](https://github.com/Birfy/agentdescent/blob/main/agentdescent/algorithms/builtin.py)
+   [`archive_selection` in `agentdescent/algorithms/builtin.py`](https://github.com/ThinkFlowLab/agentdescent/blob/main/agentdescent/algorithms/builtin.py)
    (parent sampling only). Slightly richer mechanism card:
-   [`ace.py`](https://github.com/Birfy/agentdescent/blob/main/agentdescent/algorithms/ace.py).
+   [`ace.py`](https://github.com/ThinkFlowLab/agentdescent/blob/main/agentdescent/algorithms/ace.py).
    A fill-in scaffold lives at
-   [`agentdescent/algorithms/_TEMPLATE.py`](https://github.com/Birfy/agentdescent/blob/main/agentdescent/algorithms/_TEMPLATE.py)
+   [`agentdescent/algorithms/_TEMPLATE.py`](https://github.com/ThinkFlowLab/agentdescent/blob/main/agentdescent/algorithms/_TEMPLATE.py)
    (not imported by the package — copy it, rename it, then wire the import).
 2. **Implement `build`.** Return
    `Overrides(policies=…, knobs=…, agg_config=…, notes=…)`. Policy slot names
@@ -99,7 +109,7 @@ register(Algorithm(
     summary="Parent sampling from an archive of every accepted candidate, "
             "tempered by novelty (DGM's rule by default) instead of always "
             "extending the head.",
-    kinds=("text", "skill_dir", "agent_dir", "agent_code", "plugin"),
+    kinds=("text", "skill_dir", "skill_library", "agent_dir", "agent_code", "plugin"),
     fidelity="preset",
     params=(
         Param("sampling", "str", "sigmoid_novelty", "...",
@@ -135,6 +145,7 @@ Acceptance for this path: a newcomer can add a named algorithm and see it in
 
 ## Out of scope here
 
-* Growing the research catalog itself ([#384](https://github.com/Birfy/agentdescent/issues/384)).
+* Growing the research catalog itself ([#384](https://github.com/ThinkFlowLab/agentdescent/issues/384)).
 * Full MethodPolicy / `examples/` microports.
 * Engine changes (`evolve()`, aggregators, hosts).
+* New `evolve()` knobs: Policies field or `BudgetSettings` / `RuntimeSettings` / `ObservabilitySettings` (#804) — not a raw top-level kwarg.

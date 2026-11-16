@@ -1,6 +1,6 @@
 {
   "name": "dsh-agentdescent",
-  "version": "0.8.0",
+  "version": "0.10.0",
   "description": "Evolve skills, agents, prompts, code and plugins from inside DeepSeek Harness, with AgentDescent.",
   "keywords": [
     "dsh-plugin",
@@ -39,7 +39,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Birfy/agentdescent.git",
+    "url": "git+https://github.com/ThinkFlowLab/agentdescent.git",
     "directory": "integrations/dsh-agentdescent"
   }
 }

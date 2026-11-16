@@ -72,6 +72,7 @@ __all__ = [
     "SandboxProvider",
     "SandboxSpec",
     "VerifierProtocol",
+    "policy_digest",
 ]
 
 
@@ -128,6 +129,31 @@ class MergeContext:
     #: difference as a quality change -- in either direction.
     base_env: str = ""
     cand_env: str = ""
+    #: Which decision procedure produced this decision, as
+    #: :func:`policy_digest`'s 64-hex digest. ``""`` is the honest "the caller
+    #: built this context by hand and did not say", and it is the default so
+    #: that every hand-built :class:`MergeContext` keeps working unchanged. The
+    #: aggregator fills it from ``Aggregator.policy_digest``; a policy that
+    #: branches on it would be reading the version of itself, which no shipped
+    #: policy does.
+    policy_digest: str = ""
+    #: Task-level probe measurements, when the installed acceptance policy asked
+    #: for them (#938). Additive and optional: ``None`` is what every run has
+    #: today, and no existing field changes meaning. The aggregator fills it only
+    #: for a policy that declares ``needs_probes``, and it carries both the
+    #: partitions **and** the evaluator, so a policy cannot score its own
+    #: candidate. Typed as ``Any`` to keep this module free of a cycle through
+    #: :mod:`agentdescent.acceptance`, which imports this one for the types.
+    probes: Optional[Any] = None
+    #: What producing this diff cost (#945), or ``None`` when nobody measured
+    #: it. Additive and optional: ``None`` is what every run has today, and a
+    #: gate without cost still behaves exactly as before. ``aggregator._decide``
+    #: does **not** fill it yet -- a caller, or :class:`CostPolicy`'s card
+    #: fallback, supplies it -- so anything that reads this field must handle
+    #: ``None``. Typed as ``Any`` for the same reason as ``probes``:
+    #: :mod:`agentdescent.cost` imports this module, and a policy that wants the
+    #: type imports ``Cost`` from there.
+    diff_cost: Optional[Any] = None
 
     @staticmethod
     def rate(counts: Tuple[float, float]) -> float:
@@ -224,6 +250,18 @@ class AcceptDecision:
     #: Measured change in the full held-out rate. The aggregator folds this back
     #: into the artifact's running prior when a candidate is refused.
     observed_delta: float = 0.0
+    #: The gate could not measure what it needs, so the candidate is neither
+    #: committed nor rejected (#938). The aggregator reports the category and
+    #: leaves the artifact's prior alone: a missing measurement is not evidence
+    #: against the lesson, and silently falling back to a weaker gate would hide
+    #: that the strong one never ran.
+    defer: bool = False
+    #: Review evidence to store beside the ledger once the commit lands
+    #: (``rule_id -> {precondition, behavior_change, expected_effect, verifier,
+    #: trace_ids, evidence_card_hash}``, #938). ``None`` for a gate that keeps no
+    #: provenance; the aggregator writes it only after ``Ledger.commit`` returned,
+    #: so it cannot bypass CAS.
+    provenance: Optional[Dict[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -252,8 +290,10 @@ class ProposalContext:
     #: The artifact version this proposal is based on -- what staleness is
     #: measured against once the proposal takes a while to come back.
     base_version: int = 0
-    #: How many proposals the caller would like. The default policy ignores it
-    #: and returns at most one; asking for more is a different algorithm.
+    #: How many proposals the caller would like. Under ``evolve()`` the
+    #: adapter sets this from ``getattr(policy, "k", 1)`` and ingests every
+    #: returned string as its own evidence card (#808). A policy that samples
+    #: k variants should set ``.k`` and return up to that many strings.
     k: int = 1
     #: Proposals this worker already made, newest last. Empty unless the policy
     #: asked to be given them.
@@ -489,11 +529,16 @@ class SandboxProvider(Protocol):
 class Policies:
     """Every replaceable piece, in one argument.
 
-    `evolve()` has thirty-five parameters. Each capability after this one --
-    executors, sandbox providers, cache backends -- would otherwise add another
-    handful, to two entry points, plus the generated API reference and the
-    public-surface test. So they go here instead, and the existing keyword
-    arguments stay as shortcuts onto these fields; nothing is deprecated.
+    `evolve()` has a large flat parameter surface. Each *behaviour* capability
+    after this one -- executors, sandbox providers, cache backends -- would
+    otherwise add another handful, to two entry points, plus the generated API
+    reference and the public-surface test. So they go here instead, and the
+    existing keyword arguments stay as shortcuts onto these fields; nothing is
+    deprecated. Numerics and flags that are not replaceable pieces go in
+    :class:`~agentdescent.evolve_settings.BudgetSettings` /
+    :class:`~agentdescent.evolve_settings.RuntimeSettings` /
+    :class:`~agentdescent.evolve_settings.ObservabilitySettings` (#804), not as
+    another top-level ``evolve`` kwarg.
 
     Every field is ``None`` by default and ``None`` means "the current
     behaviour", so `Policies()` and passing nothing are the same run.
@@ -522,6 +567,13 @@ class Policies:
     verifier: Optional[VerifierProtocol] = None
     ledger: Optional[LedgerProtocol] = None
     aggregator_factory: Optional["AggregatorFactory"] = None
+    #: When ``True`` with an ``aggregator_factory=`` that cannot honour
+    #: merge-side fields (``conflict`` / ``fusion`` / ``acceptance`` /
+    #: ``promotion`` / ``screen``), the run warns and continues. The default
+    #: ``None``/false **fails** instead of silently dropping those Policies
+    #: (#807). Population / mechanism factories that take the slots do not
+    #: need this flag.
+    accept_orphaned_merge_policies: Optional[bool] = None
     #: Where evaluations are memoised. The default is in-process; a shared one
     #: lets separate processes stop paying twice for the same gate.
     eval_cache: Optional["CacheProtocol"] = None
@@ -572,3 +624,158 @@ class Policies:
             if value is not None:
                 merged[key] = value
         return Policies(**merged)
+
+
+# ---------------------------------------------------------------------------
+# The policy version
+# ---------------------------------------------------------------------------
+
+#: The ``AggregatorConfig`` fields that decide which candidates are admitted.
+#:
+#: ``cas_attempts`` / ``cas_backoff`` are deliberately absent: they buy retries
+#: *after* somebody else committed first, so no value of them can change a
+#: decision. ``audit_drain_per_step`` moves spend between the gate and the
+#: ranking, not the gate. A field left out here is a deliberate "this cannot
+#: change an outcome", and a new config field is a decision to make rather than
+#: something that silently enters the digest.
+#:
+#: ``trust_region_policy`` is not in this list because it is not a scalar -- it
+#: goes through :func:`_value` below, class *and* fingerprint, like a policy.
+_DECISION_CONFIG_FIELDS: Tuple[str, ...] = (
+    "base_delta", "anneal_half_life", "accept_samples",
+    "batch_trigger", "max_wait_rounds",
+    "alpha_head", "alpha_tail",
+    "trust_region_ops", "trust_region_chars",
+    "promote_after_k", "fusion_tournament", "bounded_gate",
+)
+
+#: The verifier's own knobs: how it measures, not what it measures.
+#:
+#: ``held_out`` (the task list) is data, and it is already in the run manifest.
+#: ``budget`` is absent on purpose: it is a spend cap whose counters *change
+#: while the run spends them*, so folding it in would make the digest of one
+#: unchanging policy drift round by round -- exactly the false "policy changed"
+#: signal this feature exists to rule out.
+_DECISION_VERIFIER_FIELDS: Tuple[str, ...] = (
+    "rule_subset", "learned_noise", "seed",
+)
+
+
+def _canonical(payload: Any) -> str:
+    """Deterministic JSON: sorted keys, no whitespace, nothing unserialisable."""
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"),
+                      allow_nan=False, default=repr)
+
+
+def _describe(obj: Any) -> Optional[Dict[str, Any]]:
+    """A replaceable piece as ``{type, fingerprint?}`` -- never its live state.
+
+    Instance state would be the obvious thing to hash and it is the wrong one: a
+    policy carries caches, counters and bound verifiers that change during a run,
+    so hashing ``__dict__`` would report a policy change every round. What makes
+    a *version* is which class implements the slot, plus whatever the class says
+    about itself through the optional ``policy_fingerprint()`` hook -- the knobs
+    a rule keeps on the instance, which are not live state but configuration
+    (:class:`~agentdescent.advantage.StableDistanceAcceptance.strength`,
+    :class:`~agentdescent.advantage.AdaptiveTrustRegion`'s bounds). A rule whose
+    constructor arguments change what it admits implements the hook; a rule that
+    does not is identified by its class alone. A hook that raises records the
+    exception type rather than failing a run: a digest is an observation, and it
+    is not allowed to be the reason a run dies.
+    """
+    if obj is None:
+        return None
+    cls = obj if isinstance(obj, type) else type(obj)
+    name = (f"{getattr(cls, '__module__', '')}."
+            f"{getattr(cls, '__qualname__', str(cls))}")
+    out: Dict[str, Any] = {"type": name}
+    hook = getattr(obj, "policy_fingerprint", None)
+    if callable(hook):
+        try:
+            out["fingerprint"] = hook()
+        except Exception as exc:                  # noqa: BLE001 - see docstring
+            out["fingerprint"] = f"<error:{type(exc).__name__}>"
+    return out
+
+
+def _value(obj: Any) -> Any:
+    """A slot's value, hashed **by value** when it is a plain scalar.
+
+    ``_describe`` is right for an object and wrong for a flag: it reduces
+    ``True`` and ``False`` to ``builtins.bool``, so ``Policies(
+    accept_orphaned_merge_policies=True)`` -- the flag that decides whether merge
+    policies may be dropped -- hashed the same as ``False``. Bools, numbers and
+    strings are their own description; everything else goes through
+    :func:`_describe`.
+    """
+    if obj is None or isinstance(obj, (bool, int, float, str)):
+        return obj
+    return _describe(obj)
+
+
+def _scalars(obj: Any, names: Sequence[str]) -> Dict[str, Any]:
+    """The named attributes that are plain JSON scalars; anything else is skipped.
+
+    A field holding an object is described elsewhere (or not at all) by whoever
+    decided to leave it out of ``names``. Coercing it through ``repr`` here would
+    put a memory address in the digest.
+    """
+    out: Dict[str, Any] = {}
+    for name in names:
+        value = getattr(obj, name, None)
+        if value is None or isinstance(value, (bool, int, float, str)):
+            out[name] = value
+    return out
+
+
+def policy_digest(policies: Optional["Policies"] = None, *,
+                  config: Any = None, verifier: Any = None) -> str:
+    """The 64-hex version of a decision procedure: the bundle, the config, the verifier.
+
+    A commit records the artifact and the diff. It did not record **which
+    acceptance / conflict / fusion / promotion / staleness rules admitted it**,
+    so a three-line policy change that moved the acceptance rate (#52) could not
+    be separated from the commits that landed before it. This is that missing
+    version, as a content hash a ledger can store beside a decision and a run can
+    compare between rounds.
+
+    Deliberately **not** hashed: anything that changes without a policy change.
+    Environment, timestamps, mutable counters, the verifier's spend (see
+    ``_DECISION_VERIFIER_FIELDS``) and the held-out data (it belongs to the
+    manifest) are all out, because a digest that drifts is worse than none --
+    every ``policy_change`` edge it produces would be false.
+
+    Flags and numbers are hashed **by value**; a replaceable piece is hashed by
+    class plus its ``policy_fingerprint()``, so the honest limitation is that two
+    instances of a rule whose constructor arguments matter hash the same unless
+    that class implements the hook. ``stale, counter-carrying state is never
+    hashed`` -- that would report a policy change every round.
+
+    ``policies=None`` means :class:`Policies`, i.e. the shipped bundle -- the
+    same reading ``evolve()`` gives it. Nothing here reads the environment, the
+    clock or the filesystem, so the same arguments give the same digest on any
+    machine.
+    """
+    bundle = policies if policies is not None else Policies()
+    if config is None:
+        from .aggregator import AggregatorConfig      # circular at module import
+        config = AggregatorConfig()
+    fields = getattr(bundle, "__dataclass_fields__", {})
+    payload = {
+        "schema": 2,
+        "policies": {name: _value(getattr(bundle, name, None))
+                     for name in sorted(fields)},
+        "aggregator": {
+            **_scalars(config, _DECISION_CONFIG_FIELDS),
+            # A policy, not a scalar: `AdaptiveTrustRegion(initial=…, window=…)`
+            # decides which diffs are in range, and hashing it by class alone
+            # made every knob invisible (#975 review).
+            "trust_region_policy": _value(
+                getattr(config, "trust_region_policy", None)),
+        },
+        "verifier": {
+            "described": _describe(verifier),
+            "config": _scalars(verifier, _DECISION_VERIFIER_FIELDS),
+        },
+    }
+    return hashlib.sha256(_canonical(payload).encode("utf-8")).hexdigest()
