@@ -285,6 +285,84 @@ def test_a_reused_store_does_not_report_an_earlier_run(tmp_path):
     assert os.path.realpath(report["run_dir"]) == os.path.realpath(str(store)), report
 
 
+LIVE_EARLIER = '''
+import json, os, sys, time
+# A run that is still going: runstore rewrites its status.json every round, so
+# its mtime and size move in the handoff window exactly like a new run's file.
+path = os.path.join(sys.argv[1], "status.json")
+rounds = 0
+while True:
+    rounds += 1
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump({"run_id": "old-run", "started": 1000.0, "round": rounds,
+                   "state": "running"}, fh)
+    time.sleep(0.2)
+'''
+
+LATE_NEW = '''
+import json, os, sys, time
+store = sys.argv[1]
+time.sleep(1.2)
+run_dir = os.path.join(store, "new-run")
+os.makedirs(run_dir, exist_ok=True)
+tmp = os.path.join(run_dir, "status.json.tmp")
+with open(tmp, "w", encoding="utf-8") as fh:
+    json.dump({"run_id": "new-run", "started": time.time(), "round": 1,
+               "state": "running"}, fh)
+os.replace(tmp, os.path.join(run_dir, "status.json"))
+'''
+
+
+@pytest.mark.skipif(os.environ.get("AGENTDESCENT_LONG_RUN_SMOKE") != "1",
+                    reason="set AGENTDESCENT_LONG_RUN_SMOKE=1 to run the detached smoke")
+def test_a_live_earlier_run_is_never_reported_as_this_handoff(tmp_path):
+    # A reused store can hold a run that is *still going*, and runstore
+    # rewrites that run's status.json every round (#1101). Its file then moves
+    # in the window exactly like the new run's, which the mtime/size snapshot
+    # cannot tell apart -- the first poll adopted the earlier run and the page's
+    # read-back polled it. `started` is written once at launch and never reset,
+    # so the launch epoch taken with the snapshot is what separates the two.
+    store = tmp_path / "runs"
+    old = store / "old-run"
+    old.mkdir(parents=True)
+    (old / "status.json").write_text(
+        json.dumps({"run_id": "old-run", "started": 1000.0, "round": 1,
+                    "state": "running"}), encoding="utf-8")
+    live = tmp_path / "live_earlier.py"
+    live.write_text(LIVE_EARLIER, encoding="utf-8")
+    late = tmp_path / "late_new.py"
+    late.write_text(LATE_NEW, encoding="utf-8")
+    ticking = subprocess.Popen([sys.executable, str(live), str(old)])
+    try:
+        # Nothing this launch started: the ticking earlier run is not a handoff,
+        # so the report is the same gap as an empty store.
+        handed = subprocess.run(
+            ["bash", str(WRAPPER), "--store", str(store), "--", "sleep", "1"],
+            cwd=REPO, capture_output=True, text=True, timeout=60,
+            env=dict(os.environ, DSH_RUN_HANDOFF_WAIT="1"))
+        assert handed.returncode == 0, handed.stderr
+        report = json.loads((store / "waiting.json").read_text(encoding="utf-8"))
+        assert report["found"] is False, report
+
+        # This launch's own run appears at +1.2s while the earlier one keeps
+        # ticking: the report names the new run and the read-back follows it.
+        handed = subprocess.run(
+            ["bash", str(WRAPPER), "--store", str(store), "--",
+             sys.executable, str(late), str(store)],
+            cwd=REPO, capture_output=True, text=True, timeout=60,
+            env=dict(os.environ, DSH_RUN_HANDOFF_WAIT="3"))
+        assert handed.returncode == 0, handed.stderr
+        report = json.loads((store / "waiting.json").read_text(encoding="utf-8"))
+        assert report["run_id"] == "new-run", report
+        assert Path(report["run_dir"]).name == "new-run", report
+        followed = json.loads((Path(report["run_dir"]) / "status.json")
+                              .read_text(encoding="utf-8"))
+        assert followed["run_id"] == "new-run", followed
+    finally:
+        ticking.terminate()
+        ticking.wait(timeout=10)
+
+
 @pytest.mark.skipif(os.environ.get("AGENTDESCENT_LONG_RUN_SMOKE") != "1",
                     reason="set AGENTDESCENT_LONG_RUN_SMOKE=1 to run the detached smoke")
 def test_two_handoffs_into_stores_called_runs_do_not_take_one_session(tmp_path):

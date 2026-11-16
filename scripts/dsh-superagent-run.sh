@@ -62,9 +62,11 @@ LAUNCH=(bash -c 'exec >>"$1" 2>&1; shift; exec "$@"' _ "$LOG")
 SNAP="$STORE/.handoff-$$-$RANDOM.json"
 trap 'rm -f "$SNAP"' EXIT
 python3 - "$STORE" "$SNAP" <<'PY'
-import glob, json, os, sys
+import glob, json, os, sys, time
 store, out = sys.argv[1:3]
-snap = {}
+# The launch epoch rides in the snapshot: `started` is written once at launch
+# and never reset, so a changed file can be checked against it (#1101).
+snap = {"epoch": time.time()}
 paths = [os.path.join(store, "status.json")] + sorted(
     glob.glob(os.path.join(store, "*", "status.json")))
 for path in paths:
@@ -92,7 +94,22 @@ python3 - "$STORE" "$WAIT" "$DRIVER" "$SESSION" "$LOG" "$QUOTED" "$SNAP" <<'PY'
 import glob, json, os, sys, time
 store, wait, driver, session, log, command, snap_path = sys.argv[1:8]
 before = json.load(open(snap_path, encoding="utf-8"))
+epoch = float(before.pop("epoch"))
 deadline, found = time.time() + float(wait), None
+
+
+def started_at(path):
+    """A run's launch time, or None when the file does not carry a numeric one."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            started = json.load(fh).get("started")
+    except (OSError, ValueError):
+        return None
+    if isinstance(started, bool) or not isinstance(started, (int, float)):
+        return None
+    return float(started)
+
+
 while time.time() < deadline:
     paths = [p for p in [os.path.join(store, "status.json")]
              + sorted(glob.glob(os.path.join(store, "*", "status.json")))
@@ -104,8 +121,19 @@ while time.time() < deadline:
         except OSError:
             continue
         seen = before.get(path)
-        if seen is None or [st.st_mtime, st.st_size] != seen:
+        if seen is None:
+            # Not there when the snapshot was taken: this launch made it.
             fresh.append(path)
+            continue
+        if [st.st_mtime, st.st_size] == seen:
+            continue
+        # A reused store can hold a run that is still going, and that run
+        # rewrites its own status.json every round (#1101). Only a file whose
+        # `started` is no older than this launch is this handoff's.
+        started = started_at(path)
+        if started is None or started < epoch:
+            continue
+        fresh.append(path)
     if fresh:
         found = max(fresh, key=os.path.getmtime)
         break
