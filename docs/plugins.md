@@ -1,3 +1,7 @@
+---
+description: Use AgentDescent from Claude Code, Codex, OpenCode, DeepSeek Harness or another MCP host: install, plan, run, inspect and apply an evolution.
+---
+
 # Use it from your agent — DeepSeek Harness, Claude Code, Codex, OpenCode, Grok Bot
 
 Everything else in these docs is Python: you write a dozen lines and hand them

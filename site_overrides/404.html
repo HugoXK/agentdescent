@@ -1,0 +1,14 @@
+{% extends "main.html" %}
+{% block content %}
+<div class="ad-404">
+  <p class="ad-404-kicker">AGENTDESCENT / 404</p>
+  <h1>This page moved or never existed.</h1>
+  <p>The docs may have been renamed, or the link is incomplete.</p>
+  <div class="ad-404-links">
+    <a href="{{ nav.homepage.url | url }}">Home</a>
+    <a href="{{ 'docs/' | url }}">Documentation</a>
+    <a href="{{ 'install/' | url }}">Quickstart</a>
+    <a href="{{ 'results/' | url }}">Measured results</a>
+  </div>
+</div>
+{% endblock %}

@@ -7,11 +7,11 @@ optional check run, so a human can review and merge it on GitHub.
 
 ```bash
 agentdescent github publish --proposal proposal.json \
-  --owner Birfy --repo agentdescent \
+  --owner ThinkFlowLab --repo agentdescent \
   --token-env AGENTDESCENT_GITHUB_TOKEN        # plan, no network
 
 agentdescent github publish --proposal proposal.json \
-  --owner Birfy --repo agentdescent --apply    # write branch + PR + check
+  --owner ThinkFlowLab --repo agentdescent --apply    # write branch + PR + check
 ```
 
 Without `--apply` the command is a **plan**: it validates the proposal and
@@ -66,7 +66,7 @@ aborting a half-written publish.
 ## Status
 
 ```bash
-agentdescent github status --pr 757 --owner Birfy --repo agentdescent --json
+agentdescent github status --pr 757 --owner ThinkFlowLab --repo agentdescent --json
 ```
 
 Returns the PR state, head/base, draft/mergeable and every check run. It is
@@ -106,7 +106,7 @@ requests in review bodies and inline comments — classifies them (`test`,
 ready for a human click:
 
 ```bash
-agentdescent github review --pr 772 --owner Birfy --repo agentdescent --json
+agentdescent github review --pr 772 --owner ThinkFlowLab --repo agentdescent --json
 ```
 
 The packet contains:
