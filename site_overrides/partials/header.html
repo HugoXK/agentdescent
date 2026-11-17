@@ -33,10 +33,13 @@
       </div>
     </div>
     <div class="ad-header-links" aria-label="Main navigation">
-      <a href="{{ nav.homepage.url | url }}">Overview</a>
-      <a href="{{ 'install/' | url }}">Quickstart</a>
-      <a href="{{ nav.homepage.url | url }}#demo">Interactive demo</a>
-      <a class="ad-header-active" aria-current="page" href="{{ 'docs/' | url }}">Docs</a>
+      {% set u = page.url if page else '' %}
+      <a href="{{ nav.homepage.url | url }}"{% if u == '' %} class="ad-header-active" aria-current="page"{% endif %}>Overview</a>
+      <a href="{{ 'install/' | url }}"{% if u.startswith('install') or u.startswith('plugin-quickstart') or u.startswith('quickstart') %} class="ad-header-active" aria-current="page"{% endif %}>Quickstart</a>
+      <a href="{{ 'results/' | url }}"{% if u.startswith('results') %} class="ad-header-active" aria-current="page"{% endif %}>Results</a>
+      <a href="{{ nav.homepage.url | url }}#demo">Demo</a>
+      <a href="{{ 'docs/' | url }}"{% if u.startswith('docs') %} class="ad-header-active" aria-current="page"{% endif %}>Docs</a>
+      <a class="ad-deepwiki-link" href="https://deepwiki.com/ThinkFlowLab/agentdescent">DeepWiki ↗</a>
     </div>
     {% if config.theme.palette %}
       {% if not config.theme.palette is mapping %}

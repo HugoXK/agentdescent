@@ -1,8 +1,9 @@
 # AgentDescent
 
-**[Website & interactive demo](https://thinkflowlab.github.io/agentdescent/)** ·
-[Get started](https://thinkflowlab.github.io/agentdescent/install/) ·
-[Documentation](https://thinkflowlab.github.io/agentdescent/docs/)
+
+**[Website & interactive demo](https://agentdescent.hugoxk.online/)** ·
+[Get started](https://agentdescent.hugoxk.online/install/) ·
+[Documentation](https://agentdescent.hugoxk.online/docs/)
 
 > **Gradient descent — but the parameters are agents.** AgentDescent evolves
 > prompts, skills, agent directories, agent code and host plugins against your
@@ -14,9 +15,11 @@
 
 [![PyPI](https://img.shields.io/pypi/v/agentdescent)](https://pypi.org/project/agentdescent/)
 [![tests](https://github.com/ThinkFlowLab/agentdescent/actions/workflows/tests.yml/badge.svg)](https://github.com/ThinkFlowLab/agentdescent/actions/workflows/tests.yml)
-[![docs](https://img.shields.io/badge/docs-mkdocs--material-1f6feb)](https://thinkflowlab.github.io/agentdescent/)
+[![docs](https://img.shields.io/badge/docs-mkdocs--material-1f6feb)](https://agentdescent.hugoxk.online/)
 [![python](https://img.shields.io/badge/python-%E2%89%A53.9-1f6feb)](https://www.python.org/)
 [![license](https://img.shields.io/badge/license-MIT-3fb950)](https://github.com/ThinkFlowLab/agentdescent/blob/main/LICENSE)
+
+[Ask DeepWiki](https://deepwiki.com/ThinkFlowLab/agentdescent) for source-grounded Q&A.
 
 ## Install
 
@@ -75,7 +78,7 @@ print(result.rendered, result.final_reward, result.error)
 
 Credentials are read from the environment at call time — never from code — and
 the base URL picks the provider
-([every provider →](https://thinkflowlab.github.io/agentdescent/agents/#configuring-your-provider-and-key)):
+([every provider →](https://agentdescent.hugoxk.online/agents/#configuring-your-provider-and-key)):
 
 ```bash
 export OPENAI_BASE_URL=https://api.deepseek.com   # or GLM, Ark, a local vLLM, OpenAI itself
@@ -107,9 +110,9 @@ to 0.583**, learning *"Respond with only the requested answer, omitting any extr
 explanation or restatement."* That evolves an **instruction** (`SingleSlot`), not
 an Agent Skill folder — for a library run `agentdescent demo --kind skill_library`.
 Pass `agent=LLMAgent(claude_code())` (or any
-[agent or LLM](https://thinkflowlab.github.io/agentdescent/agents/)) instead of
+[agent or LLM](https://agentdescent.hugoxk.online/agents/)) instead of
 `run`/`propose` to evolve against a tool-using CLI agent.
-[Quickstart — dataset to skill →](https://thinkflowlab.github.io/agentdescent/quickstart-skill/)
+[Quickstart — dataset to skill →](https://agentdescent.hugoxk.online/quickstart-skill/)
 
 ### From the CLI, on a file or directory
 
@@ -136,12 +139,12 @@ agentdescent demo --algorithm archive_selection   # watch one run offline
 
 In a spec it is one field — `"algorithm": "gepa"` or
 `{"name": "gepa", "params": {...}}` — and every explicit field still wins.
-[The catalog →](https://thinkflowlab.github.io/agentdescent/algorithms/)
+[The catalog →](https://agentdescent.hugoxk.online/algorithms/)
 
 **Cards vs ports:** Path A names **cards** (wheel mechanism slices). The
 **twenty-three research ports** are source-only under `examples/` — same slug is
 not the same fidelity; never read a card run as paper numbers
-([decision tree](https://thinkflowlab.github.io/agentdescent/algorithm-decision-tree/), #384).
+([decision tree](https://agentdescent.hugoxk.online/algorithm-decision-tree/), #384).
 Ports run from a checkout, each with a `--dry-run` that needs no API key:
 
 * **Benchmark-faithful (8):** ACE · GEPA · EvoSkill · SkillOpt · ADAS · DGM ·
@@ -157,15 +160,15 @@ python -m examples.ace.ace_context_evolution --model claude-haiku-4-5 --async   
 
 Fidelity is declared per port and follows each project's *released code*;
 analogues are not benchmark reproductions.
-[All twenty-three, with measured results →](https://thinkflowlab.github.io/agentdescent/self-evolution-examples/)
+[All twenty-three, with measured results →](https://agentdescent.hugoxk.online/self-evolution-examples/)
 
 ## Add an algorithm
 
 * **A named card, in one PR** — a `build(ctx, params) -> Overrides` that fills
-  [policy slots](https://thinkflowlab.github.io/agentdescent/policy-guide/) and
+  [policy slots](https://agentdescent.hugoxk.online/policy-guide/) and
   `evolve()` knobs. Copy `agentdescent/algorithms/_TEMPLATE.py`, register it, and
   regenerate the catalog with `python -m tools.gen_algorithms_docs`.
-  [Register a named Algorithm card →](https://thinkflowlab.github.io/agentdescent/algorithm-authoring/)
+  [Register a named Algorithm card →](https://agentdescent.hugoxk.online/algorithm-authoring/)
 * **From your own package** — no fork needed; expose it as an entry point and
   `agentdescent algorithms list` picks it up:
 
@@ -204,8 +207,8 @@ for you to check first.
 themselves are evolvable, each rollout in an isolated copy of the host with
 hooks and permissions frozen and a recursion guard. Flagship library demo:
 `agentdescent demo --kind skill_library`.
-[The plugin, step by step →](https://thinkflowlab.github.io/agentdescent/plugin-quickstart/)
-· [set it up and test it →](https://thinkflowlab.github.io/agentdescent/testing-guide/)
+[The plugin, step by step →](https://agentdescent.hugoxk.online/plugin-quickstart/)
+· [set it up and test it →](https://agentdescent.hugoxk.online/testing-guide/)
 
 ## How it works
 
@@ -236,12 +239,12 @@ The figure is regenerated from TikZ by
   `promotion`. Each defaults to the shipped rule; a driver *refuses* a field it
   cannot honour rather than ignoring it. Mechanisms that need state the
   pipeline does not keep take the `aggregator_factory` exit.
-  [How to fill a slot →](https://thinkflowlab.github.io/agentdescent/policy-guide/)
+  [How to fill a slot →](https://agentdescent.hugoxk.online/policy-guide/)
 
 ## What it measures
 
 Every row names the setting that produced it; [the results
-page](https://thinkflowlab.github.io/agentdescent/results/) also reports the
+page](https://agentdescent.hugoxk.online/results/) also reports the
 runs where there was nothing left to learn.
 
 | | measured | setting |
@@ -256,15 +259,15 @@ Quality is claimed only where the design can support it: intervals rather than
 
 ## Documentation
 
-Full docs: **[thinkflowlab.github.io/agentdescent](https://thinkflowlab.github.io/agentdescent/)**.
+Full docs: **[agentdescent.hugoxk.online](https://agentdescent.hugoxk.online/)**.
 
 | | |
 |---|---|
-| **Start** | [Install](https://thinkflowlab.github.io/agentdescent/install/) · [The plugin, step by step](https://thinkflowlab.github.io/agentdescent/plugin-quickstart/) · [Quickstart — dataset to skill](https://thinkflowlab.github.io/agentdescent/quickstart-skill/) · [Evolve a directory](https://thinkflowlab.github.io/agentdescent/quickstart-directory/) · [Evolve agent code](https://thinkflowlab.github.io/agentdescent/quickstart-agent-code/) |
-| **Agents** | [Use it from your agent](https://thinkflowlab.github.io/agentdescent/plugins/) · [Set it up and test it](https://thinkflowlab.github.io/agentdescent/testing-guide/) · [Agents & LLMs](https://thinkflowlab.github.io/agentdescent/agents/) |
-| **Algorithms** | [Named algorithms](https://thinkflowlab.github.io/agentdescent/algorithms/) · [Register a card](https://thinkflowlab.github.io/agentdescent/algorithm-authoring/) · [Twenty-three ports](https://thinkflowlab.github.io/agentdescent/self-evolution-examples/) · [Port fidelity](https://thinkflowlab.github.io/agentdescent/port-fidelity/) |
-| **Engine** | [The `evolve()` method](https://thinkflowlab.github.io/agentdescent/evolution/) · [Strategies](https://thinkflowlab.github.io/agentdescent/strategies/) · [Policies](https://thinkflowlab.github.io/agentdescent/policies/) · [Architecture](https://thinkflowlab.github.io/agentdescent/architecture/) · [Concepts](https://thinkflowlab.github.io/agentdescent/concepts/) · [API reference](https://thinkflowlab.github.io/agentdescent/api/) |
-| **Results** | [Measured results](https://thinkflowlab.github.io/agentdescent/results/) · [Efficiency](https://thinkflowlab.github.io/agentdescent/efficiency/) · [Runtime matrix](https://thinkflowlab.github.io/agentdescent/matrix-overview/) |
+| **Start** | [Install](https://agentdescent.hugoxk.online/install/) · [The plugin, step by step](https://agentdescent.hugoxk.online/plugin-quickstart/) · [Quickstart — dataset to skill](https://agentdescent.hugoxk.online/quickstart-skill/) · [Evolve a directory](https://agentdescent.hugoxk.online/quickstart-directory/) · [Evolve agent code](https://agentdescent.hugoxk.online/quickstart-agent-code/) |
+| **Agents** | [Use it from your agent](https://agentdescent.hugoxk.online/plugins/) · [Set it up and test it](https://agentdescent.hugoxk.online/testing-guide/) · [Agents & LLMs](https://agentdescent.hugoxk.online/agents/) |
+| **Algorithms** | [Named algorithms](https://agentdescent.hugoxk.online/algorithms/) · [Register a card](https://agentdescent.hugoxk.online/algorithm-authoring/) · [Twenty-three ports](https://agentdescent.hugoxk.online/self-evolution-examples/) · [Port fidelity](https://agentdescent.hugoxk.online/port-fidelity/) |
+| **Engine** | [The `evolve()` method](https://agentdescent.hugoxk.online/evolution/) · [Strategies](https://agentdescent.hugoxk.online/strategies/) · [Policies](https://agentdescent.hugoxk.online/policies/) · [Architecture](https://agentdescent.hugoxk.online/architecture/) · [Concepts](https://agentdescent.hugoxk.online/concepts/) · [API reference](https://agentdescent.hugoxk.online/api/) |
+| **Results** | [Measured results](https://agentdescent.hugoxk.online/results/) · [Efficiency](https://agentdescent.hugoxk.online/efficiency/) · [Runtime matrix](https://agentdescent.hugoxk.online/matrix-overview/) |
 
 ## Citing, scope and contributing
 

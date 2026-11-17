@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://agentdescent.hugoxk.online/sitemap.xml
